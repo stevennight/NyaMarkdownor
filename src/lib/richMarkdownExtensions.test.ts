@@ -376,6 +376,30 @@ describe("rich Markdown extensions", () => {
     expect(markdown.serialize(parsed)).toBe("3) edited alpha\n4) beta");
   });
 
+  it("keeps aligned continuation lines inside one ordered list item", () => {
+    const source = [
+      "1. aaa",
+      "   bbb",
+      "   ccc",
+      "2. ddd",
+      "   eee"
+    ].join("\n");
+
+    expect(markdown.serialize(markdown.parse(source))).toBe(source);
+  });
+
+  it("aligns multiline content with wider ordered and bullet-list markers", () => {
+    const source = [
+      "10. aaa",
+      "    bbb",
+      "",
+      "- item",
+      "  continued"
+    ].join("\n");
+
+    expect(markdown.serialize(markdown.parse(source))).toBe(source);
+  });
+
   it("preserves loose bullet and ordered list spacing after item edits", () => {
     const source = [
       "- alpha",

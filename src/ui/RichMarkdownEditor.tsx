@@ -24,6 +24,7 @@ import { splitMarkdownFrontMatter, withMarkdownFrontMatter } from "../lib/markdo
 import { shouldHandleSmartCopy } from "../lib/selectionCopy";
 import { richTableStructureTransaction, type RichTableStructureCommand } from "../lib/richTableStructure";
 import { createRichMarkdownExtensions } from "../lib/richMarkdownExtensions";
+import { withoutGeneratedTrailingParagraph } from "../lib/richMarkdownDocument";
 
 type RichTableCommand = Extract<
   TableDocumentCommand,
@@ -203,7 +204,9 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
       const source = pendingHistoryActionRef.current;
       pendingHistoryActionRef.current = "input";
       markdownSyncRef.current?.schedule(
-        () => currentEditor.getMarkdown(),
+        () => currentEditor.markdown?.serialize(
+          withoutGeneratedTrailingParagraph(currentEditor.getJSON())
+        ) ?? currentEditor.getMarkdown(),
         source,
         richMarkdownSyncDelayFor(currentEditor.state.doc.content.size)
       );

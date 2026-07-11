@@ -180,6 +180,27 @@ export function applyMarkdownLineContinuation(markdown: string, selection: TextR
   };
 }
 
+export function applyMarkdownListItemLineBreak(markdown: string, selection: TextRange): TextEdit | null {
+  const from = Math.max(0, Math.min(selection.from, selection.to, markdown.length));
+  const to = Math.max(from, Math.min(Math.max(selection.from, selection.to), markdown.length));
+  const lineStart = lineStartAt(markdown, from);
+  if (lineStartAt(markdown, to) !== lineStart) return null;
+
+  const lineEnd = lineEndAt(markdown, to);
+  const line = markdown.slice(lineStart, lineEnd);
+  const context = listItemContinuationContext(markdown, lineStart, line);
+  if (!context || from - lineStart < context.contentStart) return null;
+
+  const insert = `\n${context.prefix}`;
+  const change = { from, to, insert };
+  const caret = from + insert.length;
+  return {
+    markdown: applyTextChange(markdown, change),
+    change,
+    selection: { from: caret, to: caret }
+  };
+}
+
 export function applyMarkdownListIndentation(
   markdown: string,
   selection: TextRange,
@@ -514,6 +535,57 @@ function parseListLine(line: string): ListLineInfo | null {
     markerTo: indentTo + markerMatch[0].length,
     contentStart: indentTo + markerMatch[0].length
   };
+}
+
+function listItemContinuationContext(
+  markdown: string,
+  lineStart: number,
+  line: string
+): { prefix: string; contentStart: number } | null {
+  const currentListLine = parseListLine(line);
+  if (currentListLine) {
+    return {
+      prefix: listItemContinuationPrefix(line, currentListLine),
+      contentStart: currentListLine.contentStart
+    };
+  }
+
+  const currentPrefix = continuationLinePrefix(line);
+  if (!currentPrefix) return null;
+
+  let scanStart = lineStart;
+  while (scanStart > 0) {
+    const previousEnd = scanStart - 1;
+    const previousStart = lineStartAt(markdown, Math.max(0, previousEnd - 1));
+    const previousLine = markdown.slice(previousStart, previousEnd);
+    const previousListLine = parseListLine(previousLine);
+    if (previousListLine) {
+      return listItemContinuationPrefix(previousLine, previousListLine) === currentPrefix
+        ? { prefix: currentPrefix, contentStart: currentPrefix.length }
+        : null;
+    }
+
+    if (previousLine.trim()) {
+      const previousPrefix = continuationLinePrefix(previousLine);
+      if (previousPrefix !== currentPrefix) return null;
+    }
+    scanStart = previousStart;
+  }
+
+  return null;
+}
+
+function listItemContinuationPrefix(line: string, info: ListLineInfo): string {
+  const marker = line.slice(info.markerFrom, info.markerTo);
+  const taskListMarker = /^[-+*][ \t]+/.exec(marker);
+  const markerWidth = taskListMarker?.[0].length ?? info.contentStart - info.indentTo;
+  return `${line.slice(0, info.indentTo)}${" ".repeat(markerWidth)}`;
+}
+
+function continuationLinePrefix(line: string): string | null {
+  const quotePrefix = /^[ \t]*(?:>[ \t]*)+/.exec(line)?.[0];
+  if (quotePrefix) return quotePrefix;
+  return /^[ \t]+/.exec(line)?.[0] ?? null;
 }
 
 function parseBlockquoteLine(line: string): BlockquoteLineInfo | null {

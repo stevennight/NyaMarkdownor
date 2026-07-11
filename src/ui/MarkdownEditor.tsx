@@ -15,7 +15,7 @@ import {
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
-import { applyMarkdownBlockquoteBackspace, applyMarkdownLineContinuation, applyMarkdownListBackspace, applyMarkdownListIndentation, applyMarkdownTextCommand, applyTextChange, type MarkdownTextCommand, type TextEdit } from "../lib/editorCommands";
+import { applyMarkdownBlockquoteBackspace, applyMarkdownLineContinuation, applyMarkdownListBackspace, applyMarkdownListIndentation, applyMarkdownListItemLineBreak, applyMarkdownTextCommand, applyTextChange, type MarkdownTextCommand, type TextEdit } from "../lib/editorCommands";
 import { markdownRangesToClipboardPayload } from "../lib/markdown";
 import { applySelectedTableCellsClear, applySelectedTableCellsPaste, applyTableCellLineBreak, applyTableCellNavigation, applyTableCsvPaste, applyTableDocumentCommand, applyTableRowsPaste, applyTableTsvPaste, type TableDocumentCommand } from "../lib/tableDocumentCommands";
 import { clipboardRowsForTablePaste, type ClipboardTableSource } from "../lib/clipboardTableRows";
@@ -241,6 +241,7 @@ function createEditorExtensions({
     syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
     keymap.of([
       { key: "Shift-Enter", run: insertTableCellLineBreak },
+      { key: "Shift-Enter", run: insertMarkdownListItemLineBreak },
       { key: "Alt-Enter", run: insertTableCellLineBreak },
       { key: "Tab", run: moveTableCell(false) },
       { key: "Shift-Tab", run: moveTableCell(true) },
@@ -507,6 +508,15 @@ function addTableRowFromEnter(view: EditorView): boolean {
 function continueMarkdownLine(view: EditorView): boolean {
   const range = view.state.selection.main;
   const edit = applyMarkdownLineContinuation(view.state.doc.toString(), { from: range.from, to: range.to });
+  if (!edit) return false;
+
+  dispatchTextEdit(view, edit);
+  return true;
+}
+
+function insertMarkdownListItemLineBreak(view: EditorView): boolean {
+  const range = view.state.selection.main;
+  const edit = applyMarkdownListItemLineBreak(view.state.doc.toString(), { from: range.from, to: range.to });
   if (!edit) return false;
 
   dispatchTextEdit(view, edit);

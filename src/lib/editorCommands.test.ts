@@ -3,6 +3,7 @@ import {
   applyMarkdownBlockquoteBackspace,
   applyMarkdownBlockCommand,
   applyMarkdownLineContinuation,
+  applyMarkdownListItemLineBreak,
   applyMarkdownListBackspace,
   applyMarkdownListIndentation,
   applyMarkdownTextCommand,
@@ -64,6 +65,48 @@ describe("Markdown text commands", () => {
       change: { from: 8, to: 8, insert: "\n10. " },
       selection: { from: 13, to: 13 }
     });
+  });
+
+  it("inserts an aligned continuation line inside an ordered list item", () => {
+    expect(applyMarkdownListItemLineBreak("1. aaa", { from: 6, to: 6 })).toEqual({
+      markdown: "1. aaa\n   ",
+      change: { from: 6, to: 6, insert: "\n   " },
+      selection: { from: 10, to: 10 }
+    });
+  });
+
+  it("keeps subsequent continuation lines aligned with their list item", () => {
+    const source = "1. aaa\n   bbb";
+
+    expect(applyMarkdownListItemLineBreak(source, { from: source.length, to: source.length })?.markdown)
+      .toBe("1. aaa\n   bbb\n   ");
+  });
+
+  it("uses semantic continuation indentation for wider ordered and task-list markers", () => {
+    expect(applyMarkdownListItemLineBreak("10. aaa", { from: 7, to: 7 })?.markdown)
+      .toBe("10. aaa\n    ");
+    expect(applyMarkdownListItemLineBreak("- [ ] aaa", { from: 9, to: 9 })?.markdown)
+      .toBe("- [ ] aaa\n  ");
+  });
+
+  it("keeps continuation lines aligned inside nested and quoted list items", () => {
+    expect(applyMarkdownListItemLineBreak("  3) aaa", { from: 8, to: 8 })?.markdown)
+      .toBe("  3) aaa\n     ");
+    expect(applyMarkdownListItemLineBreak("> 1. aaa", { from: 8, to: 8 })?.markdown)
+      .toBe("> 1. aaa\n>    ");
+  });
+
+  it("replaces a same-line selection when inserting a list-item line break", () => {
+    expect(applyMarkdownListItemLineBreak("1. aaa", { from: 3, to: 6 })).toEqual({
+      markdown: "1. \n   ",
+      change: { from: 3, to: 6, insert: "\n   " },
+      selection: { from: 7, to: 7 }
+    });
+  });
+
+  it("does not treat unrelated indented text as a list continuation", () => {
+    expect(applyMarkdownListItemLineBreak("   aaa", { from: 6, to: 6 })).toBeNull();
+    expect(applyMarkdownListItemLineBreak("1. aaa\n   bbb", { from: 3, to: 12 })).toBeNull();
   });
 
   it("renumbers following ordered list items after continuing a list", () => {

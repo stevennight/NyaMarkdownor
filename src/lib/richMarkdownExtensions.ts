@@ -1,4 +1,4 @@
-import { mergeAttributes, Node, renderNestedMarkdownContent, type AnyExtension, type MarkdownToken } from "@tiptap/core";
+import { mergeAttributes, Node, type AnyExtension, type JSONContent, type MarkdownToken } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import Bold from "@tiptap/extension-bold";
 import Code from "@tiptap/extension-code";
@@ -43,6 +43,12 @@ type LinkMarkdownToken = MarkdownToken & {
   text?: string;
   title?: string | null;
   tokens?: MarkdownToken[];
+};
+
+type MarkdownRenderHelpers = {
+  renderChildren: (nodes: JSONContent[]) => string;
+  renderChild?: (node: JSONContent, index: number) => string;
+  indent: (text: string) => string;
 };
 
 type ReferenceDefinitionToken = MarkdownToken & {
@@ -289,10 +295,8 @@ const RichOrderedList = OrderedList.extend({
 });
 
 const RichListItem = ListItem.extend({
-  renderMarkdown: (node, helpers, context) => renderNestedMarkdownContent(
-    node,
-    helpers,
-    (itemContext: any) => {
+  renderMarkdown: (node, helpers, context) => {
+    const prefix = ((itemContext: any) => {
       if (itemContext.parentType === "bulletList") {
         return `${safeBulletListMarker(itemContext.meta?.parentAttrs?.markdownMarker)} `;
       }
@@ -304,10 +308,51 @@ const RichListItem = ListItem.extend({
         return getListMarker(type, index, `${delimiter} `);
       }
       return "- ";
-    },
-    context
-  )
+    })(context);
+    // Tiptap retains one marker-relative space on parsed ordered-list soft breaks.
+    return renderListItemMarkdown(
+      node,
+      helpers,
+      prefix,
+      context.parentType === "orderedList" ? 1 : 0
+    );
+  }
 });
+
+function renderListItemMarkdown(
+  node: JSONContent,
+  helpers: MarkdownRenderHelpers,
+  prefix: string,
+  parsedContinuationIndent = 0
+): string {
+  if (!Array.isArray(node.content)) return "";
+
+  const [content, ...children] = node.content;
+  const mainContent = content ? helpers.renderChildren([content]) : "";
+  const continuationIndent = " ".repeat(prefix.length);
+  const indentedMainContent = mainContent
+    .split("\n")
+    .map((line, index) => {
+      if (index === 0) return line;
+      const removableIndent = Math.min(parsedContinuationIndent, line.search(/\S|$/));
+      return `${continuationIndent}${line.slice(removableIndent)}`;
+    })
+    .join("\n");
+  let output = `${prefix}${indentedMainContent}`;
+
+  children.forEach((child, index) => {
+    const childContent = helpers.renderChild?.(child, index + 1) ?? helpers.renderChildren([child]);
+    if (childContent == null) return;
+
+    const indentedChild = childContent
+      .split("\n")
+      .map((line) => helpers.indent(line))
+      .join("\n");
+    output += child.type === "paragraph" ? `\n\n${indentedChild}` : `\n${indentedChild}`;
+  });
+
+  return output;
+}
 
 const RichTaskList = TaskList.extend({
   parseMarkdown: (token, helpers) => {
@@ -345,10 +390,10 @@ const RichTaskItem = TaskItem.extend({
     };
   },
 
-  renderMarkdown: (node, helpers, context) => {
+  renderMarkdown: (node, helpers) => {
     const marker = safeTaskListMarker(node.attrs?.markdownMarker);
     const checked = node.attrs?.checked ? safeTaskCheckedMarker(node.attrs?.markdownCheckedMarker) : " ";
-    return renderNestedMarkdownContent(node, helpers, `${marker} [${checked}] `, context);
+    return renderListItemMarkdown(node, helpers, `${marker} [${checked}] `);
   }
 });
 
