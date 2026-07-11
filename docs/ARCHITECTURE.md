@@ -1,0 +1,145 @@
+# NyaMarkdownor Architecture
+
+## Product Target
+
+NyaMarkdownor is a local-first Markdown desktop editor. The goal is a polished, cross-platform product that can match Typora's everyday writing smoothness while surpassing it in table editing, selection/copy behavior, local file safety, and performance on long documents.
+
+Modern visual quality is a product requirement, not decoration. The app should feel like a current native desktop tool: dense enough for real work, calm enough for long writing sessions, and fast enough that editing never feels detached from input.
+
+## Stack Decision
+
+- Desktop shell: Tauri 2.
+- Native layer: Rust commands for local file IO and future export/indexing work.
+- Frontend: React plus TypeScript on Vite.
+- Editor engine: CodeMirror 6 for the canonical source editor.
+- Markdown preview: markdown-it with HTML disabled by default.
+- UI: custom CSS with lucide-react icons.
+
+## Why This Stack
+
+Tauri keeps the packaged app lighter than Electron while still allowing a web-quality UI. Rust gives us a safe native layer for file IO, export pipelines, indexing, and future performance-sensitive features. CodeMirror 6 is the right base for large text editing because it is incremental, extensible, and built for source documents rather than contenteditable tricks.
+
+The desktop development path is part of the product surface, not an afterthought: Vite uses a strict local port that matches Tauri's `devUrl`, so the app opens the same frontend during desktop development instead of drifting into a browser-only workflow.
+
+Code block language highlighting must be loaded on demand. Pulling every language into the main bundle is explicitly rejected because it hurts startup time, memory, and package size.
+
+The long-term editor model is hybrid:
+
+- Canonical data is always clean Markdown text.
+- Source mode is powered by CodeMirror.
+- Preview mode is sanitized rendered Markdown.
+- Live-edit mode can be layered later on top of a structured editor, but it must round-trip to clean Markdown before it becomes default.
+
+This avoids the classic WYSIWYG trap where the editor feels nice but corrupts Markdown or loses syntax fidelity.
+
+## Non-Negotiables
+
+- Local files stay local.
+- No account, sync, telemetry, remote rendering, or hidden service dependency.
+- HTML in Markdown is disabled until a deliberate sandbox policy exists.
+- External links and images must remain controllable.
+- Desktop folder workspaces are local-only: folder scanning is done by the native layer, skips known heavy/generated folders, has a bounded file count so opening a large project does not stall editing, and file filtering is done in memory from the already scanned list. The sidebar must render only a bounded visible slice of matching files while reporting total matches, keeping large folders from turning into a persistent DOM load.
+- Workspace browsing supports both path order and recent-first order from the already scanned file metadata, so moving between current notes does not require new filesystem probes.
+- Workspace files are exposed through quick-open command palette entries that stay hidden until the user searches, keeping command discovery fast even when a folder contains hundreds of notes.
+- Dropped local paths follow the same desktop IO boundaries as dialogs: Markdown/text files open as document tabs through Rust file reads, local image drops insert document-relative Markdown references into already saved documents without copying or uploading assets, and folder drops reuse the bounded workspace scanner rather than asking the WebView to own filesystem access. Toolbar and command-palette image insertion use the native image picker but share the same reference-building path as drag-and-drop so asset handling stays predictable.
+- Recent document history is a local convenience list, not state ownership: entries can be reopened from the sidebar or command palette and forgotten from the sidebar without deleting or mutating the underlying Markdown file.
+- Command palette interaction should feel like a desktop editor: keyboard navigation skips disabled commands, search ranking prioritizes currently executable matches while keeping disabled matches discoverable, wraps predictably, keeps the active command scrolled into view, and uses fuzzy scoring for commands, recent files, and workspace file quick-open queries so users can type memorable fragments instead of exact substrings. The command list, recent-file entries, and workspace quick-open entries should be built only while the palette is open, and visible results should stay bounded so opening a large folder does not add steady-state work to ordinary typing.
+- Copy behavior must be explicit: Markdown copy and clean text copy are separate operations, with smart source-copy available. Smart source-copy is context-aware so table row and cell selections produce clean table/plain/HTML payloads while direct row, column, and table copy actions provide structured table clipboard data.
+- Clean-copy stripping must be conservative around technical text. Intraword underscores and other identifier-like text are literal content, not emphasis markers, so variable names, file names, and code-adjacent prose must survive clean copy unchanged. Reference-style links, images, and reference definition lines are Markdown plumbing and should not leak into clean copied text.
+- Explicit copy commands must read the editor's full selection set, not only the primary range, so multi-selection workflows such as table-column selection behave the same from keyboard copy, toolbar buttons, and the command palette. Rich-copy buttons must use the same Markdown-aware clipboard payload builder as keyboard smart copy rather than delegating to browser DOM selection.
+- Status surfaces must report the cursor's source line/column and read the full selection set and table shape, so the UI does not under-report table-column, body, rectangular, or sparse cell selections as a single primary range or generic text selection.
+- Markdown-aware clipboard payloads for table selections should remain structurally valid: `text/plain` is clean TSV-like text, `text/html` is a real table, and `text/markdown` is a small Markdown table fragment rather than a naked pipe row or cell.
+- Rich HTML clipboard tables should preserve Markdown column alignment through simple inline `text-align` styles, while plain text and CSV remain data-oriented.
+- Serialized table cell line breaks should remain interoperable across clipboard formats: TSV-like plain text uses spaces to preserve row shape, CSV uses real quoted newlines, and HTML/Markdown retain visible breaks.
+- Partial text selections inside table cells are not table selections. They must copy the literal selected text, while exact whole-cell content selections, full-cell, row, column, body, and table selections keep the structured clipboard path.
+- Users must also have explicit table-aware Markdown-table copy commands for selected cells, current rows, columns, headers, bodies, and whole tables, because raw Markdown copy should remain literal source copy while table-aware Markdown export should produce a valid, shaped table fragment on demand.
+- Table clipboard handling must preserve the user's actual selection shape. Sparse multi-cell selections serialize as a rectangular clipboard shape with blank cells for unselected neighbors rather than silently copying adjacent table content.
+- Spreadsheet interop should not depend on rich clipboard support. Explicit TSV and CSV copy commands are available for selected table cells, current table rows, columns, headers, bodies, and whole tables. They escape data correctly, strip Markdown presentation, and treat empty selected cells as valid clipboard output instead of a failed copy.
+- Table-only export commands should be enabled only for structured table selections, not for ordinary text selections that merely happen to sit inside a table cell.
+- Outline and clean-copy extraction must support common Markdown heading forms, including ATX and Setext headings, while respecting fenced and indented code blocks so code samples do not become false headings, tables, lists, or task items.
+- Source selections should not make softened Markdown markers visually louder; selection must stay readable while copy retains Markdown fidelity.
+- Source syntax softening should not treat fenced, indented, or inline code contents as Markdown. Code examples must keep their literal pipes, brackets, links, and emphasis characters visually stable while the surrounding Markdown can still be softened. Table pipe softening should apply only to real Markdown table rows, not ordinary prose that contains a pipe character. Link destinations and reference labels are syntax rather than prose, so selected links should not become visually dominated by raw URL plumbing.
+- Rendered preview copy must be owned by the app, not by browser defaults: selections are clipped to preview content, task-list controls are stripped from HTML, and plain text stays clean so preview copying is predictable without exposing the app shell.
+- Table selection must provide deliberate cell, row, column, and whole-table actions so the user does not have to drag through pipe syntax to get predictable copy targets.
+- Rendered preview tables should remain readable as data, not just raw Markdown output: table chrome can use CSS-only header contrast, row striping, hover states, and horizontal scroll affordances, but it must not add React-managed table measurement or per-cell runtime work.
+- Empty table cells still need visible, non-zero source selections that avoid pipe delimiters, because a zero-width cursor cannot prove table intent for later copy, paste, or clear commands.
+- Table selection shortcuts must be context-aware: they should fire only when the matching table target exists, keeping ordinary source editing and OS/browser shortcuts unclaimed outside tables.
+- Row, column, and whole-table content selection actions should prefer cell-range selections over raw source-line selections, because the visible selection should match the table content the user means to operate on while preserving structured copy, paste, and clear behavior.
+- Table header, body, and column-body selection/copy commands should be first-class because spreadsheet workflows often need labels or data cells separately while Markdown exports still need valid table structure.
+- Removing a full table should be a deliberate structured command rather than relying on selecting raw Markdown syntax and pressing Delete.
+- Find and replace are editor-native commands that operate on canonical Markdown source, decorate all matches in CodeMirror, and drive the active selection directly.
+- Common Markdown writing flow must feel native: Enter should continue lists, task lists, and blockquotes while still letting empty items exit the structure cleanly.
+- Outline navigation should stay connected to the writing cursor: the active heading is derived from the canonical source position and highlighted in the sidebar so long-document movement has constant location feedback.
+- Sidebar visibility is a local preference, not document state. Users should be able to hide the outline/workspace pane from chrome, settings, keyboard, or command palette to reclaim width for focused editing while keeping open folders and recent files intact.
+- The editor is multi-document: creating a new local file, opening one or many files from dialogs, recent files, or the workspace should create or focus document tabs instead of replacing user-owned buffers. Multi-file open should be best-effort: readable files open, failed files are counted in the user-facing result, and one bad file must not cancel the whole batch. The primary New File action should bind the tab to a real saved Markdown path through a create-new-only local file command, not through the overwrite-capable save pipeline; unbound draft tabs are still available as an explicit scratch command, not the default file-creation path. Clean blank or bundled-sample placeholder drafts are the exception: opening a real file should reuse that disposable tab so first-open and quick-open flows do not leave meaningless Untitled tabs behind. The open-tab session is part of recovery state, so restart restores the tab set and active tab before autosave resumes. Each tab owns an isolated runtime CodeMirror snapshot, including selection and undo/redo history, so editing commands cannot leak across documents. Recovery code must distinguish the active tab id from the tab id that owns the currently mounted editor view, because React can briefly hold the previous editor instance while a tab switch is being committed. Keyboard navigation is first-class: users can cycle tabs, jump directly to a tab, switch through command-palette tab entries, or move tabs left/right without reaching for the mouse, visible editor tabs return focus to the source editor after document activation so typing can resume immediately, and selected tabs should scroll into the tabstrip viewport when activated from non-pointer flows. Pointer users can drag tabs to reorder them, and that visual order is the session order that gets persisted. Dirty tabs must remain visible and close through the same local recovery-snapshot safety path as other destructive editor actions; batch close commands for other, right-side, saved, or all tabs preserve recovery snapshots for every dirty document they close.
+- View modes must stay meaningful at narrow window sizes. Split view may collapse to the source editor when there is not enough width, but explicit preview mode still needs to show the rendered preview instead of inheriting the collapsed split-view hiding rules.
+- Desktop chrome is part of the editor state: the browser and native window title should show the active document, mark the active document when dirty, and include a multi-tab unsaved count when background tabs are dirty.
+- Accidental tab closes should be reversible during the current session. Reopening a closed tab restores the document, tab-local editor snapshot, and dirty content that was already protected by the local recovery path.
+- Unsaved document names are display affordances, not file identity. Untitled drafts may derive temporary tab titles and save suggestions from Markdown content, but the canonical document state remains path-null until the user saves through local file IO.
+- Formatting commands should operate on canonical Markdown text, not rendered DOM. Inline and block commands share local text-edit plumbing so toolbar actions, keyboard handling, and command palette operations stay consistent.
+- Preview interactions that change content, such as task checkbox toggles, must patch canonical Markdown source through scoped text edits rather than treating preview HTML as editable state. Task toggles must also work inside blockquotes because markdown-it still renders those task inputs from source lines.
+- Preview asset handling is local-first: relative image sources are resolved against the current Markdown file folder in the main UI layer, then converted through Tauri's local asset URL path in desktop builds. Remote, data, blob, asset, and other protocol URLs are not rewritten. Dragged local image files are represented as relative Markdown paths only after the document has a saved local path, keeping the Markdown file portable without granting the WebView broader filesystem ownership.
+- Preview navigation should support local writing workflows without letting preview content take over the editor surface: document-relative links to Markdown/text files are intercepted in the preview and opened through the same local file IO path as workspace/recent files, creating or focusing document tabs instead of navigating the WebView away from the editor. Unsaved drafts cannot resolve relative links and should be prompted to save first. Heading anchors scroll within the preview, and author-friendly anchors with spaces should fall back to the same generated heading slug used by rendered headings. Ordinary clicks on external links are intercepted, and only explicit Ctrl/Cmd-clicks open web links outside the editor surface.
+- Saved local paths are part of the workflow surface: users should be able to copy the current document path or reveal it in the system file manager directly from the header or command palette without opening a native dialog first.
+- Export features stay local. HTML export uses the same sanitized Markdown renderer, writes through the native layer in the desktop app, and produces a self-contained, print-friendly file without remote rendering or upload.
+- Table editing must be structured, not just text alignment: table creation needs explicit dimensions, and rows and columns need first-class insert, delete, duplicate, move, sort, align, paste, and copy operations.
+- Table creation should preserve useful selected content. When the Insert Table command runs over selected TSV, CSV, or Markdown table source, it should convert that selection into a normalized Markdown table instead of replacing it with a blank template.
+- Table rebuilds, selections, and clipboard exports must use the same source-cell boundary logic and calculate source alignment from escaped cell text, not raw cell text, so pipe-light rows and values containing pipes, escaped trailing pipes, or serialized line breaks do not make normalized tables visually ragged or copy the wrong cells.
+- Serialized table cell line breaks use a narrow safe `<br>` rendering path; broader raw HTML remains disabled so preview safety is not traded away for table readability.
+- Table tools should be contextual: ordinary writing should not lose toolbar width, editor space, or pane width to inactive table controls. When the cursor or structural selection is inside a table, the in-editor floating bar should stay limited to common selection, insert, align, and copy actions, while the toolbar and Table Inspector expose row and column operations at the target row or column itself, including insertion before and after the target, not only through cursor-relative commands, so larger tables remain editable without hand-positioning the source cursor for every action.
+- Table sorting should compare clean cell values rather than raw Markdown source. Numeric and date-like values are sorted by value with invalid or empty cells kept after sortable rows, while ordinary text keeps natural locale-aware ordering.
+- The Table Inspector must remain usable on larger tables: the grid scrolls inside the inspector, column headers stay visible, and row action controls stay pinned while horizontal scrolling.
+- The active source cursor position must be visible in the inspector through row, column, and cell highlighting, so structured controls do not feel detached from the Markdown source.
+- Focusing an inspector cell should synchronize the canonical source selection to that cell before any edit occurs, ensuring toolbar actions, keyboard commands, and clipboard operations target the visible inspector focus.
+- Inspector cell edits must also move the canonical source selection to the edited cell, keeping later keyboard table commands and visual active-cell feedback aligned with the user's last structured edit.
+- Pasting structured clipboard data into the Table Inspector should use the same table-row detection as source paste, filling from the focused inspector cell and expanding the model instead of treating spreadsheet data as one input value.
+- Multi-line table cell editing should have an explicit keyboard path. `Alt+Enter` serializes a cell break as `<br>` in source and inspector editing while keeping raw HTML disabled outside the narrow table-cell break path.
+- Inspector cell inputs should support spreadsheet-like keyboard movement, including Tab/Shift+Tab across cells, Enter or Up/Down through rows, and row growth from the final cell while keeping source selection synchronized.
+- Table inspector actions must resolve their target from the live CodeMirror document and selection before replacing Markdown ranges; rendered table metadata can guide the UI, but it must not be trusted as the source offset after recent edits.
+- Table keyboard flow should feel spreadsheet-like where Markdown allows it: Tab/Shift+Tab moves between cells, forward tabbing from the final cell appends a row, and shortcuts can insert rows above/below or columns left/right from the active cell.
+- Table detection must respect fenced and indented code blocks. Pipe-heavy examples inside backtick fences, tilde fences, or indented code are code, not editable tables, and table commands must leave them alone.
+- Deleting multi-selected table cells should clear their contents rather than deleting raw Markdown delimiters and corrupting the table.
+- Cutting selected table cells should copy structured table clipboard payloads and then clear cell contents through the same safe table-edit path. Partial text selections inside cells stay ordinary source cuts.
+- Pasting spreadsheet TSV, obvious CSV tables, rich HTML tables, `text/markdown` table payloads, Markdown table source, or newline-separated one-column text inside an existing table should fill from the active cell and expand rows or columns instead of inserting a nested/raw table dump. Source editing and the Table Inspector should share the same clipboard row detection so their paste behavior does not diverge. Rich HTML table paste should preserve common row and column spans as repeated grid values, preserve cell breaks as Markdown table `<br>` breaks, and avoid reading nested table cells as part of the outer row. When table cells are selected, scalar plain text should fill the selected cells directly, exact-fit grids should replace the selected shape, and oversized grids should expand from the selected range's top-left cell instead of being truncated. Markdown table paste detection must skip fenced and indented code examples.
+- Overwrite saves must preserve local recovery points before replacing user files.
+
+## Performance Direction
+
+- The source editor must remain responsive on long documents.
+- Preview rendering is debounced and skipped when hidden; later it should become viewport/incremental for very large files.
+- Very large documents switch preview into an explicit snapshot mode: outline extraction still runs in the worker on a slower cadence, but full preview HTML is rendered only when the user asks for an update, and stale manual snapshots are not re-rendered on every edit. Manual preview snapshots are tab-scoped and refreshed from the live editor state rather than possibly stale React document props, so switching documents does not throw away an up-to-date large-file preview.
+- Hidden or paused preview states must send an empty preview payload to the worker so outline updates do not accidentally pay preview-render costs.
+- Worker scheduling should distinguish outline freshness from preview freshness: if the preview snapshot is already current, outline-only requests must preserve the existing preview HTML instead of re-rendering it.
+- Markdown preview and outline extraction run in a Web Worker so typing is not blocked by full-document parsing.
+- Split-view scroll sync is done imperatively with refs and requestAnimationFrame so ordinary scrolling does not trigger React render loops.
+- Status metrics are computed in a single memoized pass, cursor line/column comes from CodeMirror's current document line instead of scanning the whole file on every cursor move, and find/replace match scanning is skipped while the find panel is closed so stale search queries do not tax every edit.
+- Table parsing is scoped around the cursor where possible, and table commands carry local text changes so CodeMirror can patch only the table range instead of replacing the whole document.
+- The shell should preserve a desktop-app feel: tabs, grouped icon toolbars, command palettes, dialogs, adjustable split panes, and pane chrome use stable dimensions and low-cost CSS effects rather than large React-managed layout work during typing or scrolling. Heavy table toolbar groups stay contextual so normal writing does not carry a row of disabled table controls. Pane resizing updates CSS variables while dragging and commits the resulting layout back into local preferences at the end of the interaction. Active-tab visibility sync depends only on the active tab id and tab order, and command-palette command construction is skipped while the palette is closed, so normal document edits do not schedule tabstrip DOM queries, scroll work, or large command-list rebuilds.
+- File IO belongs in Rust, not ad hoc browser APIs, once running inside Tauri.
+- Workspace folder scans belong in Rust and must remain bounded; the frontend receives a sorted list and renders it without per-file async probing.
+- Expensive features such as outline extraction, backlinks, export, and diagnostics should eventually move to workers or Rust commands.
+
+## File Safety Direction
+
+- Desktop saves go through Rust file IO.
+- Desktop reads decode UTF-8, UTF-8 BOM, and UTF-16 LE/BE BOM Markdown/text files before handing canonical Markdown text to the editor.
+- Existing files are copied into a sibling `.nyamarkdownor-backups` directory before overwrite.
+- Writes use a temporary file plus rollback rename so a failed save attempts to restore the previous file.
+- Save Copy As is intentionally non-binding: it writes a separate local Markdown file but does not change the current document path, saved baseline, or disk-change tracking for the active editor.
+- Save All is a multi-document workflow, not a blind loop: it saves dirty tabs sequentially, asks for paths for unsaved documents, preserves disk-change checks per file, and updates each tab's saved baseline to the exact content that was written so typing during an async save cannot be mislabeled as saved.
+- Backup retention is local and bounded per source file; no remote service or hidden sync is involved.
+- The sidebar exposes current-file recovery points so a backup can be restored into the editor before saving.
+- The editor also keeps bounded local draft snapshots for unsaved and dirty documents, so recovery does not depend on a single overwritten in-memory draft slot. It preserves a local recovery snapshot before destructive editor replacements such as closing a dirty tab, closing the desktop window, reloading from disk, or restoring a backup. Desktop window close requests are intercepted long enough to ask about dirty tabs and flush the open-tab session, active draft, and new dirty-tab snapshots before allowing the native close to continue. The recovery list prioritizes snapshots for the current document and lets the user remove stale local snapshots. Manual snapshots, reload-from-disk, backup restore, and snapshot restore read the current CodeMirror document before deciding whether content is dirty or worth preserving. In-memory tab-session refs update together with React tab state so immediate close/save/export/recovery paths do not see a stale tab order, active tab, or active editor text. In the desktop app, draft recovery and the full document-tab session are mirrored into native app-data JSON files with saved timestamps, then hydrated before autosaving starts so stale WebView storage does not overwrite a newer desktop recovery point. Storage quota or privacy-mode failures must not crash the editor; failed draft persistence degrades to an in-memory session recovery point and tells the user when a manual snapshot is not durable.
+- Desktop profile state follows the same local-first rule: preferences, recent files, and the last workspace root are mirrored to timestamped native app-data records, hydrated before autosave-style preference writes resume, and kept compatible with browser/localStorage development fallbacks. Closing a workspace persists an explicit null root so older app-data cannot silently reopen it.
+- The frontend tracks file modified time and size from the native layer so it can warn before saving over a file changed by another app. The user can open the current disk version as an unbound comparison tab before destructive reload/save decisions. Header and status surfaces must not claim backup or overwrite protection for pathless drafts.
+- Destructive local actions use in-app confirmation UI rather than blocking native/browser prompts, keeping the workflow testable and visually consistent.
+
+## Near-Term Milestones
+
+1. Tauri desktop shell runs locally.
+2. CodeMirror source editor reaches parity with the static prototype.
+3. Table inspector supports edit, insert, delete, sort, align, paste from spreadsheets, and TSV copy.
+4. Selection and copy behavior is reliable in source and preview.
+5. Modern light and dark themes are complete.
+6. External disk changes are detected before overwrite and can be opened as comparison tabs or reloaded from the command palette.
+7. Live-edit mode is prototyped only after Markdown round-trip tests exist.

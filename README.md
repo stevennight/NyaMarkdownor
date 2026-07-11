@@ -1,0 +1,130 @@
+# NyaMarkdownor
+
+NyaMarkdownor is a local-first Markdown desktop editor in progress. The target is a polished, modern, cross-platform app that can match Typora's day-to-day smoothness while going further on table editing, selection/copy behavior, local file safety, local workflows, and visual interaction quality.
+
+## Stack
+
+- Tauri 2 desktop shell.
+- React, TypeScript, and Vite for the frontend.
+- CodeMirror 6 for the source editor.
+- markdown-it for safe preview rendering with raw HTML disabled.
+- Rust commands for local file IO.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the product and architecture direction.
+
+## Development
+
+```bash
+npm install
+npm run dev
+```
+
+`npm run dev` launches the Tauri desktop app. That is the real local-file mode: native open/save dialogs, Rust file IO, create-new-only Markdown files, backups, recent files, and workspace folders. The browser-only Vite preview is available as `npm run web:dev`, but it is not the primary app runtime.
+
+In the browser preview, the UI is deliberately draft-only: New creates an unbound draft tab and Open is presented as Import Draft, so it never pretends to have a real disk path. Save/Save As download copies even on browsers that expose File System Access. Use the Tauri desktop app for path-backed local files, workspace folders, recent files, launch/open-with handling, backups, and disk-change safety.
+
+The frontend dev server is pinned to `http://127.0.0.1:8765` so Tauri and Vite use the same local endpoint.
+
+Run the frontend verification suite sequentially:
+
+```bash
+npm run verify
+```
+
+Desktop mode also needs the Rust toolchain and Tauri prerequisites:
+
+```bash
+npm run dev
+```
+
+Current focus:
+
+- High-performance Markdown source editing.
+- Modern light/dark visual baseline.
+- Soft Markdown syntax markers for a cleaner Typora-like editing surface.
+- Selection-aware syntax softening so selected text stays visually clean while copy still carries Markdown.
+- Built-in source find and replace with visible match highlights, match navigation, whole-word and case-sensitive modes.
+- Block formatting commands for headings, bullet lists, ordered lists, task lists, blockquotes, and fenced code blocks from the toolbar and command palette.
+- A Tiptap-based visual editor provides direct rich-text editing without turning the app into a remote service. Markdown front matter stays outside the rich document, Setext headings, closing ATX markers, and both hard-break forms survive unrelated visual edits. Inline links retain angle-bracket destinations, title quote style, and spacing while their target/title remains unchanged; URL/email autolinks and HTML entity-reference spellings also survive unrelated edits and safely fall back when their visible content changes. Inline and reference images retain their complete original syntax while their semantic attributes remain unchanged. Full reference links remain editable, while collapsed/shortcut references, footnotes, raw HTML, and reference definitions are shown as explicit protected nodes instead of being silently rewritten or executed.
+- Visual Markdown round-tripping also retains underscore/star emphasis choices, inline-code backtick runs and padding, tilde/backtick code fences and their info-string spacing, horizontal-rule styles, ordinary `-`/`+`/`*` bullet markers, tight/loose ordinary-list spacing, ordered-list start plus `.`/`)` delimiter choice, and each task item's `-`/`+`/`*` marker plus `x`/`X` checked style. Visual list spacing follows the same tight/loose distinction instead of rendering every item as a loose paragraph, while visual task lists use compact native checkboxes, stable nested indentation, and a restrained completed state. Code fences grow automatically if edited content would otherwise close them. Untouched tables up to 256 KiB keep their exact source layout and invalidate that cache on semantic cell/structure/alignment changes; column-resize metadata does not needlessly rewrite Markdown. Explicit nonsequential ordered-list item numbers may still be normalized by Tiptap's structural list parser, and larger tables favor bounded memory over storing a second full source copy.
+- Visual tables support native mouse range selection with clear selected-cell feedback, structural cell/row/column/table selection, structured copy and paste, compact contextual actions, and the same row/column/alignment/sort operations available from the main table menu. The floating actions show a compact selected-cell count while the status bar distinguishes a single cell, rectangular range, whole rows, whole columns, and the entire table with dimensions and actual cell count.
+- Undo and redo are available from the existing Format menu and command palette without adding another permanent toolbar group. Source mode uses CodeMirror history; visual mode uses Tiptap history with isolated per-tab Markdown snapshots as a remount fallback.
+- Markdown-aware Enter handling for smoother writing: unordered lists, ordered lists, task lists, blockquotes, and lists inside blockquotes continue automatically, with empty items exiting the structure cleanly.
+- Multi-tab editing: new local files, local draft tabs, and opened files live in document tabs, so workspace/recent-file navigation no longer has to replace the current editor buffer. The primary New File action creates a real saved Markdown file through a create-new-only local path instead of silently making an unbound draft or overwriting an existing file; a separate New Draft Tab command remains available for temporary scratch work. The Open dialog supports selecting multiple Markdown/text files at once, deduplicates selected paths with Windows slash/case normalization, opens the readable files as tabs, and reports partial failures instead of dropping the whole batch. Opening a real file from a clean blank or bundled-sample draft reuses that placeholder instead of leaving a stray Untitled tab behind. The full open-tab session is restored on restart, dirty tabs are marked inline, closing a dirty tab keeps a local recovery snapshot first, batch close commands can close other/right/saved/all tabs safely, each tab keeps an isolated runtime editor snapshot so undo/redo history does not leak across documents, keyboard navigation supports next/previous/direct tab switching, active tabs scroll into view when selected from keyboard or commands, and tabs can be reordered by drag or command-palette actions. Recovery and command paths track which tab owns the currently mounted CodeMirror view, so last-moment text cannot be merged into the wrong tab during rapid tab switches.
+- The browser and desktop window title follows the active document and unsaved tab count, so task switching still shows which note is open and whether the current or background tabs have unsaved changes.
+- Closed document tabs can be reopened with `Ctrl+Shift+T` or the command palette, restoring their local editor snapshot when available so accidental tab closes are reversible during the session.
+- Opening, switching, reopening, or closing into a document tab returns focus to the source editor when the editor is visible, so keyboard-first flows can continue typing immediately.
+- Untitled drafts derive temporary display/save suggestion names from their first Markdown heading or meaningful line, so multiple unsaved tabs are distinguishable without pretending they have a real file path.
+- Drag-and-drop opening: dropped Markdown/text files open directly as tabs, dropped folders become the active local workspace in the desktop app, and dropped local images insert document-relative Markdown image references without copying or uploading the asset.
+- Desktop launch/open-with flow: packaged builds declare supported document types so users can choose NyaMarkdownor as the system editor instead of the app silently taking over a default. Settings keeps Markdown and plain-text associations separate: Windows and macOS hand the final choice to their system controls, while Linux applies the selected MIME default for the current user. Any supported file paths passed to the app at startup, or sent by a second launch to the already-running app, open as real disk-backed tabs after recovery is restored.
+- Local image insertion is also available from the toolbar and command palette, using the same document-relative path rules as drag-and-drop so keyboard-first writing does not depend on pointer drops. If the current document is still an unbound draft, the desktop app asks for a real Markdown save path first and then inserts relative image references.
+- Task lists render as interactive preview checkboxes, including tasks nested inside blockquotes, and clicking a preview checkbox patches the source Markdown task marker locally.
+- Preview resolves document-relative local image paths against the current Markdown file folder in the desktop app, so `![alt](images/pic.png)` behaves like a local writing tool instead of a detached browser page.
+- Preview intercepts document-relative Markdown links and opens the linked local Markdown/text file in a document tab, preserving `#heading` fragments by jumping to the matching target heading after the file opens. Unsaved drafts prompt you to save before relative links can be resolved.
+- Preview links are editor-safe: headings render stable anchors for in-document jumps, author-friendly heading links such as `#My Heading` fall back to the generated heading slug, normal clicks cannot navigate the editor WebView away, and external links require Ctrl/Cmd-click to open separately.
+- Saved documents expose one-click and command-palette file-path copy plus reveal-in-folder actions, making it easy to hand the current local path to file managers, terminals, or other local tools.
+- The outline tracks the current source cursor section, highlighting the active heading as you move through long documents.
+- Outline and clean-copy extraction understand ATX and Setext headings while respecting fenced and indented code blocks, so preview headings stay aligned with navigation and table-like text inside code does not pollute navigation or clipboard output.
+- Softened source syntax also respects fenced, indented, and inline code content, so pipes, brackets, links, and emphasis characters inside examples remain readable code instead of looking like active Markdown/table controls. Table pipe markers are softened only for real Markdown table rows, not ordinary prose with a `|` character. Inline link destinations and reference labels are softened as syntax, keeping selected links visually closer to the clean text that smart copy places on the clipboard.
+- Table detection, configurable table insertion, contextual table toolbars, normalization, row/column editing, row/column duplication and movement, column sorting, and a side grid inspector.
+- Insert Table converts selected TSV, CSV, or existing Markdown table text into a normalized Markdown table instead of discarding the selection; with no recognizable selection it still inserts a configurable blank table.
+- Table rebuilding, selection, and normalization share the same source-cell boundary logic, accounting for pipe-light tables, escaped pipes, escaped trailing pipes, and line breaks inside cells, so table source stays aligned after inspector edits, copy, or paste operations with pipe-heavy content; serialized `<br>` cell breaks render as safe line breaks while unsafe raw HTML remains escaped.
+- Table controls are contextual: ordinary writing keeps only the insert-table entry point visible, while table editing reveals the heavier toolbar actions and side inspector only when the cursor or selection is actually in a table. The in-editor floating table bar stays compact for common selection, insert, align, and copy actions, while the inspector exposes the full per-row and per-column controls for inserting before/after, duplicating, moving, deleting, sorting, and aligning without first moving the cursor into the exact target cell.
+- Table sorting uses clean cell values with Markdown stripped, handles natural text, grouped/currency/percent numbers, and unambiguous local date formats while keeping empty or invalid values after sortable data.
+- The table inspector keeps large tables usable with an internal scroll area, sticky column headers, and a sticky row-action rail instead of letting oversized tables disappear behind the app frame.
+- The table inspector highlights the active column, row, and cell so the source cursor and inspector controls stay visually connected while editing larger tables.
+- Focusing a cell in the table inspector selects the matching Markdown source cell immediately, so toolbar actions, keyboard commands, and copy behavior target the cell the user just touched.
+- Editing a cell from the table inspector now moves the source selection to that edited cell, keeping the inspector highlight, source cursor, and next keyboard command aligned.
+- Pasting TSV, CSV, HTML table, `text/markdown` table, or plain Markdown table data directly into a table inspector cell fills the grid from that cell and expands rows or columns instead of dumping the pasted text into one input.
+- `Shift+Enter` or `Alt+Enter` inserts a serialized table cell line break (`<br>`) from the source editor and the Table Inspector, keeping multi-line cell editing reachable without raw table surgery.
+- Table inspector cell inputs support spreadsheet-style navigation: Tab/Shift+Tab moves across cells, Enter or Up/Down moves vertically, and moving past the final cell appends a row while keeping the source selection in sync.
+- Table inspector mutations resolve the current table from the live editor selection before patching Markdown, so row/column edits, paste, sort, alignment, and cell edits do not rely on stale source offsets after last-moment typing.
+- Table selection actions for the current cell, row, column, or full table content, so selection and copy workflows do not require dragging through Markdown pipe syntax by hand.
+- Empty table cells now select as visible cell ranges rather than invisible zero-width cursors, so paste, copy, and clear commands still target the intended cell.
+- Context-aware table selection shortcuts: `Ctrl+Alt+E/R/C/H/B/A` and `Ctrl+Alt+Shift+C` select the active cell, row, column, header, body, table, or column body without hijacking non-table editing.
+- Row selection now selects the row's cells as separate ranges instead of highlighting the raw pipe-delimited source line, keeping copy, paste, and delete behavior table-aware.
+- Whole-table content selection selects all real cells while skipping the delimiter row, and a separate Delete Table command removes the full table with a scoped edit.
+- Table header, body, and column-body selection/copy commands make spreadsheet handoff cleaner when only labels or only data cells should move.
+- Pasting into selected table cells fills those cells directly, including single selected cells, plain text values, vertical column selections, and rectangular cell ranges.
+- Pasting multi-cell TSV/CSV data expands from the selected cell or from the top-left cell of a smaller selected range instead of truncating the pasted grid.
+- Pasting newline-separated plain text inside an existing table, including from the Table Inspector, fills downward as a single column so one-column spreadsheet/list data does not corrupt Markdown table structure.
+- Backspace/Delete on selected table cells clears cell contents while preserving the Markdown table structure, including a single deliberately selected cell.
+- Cutting selected table cells writes structured clipboard data and clears only cell contents, so `Ctrl+X` does not tear out Markdown pipe delimiters.
+- Spreadsheet-like table keyboard flow: Tab moves between cells and appends a row from the final cell; shortcuts can insert rows above/below and columns left/right from the active cell.
+- TSV, CSV, HTML table, `text/markdown`, and plain Markdown table paste conversion for quickly moving spreadsheet, document, web, and Markdown-source table ranges into Markdown tables, including filling and expanding an existing table from the current cell. HTML table paste preserves common row and column spans as repeated grid values and keeps cell breaks as Markdown table `<br>` breaks, while Markdown table paste ignores fenced and indented code examples.
+- Table commands ignore table-looking text inside backtick fences, tilde fences, or indented code blocks, so examples remain code instead of becoming editable tables.
+- Smart copy from source selections: clean plain text and HTML on the clipboard, Markdown kept as `text/markdown`; table row/cell selections and direct row/column/table copy actions copy structured table content instead of raw pipe syntax.
+- Clean copy keeps ordinary identifiers such as `snake_case_value` intact while still stripping real emphasis markers, reference-style links/images, and link definition lines, so technical notes do not lose underscores or leak Markdown plumbing during paste.
+- Rich table copy preserves Markdown column alignment in the generated HTML, so right- and center-aligned columns stay aligned when pasted into rich targets.
+- Rendered preview tables use clearer header contrast, zebra rows, hover feedback, and stable horizontal scrolling so large Markdown tables are easier to read without adding JavaScript work to the preview path.
+- Clean table copy treats serialized `<br>` cell breaks consistently: `text/plain` stays grid-friendly, CSV preserves real newlines with quoting, and HTML/Markdown keep visible line breaks.
+- Exact whole-cell content selections inside tables count as structured table cells even when the visual selection skips surrounding pipe padding, while partial word selections stay ordinary text/Markdown so quick word-level copying remains predictable.
+- Toolbar and command-palette copy actions honor CodeMirror multi-selection and use the same Markdown-aware clipboard payloads as `Ctrl+C`; explicit Copy Markdown writes both `text/plain` and `text/markdown`, and smart `Ctrl+X` cuts ordinary selections with the same clean text/HTML/Markdown payload before deleting the selected Markdown source. Selected table columns and rectangular cell ranges copy consistently without depending on browser DOM selection quirks.
+- Rendered preview selections now intercept `Ctrl+C` as well, clipping the selection to the preview pane and writing clean plain text plus sanitized HTML so copied preview content does not drag along hidden task controls or surrounding app chrome; focusing the preview and pressing `Ctrl+A` selects only the rendered document.
+- The status bar reports current cursor line/column, tracks full multi-range selections, and recognizes table-shaped selections, reporting table rows, columns, body, ranges, and sparse cell selections instead of only raw character counts.
+- The header and status bar distinguish local drafts from disk-backed files, so unsaved scratch tabs no longer claim to be disk-current or overwrite-protected before they have a real local path.
+- Single-range table selections now also put a valid Markdown table fragment on `text/markdown`, so selecting one row or one cell still pastes as structured table data in Markdown-aware targets while `text/plain` stays clean TSV/text.
+- Explicit Markdown-table copy for selected cells, current rows, columns, headers, bodies, and whole tables gives a clean pipe table fragment without relying on rich clipboard targets or raw source slicing.
+- Explicit table TSV and CSV copy commands for selected table cells, the current row, column, header, body, or whole table, with Markdown styling stripped and CSV quoting handled for commas, quotes, and multiline values. Empty selected cells are still valid clipboard data instead of being mistaken for a missing selection.
+- Table-only selection export commands stay disabled until the current selection is structurally table-shaped, avoiding misleading copy actions for ordinary text selections inside table cells.
+- Sparse multi-cell table selections leave unselected neighboring cells blank in TSV, CSV, HTML, and Markdown clipboard payloads instead of leaking extra table content.
+- Safe local saves with backups plus disk-change detection before overwriting externally edited files. Desktop local files auto-save after a short idle pause by default, using the same disk check and backup path as manual saves; drafts, moved files, and externally changed files are left for review instead of being overwritten. Metadata-only touches on disk are refreshed without interrupting saves, while real content changes or unverifiable paths are marked for review on the affected tab and require confirmation instead of silently recreating or replacing the path. The header can open the disk version as an unbound comparison tab before the user chooses whether to reload or save over it.
+- Desktop file reads accept UTF-8, UTF-8 BOM, UTF-16 LE/BE BOM, and Windows legacy Chinese text via GB18030/GBK/system ANSI fallback, so common local Markdown/text files do not fail as unreadable binary data.
+- Save All handles dirty document tabs in sequence, including unsaved tabs that need a local path, while preserving per-file disk-change checks and backup behavior.
+- Save As and Save Copy As open beside the current file when a disk-backed document is active. Save Copy As writes a local copy without rebinding the current editor to that path, so experiments and one-off backups do not disturb the active file state.
+- Local HTML export writes a self-contained, print-friendly document using the same safe Markdown rendering path, with desktop saves handled locally through Tauri and browser fallback downloads for development.
+- Local draft snapshots for manual, idle-time, tab-close, window-close, and pre-replacement recovery before a document has been saved or between saves, with current-document snapshots prioritized and removable from the recovery list. Manual snapshots, disk reload, backup restore, and local snapshot restore read the current editor text before replacing content, so last-moment typing is still protected. The desktop app mirrors the active draft and the full document-tab session into native app-data files so recovery is not tied only to WebView storage; storage failures are handled without crashing the editor, and manual snapshots stay available for the current session when durable storage is unavailable.
+- In-app confirmation dialogs for destructive local actions instead of blocking browser/native confirm prompts.
+- Recent documents are kept locally, shown with path/time context, and can be removed from the sidebar without touching the file on disk. Desktop builds mirror recent files, editor preferences, and the last workspace root into timestamped native app-data records so normal preferences and local workflow state survive WebView storage resets.
+- Desktop folder workspaces: open a local folder, scan Markdown/text files with a bounded native crawler, filter and browse them from the sidebar, switch between path order and recent-first sorting, refresh the folder, and keep the last workspace root locally. The sidebar renders a bounded slice of matching files with a count for hidden matches, so large folders do not flood the persistent UI. Closing a workspace is also persisted as explicit local state so a stale recovery record cannot reopen it later.
+- The outline/workspace sidebar can be toggled from the topbar, settings, command palette, or `Ctrl+Shift+\`, with the preference persisted locally so focused writing and small-screen layouts can reclaim the full editor width without changing files.
+- Small-window layouts keep view switching honest: preview mode still shows the rendered preview even when split view collapses to the editor for width.
+- Adjustable split panes: the editor/preview balance and Table Inspector width can be resized from the desktop shell, restored from local preferences, adjusted by keyboard-accessible separators, and reset from the command palette.
+- Command palette quick-open: `Ctrl+P` searches commands, recent files, and workspace files together with fuzzy ranking, prioritizes currently executable matches while keeping unavailable commands discoverable, supports arrow/Home/End navigation, shortcut queries such as `control s`, keeps file entries hidden until a query is typed, builds the full command/recent/workspace list only while the palette is open, and renders a bounded result set so large folders do not flood the UI or the normal typing path.
+- Split view keeps source and preview scrolling in sync without React re-rendering on every scroll frame, and active-tab scroll visibility is keyed to tab activation/order rather than document text changes.
+- Status counts are derived with memoized single-pass document metrics, cursor line/column is reported from the editor state instead of rescanning the whole document on every cursor move, and hidden find/replace panels do not keep rescanning the whole document while typing.
+- Hidden or paused previews do not feed stale preview Markdown back into the worker, while outline extraction continues on its own cadence.
+- Outline-only updates skip duplicate preview rendering when the preview snapshot has not changed, reducing worker churn during ordinary typing.
+- Very large documents pause automatic preview rendering and keep outline extraction on a slower worker cadence; the user can refresh the preview snapshot explicitly instead of paying a full render cost on every edit. Manual preview snapshots are kept per tab and refresh from the live CodeMirror document, so recent typing is not lost when updating preview or switching between large open files.
+- Table commands patch only the affected table range in the editor instead of replacing the whole document.
+- The main shell uses a modern desktop tab strip, translucent command groups, tighter pane spacing, and stable toolbar/button dimensions so the app feels more like a polished local editor than a browser prototype.
