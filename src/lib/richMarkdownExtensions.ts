@@ -17,6 +17,7 @@ import { Markdown } from "@tiptap/markdown";
 import { decodeHTMLStrict } from "entities";
 import { localImageSourceForRender } from "./previewAssets";
 import { normalizeRichLinkHref } from "./richLinks";
+import { createRichMarkdownLinkInputRule } from "./richMarkdownLinkInput";
 
 type ProtectedMarkdownKind = "footnote" | "html";
 
@@ -507,6 +508,15 @@ const RichLink = Link.extend({
       markdownReferenceHref: referenceAttribute(),
       markdownReferenceTitle: referenceAttribute()
     };
+  },
+
+  addInputRules() {
+    return [
+      createRichMarkdownLinkInputRule(
+        this.type,
+        (source) => this.editor.markdown?.parse(source) ?? null
+      )
+    ];
   },
 
   parseMarkdown: (token, helpers) => {
