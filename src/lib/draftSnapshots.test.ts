@@ -62,6 +62,12 @@ describe("draft snapshots", () => {
     expect(snapshot.fileStats).toEqual({ modifiedMs: 10, size: 7 });
     expect(snapshot.createdAt).toBe(100);
     expect(snapshot.size).toBeGreaterThan(0);
+    expect(snapshot.kind).toBe("preserved");
+  });
+
+  it("keeps the local recovery reason with the snapshot", () => {
+    expect(createDraftSnapshot(baseDocument, 100, "automatic").kind).toBe("automatic");
+    expect(createDraftSnapshot(baseDocument, 100, "manual").kind).toBe("manual");
   });
 
   it("deduplicates consecutive snapshots for the same document content", () => {
@@ -190,7 +196,8 @@ describe("draft snapshots", () => {
     expect(parseDraftSnapshotsRecord(JSON.stringify([legacy]))?.snapshots[0]).toMatchObject({
       markdown: "alpha\nbeta\n",
       lastSavedMarkdown: "alpha\nbeta\n",
-      lineEnding: "crlf"
+      lineEnding: "crlf",
+      kind: "preserved"
     });
   });
 

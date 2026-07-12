@@ -25,6 +25,15 @@ describe("Markdown rendering and clean copy", () => {
     expect(rendered.html).toContain("&lt;script&gt;");
   });
 
+  it("renders highlighted fenced code without allowing code HTML through", () => {
+    const rendered = renderMarkdown("```ts\nconst value = \"<unsafe>\";\n```");
+
+    expect(rendered.html).toContain('data-language="ts"');
+    expect(rendered.html).toContain("tok-keyword");
+    expect(rendered.html).toContain("&lt;unsafe&gt;");
+    expect(rendered.html).not.toContain("<unsafe>");
+  });
+
   it("renders stable heading ids for preview anchors", () => {
     const rendered = renderMarkdown("# Intro\n\n## 中文 标题\n\n# Intro");
 
@@ -34,7 +43,7 @@ describe("Markdown rendering and clean copy", () => {
     expect(rendered.headings.map((heading) => heading.id)).toEqual(["intro", "中文-标题", "intro-1"]);
   });
 
-  it("keeps standard front matter out of preview, outline, and clean text", () => {
+  it("renders standard front matter as a property block without adding outline headings", () => {
     const markdown = [
       "---",
       "name: workflow-skill",
@@ -49,11 +58,29 @@ describe("Markdown rendering and clean copy", () => {
     ].join("\n");
     const rendered = renderMarkdown(markdown);
 
-    expect(rendered.html).not.toContain("workflow-skill");
-    expect(rendered.html).not.toContain("description");
+    expect(rendered.html).toContain('class="front-matter-preview"');
+    expect(rendered.html).toContain('data-format="yaml"');
+    expect(rendered.html).toContain('<span class="front-matter-preview-key">name</span>');
+    expect(rendered.html).toContain('<span class="front-matter-preview-value">workflow-skill</span>');
+    expect(rendered.html).toContain('<span class="front-matter-preview-key">description</span>');
+    expect(rendered.html).not.toContain("<hr>");
     expect(rendered.html).toContain('<h1 id="workflow">Workflow</h1>');
     expect(rendered.html).toContain('data-task-line="9"');
     expect(rendered.headings).toEqual([{ level: 1, text: "Workflow", line: 5, id: "workflow" }]);
+  });
+
+  it("escapes front matter values and keeps unparsed lines visible as text", () => {
+    const rendered = renderMarkdown([
+      "---",
+      "name: <img src=x onerror=alert(1)>",
+      "  - nested value",
+      "---"
+    ].join("\n"));
+
+    expect(rendered.html).not.toContain("<img");
+    expect(rendered.html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(rendered.html).toContain('class="front-matter-preview-row front-matter-preview-raw"');
+    expect(rendered.html).toContain("- nested value");
   });
 
   it("does not treat selected thematic-break fragments as document front matter", () => {

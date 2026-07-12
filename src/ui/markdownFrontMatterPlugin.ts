@@ -1,7 +1,9 @@
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { splitMarkdownFrontMatter } from "../lib/markdownFrontMatter";
 
-const frontMatterLine = Decoration.line({ class: "cm-front-matter-line" });
+const frontMatterLineStart = Decoration.line({ class: "cm-front-matter-line cm-front-matter-line-start" });
+const frontMatterLineMiddle = Decoration.line({ class: "cm-front-matter-line" });
+const frontMatterLineEnd = Decoration.line({ class: "cm-front-matter-line cm-front-matter-line-end" });
 const frontMatterDelimiter = Decoration.mark({ class: "cm-front-matter-delimiter" });
 const frontMatterKey = Decoration.mark({ class: "cm-front-matter-key" });
 
@@ -9,6 +11,7 @@ export type MarkdownFrontMatterSyntaxRange = {
   from: number;
   to: number;
   kind: "line" | "delimiter" | "key";
+  lineRole?: "start" | "middle" | "end";
 };
 
 export const markdownFrontMatterMarks = ViewPlugin.fromClass(
@@ -46,7 +49,12 @@ export function markdownFrontMatterSyntaxRanges(markdown: string): MarkdownFront
       ? rawLineEnd - 1
       : rawLineEnd;
     const line = frontMatter.slice(lineStart, lineEnd);
-    ranges.push({ from: lineStart, to: lineEnd, kind: "line" });
+    ranges.push({
+      from: lineStart,
+      to: lineEnd,
+      kind: "line",
+      lineRole: lineStart === 0 ? "start" : line === delimiter ? "end" : "middle"
+    });
 
     if (line === delimiter) {
       ranges.push({ from: lineStart, to: lineEnd, kind: "delimiter" });
@@ -67,7 +75,11 @@ export function markdownFrontMatterSyntaxRanges(markdown: string): MarkdownFront
 
 function buildFrontMatterDecorations(view: EditorView): DecorationSet {
   const decorations = markdownFrontMatterSyntaxRanges(view.state.doc.toString()).map((range) => {
-    if (range.kind === "line") return frontMatterLine.range(range.from);
+    if (range.kind === "line") {
+      if (range.lineRole === "start") return frontMatterLineStart.range(range.from);
+      if (range.lineRole === "end") return frontMatterLineEnd.range(range.from);
+      return frontMatterLineMiddle.range(range.from);
+    }
     if (range.kind === "delimiter") return frontMatterDelimiter.range(range.from, range.to);
     return frontMatterKey.range(range.from, range.to);
   });

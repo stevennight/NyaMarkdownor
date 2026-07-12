@@ -21,6 +21,8 @@ const MAX_VERSIONS_PER_FILE: usize = 512;
 const MAX_TOTAL_BACKUP_FILES: usize = 100_000;
 const MAX_TOTAL_BACKUP_SIZE_MB: u64 = 1_048_576;
 const MAX_AUTOMATIC_RETENTION_DAYS: u32 = 3_650;
+const MIN_ORPHAN_RETENTION_DAYS: u32 = 7;
+const MAX_ORPHAN_RETENTION_DAYS: u32 = 3_650;
 const MAX_WORKSPACE_FILES: usize = 800;
 const SUPPORTED_MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkdn", "mdwn", "txt"];
 const LINUX_DESKTOP_ENTRY: &str = "dev.nyamarkdownor.app.desktop";
@@ -100,6 +102,12 @@ struct BackupSettingsInput {
     max_total_size_mb: u64,
     max_backup_file_size_mb: u64,
     automatic_retention_days: u32,
+    #[serde(default = "default_orphan_retention_days")]
+    orphan_retention_days: u32,
+}
+
+fn default_orphan_retention_days() -> u32 {
+    365
 }
 
 impl Default for BackupSettingsInput {
@@ -114,6 +122,7 @@ impl Default for BackupSettingsInput {
             max_total_size_mb: 2_048,
             max_backup_file_size_mb: 256,
             automatic_retention_days: 180,
+            orphan_retention_days: default_orphan_retention_days(),
         }
     }
 }
@@ -129,6 +138,7 @@ struct BackupSettings {
     max_total_bytes: u64,
     max_backup_file_bytes: u64,
     automatic_retention: Duration,
+    orphan_retention: Duration,
 }
 
 #[derive(Default)]
@@ -148,6 +158,21 @@ struct BackupSourceMetadata {
     source_path: String,
     file_name: String,
     last_seen_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    orphaned_since_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourcePathState {
+    Present,
+    Missing,
+    Unavailable,
+}
+
+impl SourcePathState {
+    fn source_exists_for_listing(self) -> bool {
+        self != Self::Missing
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -464,8 +489,29 @@ fn list_markdown_backup_histories(
     let backup_settings = validate_backup_settings(backup_settings.unwrap_or_default())?;
     let _backup_guard = lock_backup_operations(&backup_lock)?;
     let backup_roots = backup_roots_for_app(&app, &backup_settings, true)?;
+    maintain_orphaned_backup_histories(
+        &backup_roots,
+        modified_ms(SystemTime::now()),
+        &backup_settings,
+    )
+    .map_err(|error| format!("Failed to maintain backup histories: {error}"))?;
     list_backup_histories_in_roots(&backup_roots)
         .map_err(|error| format!("Failed to read backup histories: {error}"))
+}
+
+#[tauri::command]
+fn delete_markdown_backup_history(
+    app: AppHandle,
+    backup_lock: State<'_, BackupOperationLock>,
+    source_path: String,
+    backup_settings: Option<BackupSettingsInput>,
+) -> Result<(), String> {
+    let backup_settings = validate_backup_settings(backup_settings.unwrap_or_default())?;
+    let source_path = validate_markdown_path(source_path)?;
+    let _backup_guard = lock_backup_operations(&backup_lock)?;
+    let backup_roots = backup_roots_for_app(&app, &backup_settings, true)?;
+    delete_backup_history_in_roots(&backup_roots, &source_path)
+        .map_err(|error| format!("Failed to delete backup history: {error}"))
 }
 
 #[tauri::command]
@@ -580,6 +626,13 @@ fn validate_backup_settings(input: BackupSettingsInput) -> Result<BackupSettings
             "Automatic backup retention must be between 1 and {MAX_AUTOMATIC_RETENTION_DAYS} days."
         ));
     }
+    if !(MIN_ORPHAN_RETENTION_DAYS..=MAX_ORPHAN_RETENTION_DAYS)
+        .contains(&input.orphan_retention_days)
+    {
+        return Err(format!(
+            "Orphaned backup retention must be between {MIN_ORPHAN_RETENTION_DAYS} and {MAX_ORPHAN_RETENTION_DAYS} days."
+        ));
+    }
     if input.previous_directories.len() > MAX_PREVIOUS_DIRECTORIES {
         return Err(format!(
             "At most {MAX_PREVIOUS_DIRECTORIES} previous backup directories are supported."
@@ -614,6 +667,7 @@ fn validate_backup_settings(input: BackupSettingsInput) -> Result<BackupSettings
             .min(input.max_total_size_mb)
             * MIB,
         automatic_retention: Duration::from_secs(u64::from(input.automatic_retention_days) * 24 * 60 * 60),
+        orphan_retention: Duration::from_secs(u64::from(input.orphan_retention_days) * 24 * 60 * 60),
     })
 }
 
@@ -1150,6 +1204,17 @@ fn append_backup_histories(
     backup_root: &Path,
     histories: &mut HashMap<String, BackupHistoryEntry>,
 ) -> io::Result<()> {
+    append_backup_histories_with_probe(backup_root, histories, &mut |path| fs::metadata(path))
+}
+
+fn append_backup_histories_with_probe<F>(
+    backup_root: &Path,
+    histories: &mut HashMap<String, BackupHistoryEntry>,
+    source_probe: &mut F,
+) -> io::Result<()>
+where
+    F: FnMut(&Path) -> io::Result<fs::Metadata>,
+{
     if !backup_root.exists() {
         return Ok(());
     }
@@ -1175,15 +1240,18 @@ fn append_backup_histories(
             continue;
         };
         let key = local_path_key(&metadata.source_path);
+        let candidate_source_exists = source_path_state_with_probe(&source_path, &mut *source_probe)
+            .source_exists_for_listing();
         let history = histories.entry(key).or_insert_with(|| BackupHistoryEntry {
             source_path: metadata.source_path.clone(),
             file_name: metadata.file_name.clone(),
             latest_ms: 0,
             backup_count: 0,
             total_size: 0,
-            source_exists: source_path.is_file(),
+            source_exists: candidate_source_exists,
             latest_backup_path: None,
         });
+        history.source_exists |= candidate_source_exists;
         history.backup_count = history.backup_count.saturating_add(backups.len());
         history.total_size = history
             .total_size
@@ -1195,7 +1263,6 @@ fn append_backup_histories(
             history.latest_backup_path = Some(latest.path.to_string_lossy().to_string());
             history.source_path = metadata.source_path.clone();
             history.file_name = metadata.file_name.clone();
-            history.source_exists = source_path.is_file();
         }
     }
     Ok(())
@@ -1972,7 +2039,15 @@ fn write_source_metadata(backup_dir: &Path, source_path: &Path, now: SystemTime)
             .unwrap_or("document.md")
             .to_string(),
         last_seen_ms: modified_ms(now),
+        orphaned_since_ms: None,
     };
+    write_source_metadata_record(backup_dir, &metadata)
+}
+
+fn write_source_metadata_record(
+    backup_dir: &Path,
+    metadata: &BackupSourceMetadata,
+) -> io::Result<()> {
     let content = serde_json::to_vec_pretty(&metadata)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     atomic_write(&backup_dir.join(SOURCE_METADATA_FILE_NAME), &content)
@@ -1984,6 +2059,270 @@ fn read_source_metadata(backup_dir: &Path) -> io::Result<BackupSourceMetadata> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+fn source_path_state_with_probe<F>(source_path: &Path, mut probe: F) -> SourcePathState
+where
+    F: FnMut(&Path) -> io::Result<fs::Metadata>,
+{
+    match probe(source_path) {
+        Ok(metadata) if metadata.is_file() => return SourcePathState::Present,
+        Ok(_) => return SourcePathState::Missing,
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            return SourcePathState::Unavailable;
+        }
+        Err(_) => {}
+    }
+
+    let mut ancestor = source_path.parent();
+    while let Some(path) = ancestor {
+        match probe(path) {
+            Ok(_) => return SourcePathState::Missing,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                ancestor = path.parent();
+            }
+            Err(_) => return SourcePathState::Unavailable,
+        }
+    }
+    SourcePathState::Unavailable
+}
+
+fn maintain_orphaned_backup_histories(
+    backup_roots: &BackupRoots,
+    now_ms: u64,
+    settings: &BackupSettings,
+) -> io::Result<()> {
+    for backup_root in &backup_roots.readable {
+        if let Err(error) = maintain_orphaned_backup_histories_in_root(
+            backup_root,
+            now_ms,
+            settings.orphan_retention,
+        ) {
+            if backup_root == &backup_roots.active {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn maintain_orphaned_backup_histories_in_root(
+    backup_root: &Path,
+    now_ms: u64,
+    orphan_retention: Duration,
+) -> io::Result<()> {
+    maintain_orphaned_backup_histories_in_root_with_probe(
+        backup_root,
+        now_ms,
+        orphan_retention,
+        |path| fs::metadata(path),
+    )
+}
+
+fn maintain_orphaned_backup_histories_in_root_with_probe<F>(
+    backup_root: &Path,
+    now_ms: u64,
+    orphan_retention: Duration,
+    mut source_probe: F,
+) -> io::Result<()>
+where
+    F: FnMut(&Path) -> io::Result<fs::Metadata>,
+{
+    if !backup_root.exists() {
+        return Ok(());
+    }
+
+    let retention_ms = orphan_retention
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    for entry in fs::read_dir(backup_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() || !is_backup_bucket_name(&entry.file_name()) {
+            continue;
+        }
+        let bucket_dir = entry.path();
+        if validate_existing_backup_bucket(backup_root, &bucket_dir).is_err() {
+            continue;
+        }
+        let Ok(mut metadata) = verified_source_metadata(backup_root, &bucket_dir, None) else {
+            continue;
+        };
+        let source_path = PathBuf::from(&metadata.source_path);
+        match source_path_state_with_probe(&source_path, &mut source_probe) {
+            SourcePathState::Present => {
+                if metadata.orphaned_since_ms.take().is_some() {
+                    write_source_metadata_record(&bucket_dir, &metadata)?;
+                }
+                continue;
+            }
+            SourcePathState::Unavailable => continue,
+            SourcePathState::Missing => {}
+        }
+
+        match metadata.orphaned_since_ms {
+            None => {
+                metadata.orphaned_since_ms = Some(now_ms);
+                write_source_metadata_record(&bucket_dir, &metadata)?;
+            }
+            Some(orphaned_since_ms)
+                if now_ms.saturating_sub(orphaned_since_ms) >= retention_ms =>
+            {
+                match validate_backup_bucket_for_removal(
+                    backup_root,
+                    &bucket_dir,
+                    &source_path,
+                ) {
+                    Ok(files) => remove_validated_backup_bucket(
+                        backup_root,
+                        &bucket_dir,
+                        &source_path,
+                        &files,
+                    )?,
+                    Err(error) if error.kind() == io::ErrorKind::InvalidData => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn verified_source_metadata(
+    backup_root: &Path,
+    bucket_dir: &Path,
+    expected_source_path: Option<&Path>,
+) -> io::Result<BackupSourceMetadata> {
+    validate_existing_backup_bucket(backup_root, bucket_dir)?;
+    let metadata_path = bucket_dir.join(SOURCE_METADATA_FILE_NAME);
+    let metadata_file = fs::symlink_metadata(&metadata_path)?;
+    if !metadata_file.file_type().is_file() || metadata_is_reparse_or_symlink(&metadata_file) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Backup source metadata must be a real file, not a link or reparse point.",
+        ));
+    }
+    let metadata = read_source_metadata(bucket_dir)?;
+    let source_path = PathBuf::from(&metadata.source_path);
+    let expected_bucket_name = source_backup_key(&source_path);
+    let actual_bucket_name = bucket_dir.file_name().and_then(|name| name.to_str());
+    if actual_bucket_name != Some(expected_bucket_name.as_str()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Backup bucket does not match its source metadata.",
+        ));
+    }
+    if expected_source_path.is_some_and(|expected| {
+        local_path_key(&metadata.source_path) != local_path_key(&expected.to_string_lossy())
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Backup source metadata does not match the requested history.",
+        ));
+    }
+    Ok(metadata)
+}
+
+fn validate_backup_bucket_for_removal(
+    backup_root: &Path,
+    bucket_dir: &Path,
+    source_path: &Path,
+) -> io::Result<Vec<PathBuf>> {
+    verified_source_metadata(backup_root, bucket_dir, Some(source_path))?;
+    let mut files = Vec::new();
+    for entry in fs::read_dir(bucket_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_metadata = fs::symlink_metadata(&path)?;
+        if !file_metadata.file_type().is_file()
+            || metadata_is_reparse_or_symlink(&file_metadata)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Backup bucket contains a non-file, link, or reparse point.",
+            ));
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Backup bucket contains an unsupported file name.",
+            ));
+        };
+        if name != SOURCE_METADATA_FILE_NAME
+            && parse_central_backup_name(source_path, &name).is_none()
+            && !name
+                .strip_prefix('.')
+                .and_then(|name| name.strip_suffix(".partial"))
+                .is_some_and(|name| parse_central_backup_name(source_path, name).is_some())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Backup bucket contains an unknown file.",
+            ));
+        }
+        files.push(path);
+    }
+    files.sort_by(|left, right| {
+        let left_is_metadata = left
+            .file_name()
+            .is_some_and(|name| name == SOURCE_METADATA_FILE_NAME);
+        let right_is_metadata = right
+            .file_name()
+            .is_some_and(|name| name == SOURCE_METADATA_FILE_NAME);
+        left_is_metadata
+            .cmp(&right_is_metadata)
+            .then_with(|| left.cmp(right))
+    });
+    validate_existing_backup_bucket(backup_root, bucket_dir)?;
+    Ok(files)
+}
+
+fn remove_validated_backup_bucket(
+    backup_root: &Path,
+    bucket_dir: &Path,
+    source_path: &Path,
+    expected_files: &[PathBuf],
+) -> io::Result<()> {
+    let current_files = validate_backup_bucket_for_removal(backup_root, bucket_dir, source_path)?;
+    if current_files != expected_files {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Backup bucket changed while it was being deleted.",
+        ));
+    }
+    for path in current_files {
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() || metadata_is_reparse_or_symlink(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Backup bucket changed while it was being deleted.",
+            ));
+        }
+        fs::remove_file(path)?;
+    }
+    validate_existing_backup_bucket(backup_root, bucket_dir)?;
+    fs::remove_dir(bucket_dir)
+}
+
+fn delete_backup_history_in_roots(
+    backup_roots: &BackupRoots,
+    source_path: &Path,
+) -> io::Result<()> {
+    let mut matching_buckets = Vec::new();
+    for backup_root in &backup_roots.readable {
+        let bucket_dir = central_backup_dir_for_source(backup_root, source_path);
+        if safe_existing_backup_bucket(backup_root, &bucket_dir)?.is_none() {
+            continue;
+        }
+        let files = validate_backup_bucket_for_removal(backup_root, &bucket_dir, source_path)?;
+        matching_buckets.push((backup_root.clone(), bucket_dir, files));
+    }
+    matching_buckets.sort_by_key(|(backup_root, _, _)| backup_root == &backup_roots.active);
+
+    for (backup_root, bucket_dir, files) in matching_buckets {
+        remove_validated_backup_bucket(&backup_root, &bucket_dir, source_path, &files)?;
+    }
+    Ok(())
+}
+
 fn cleanup_central_backups(
     backup_roots: &BackupRoots,
     source_path: &Path,
@@ -1992,6 +2331,11 @@ fn cleanup_central_backups(
     allow_manual_eviction: bool,
     settings: &BackupSettings,
 ) -> io::Result<()> {
+    maintain_orphaned_backup_histories(
+        backup_roots,
+        nanoseconds_to_milliseconds(now_ns),
+        settings,
+    )?;
     cleanup_partial_backup_files_in_roots(backup_roots)?;
     let source_backups = scan_source_backups_in_roots(backup_roots, source_path)?;
     for (kind, retain) in [
@@ -2982,6 +3326,7 @@ mod tests {
         assert_eq!(settings.checkpoint_interval, Duration::from_secs(10 * 60));
         assert_eq!(settings.automatic_versions_per_file, 48);
         assert_eq!(settings.manual_versions_per_file, 32);
+        assert_eq!(settings.orphan_retention, Duration::from_secs(365 * 24 * 60 * 60));
 
         let mut input = BackupSettingsInput::default();
         input.checkpoint_interval_minutes = 0;
@@ -2996,6 +3341,14 @@ mod tests {
         input.max_backup_file_size_mb = 4_096;
         let settings = validate_backup_settings(input).unwrap();
         assert_eq!(settings.max_backup_file_bytes, 256 * MIB);
+
+        let mut input = BackupSettingsInput::default();
+        input.orphan_retention_days = 6;
+        assert!(validate_backup_settings(input).is_err());
+
+        let mut input = BackupSettingsInput::default();
+        input.orphan_retention_days = 3_651;
+        assert!(validate_backup_settings(input).is_err());
     }
 
     #[test]
@@ -3192,6 +3545,450 @@ mod tests {
         assert_eq!(json["totalSize"], 7);
         assert!(json["latestBackupPath"].is_string());
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn orphan_maintenance_marks_old_metadata_before_starting_retention() {
+        let root = temporary_test_dir("orphan-first-marker");
+        let backup_root = root.join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        std::fs::write(&source, "manual checkpoint").unwrap();
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(1_000),
+            &test_backup_settings(),
+        )
+        .unwrap();
+        std::fs::remove_file(&source).unwrap();
+        let bucket = central_backup_dir_for_source(&backup_root, &source);
+        let old_metadata_json = std::fs::read_to_string(bucket.join(super::SOURCE_METADATA_FILE_NAME))
+            .unwrap();
+        assert!(!old_metadata_json.contains("orphanedSinceMs"));
+
+        super::maintain_orphaned_backup_histories(
+            &backup_roots,
+            10_000,
+            &test_backup_settings(),
+        )
+        .unwrap();
+
+        assert!(bucket.exists());
+        assert_eq!(
+            super::read_source_metadata(&bucket)
+                .unwrap()
+                .orphaned_since_ms,
+            Some(10_000)
+        );
+        assert_eq!(scan_central_backup_dir(&bucket).unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn orphan_maintenance_keeps_manual_history_before_expiry() {
+        let root = temporary_test_dir("orphan-manual-before-expiry");
+        let backup_root = root.join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        std::fs::write(&source, "manual checkpoint").unwrap();
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(2_000),
+            &test_backup_settings(),
+        )
+        .unwrap();
+        std::fs::remove_file(&source).unwrap();
+        let bucket = central_backup_dir_for_source(&backup_root, &source);
+
+        super::maintain_orphaned_backup_histories(
+            &backup_roots,
+            1_000,
+            &test_backup_settings(),
+        )
+        .unwrap();
+        super::maintain_orphaned_backup_histories(
+            &backup_roots,
+            1_000 + 364 * 24 * 60 * 60 * 1_000,
+            &test_backup_settings(),
+        )
+        .unwrap();
+
+        let backups = scan_central_backup_dir(&bucket).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].kind, BackupKind::Manual);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unavailable_source_neither_starts_nor_expires_orphan_retention() {
+        let root = temporary_test_dir("orphan-unavailable");
+        let backup_root = root.join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("offline-volume").join("Draft.md");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "manual checkpoint").unwrap();
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(2_500),
+            &test_backup_settings(),
+        )
+        .unwrap();
+        let bucket = central_backup_dir_for_source(&backup_root, &source);
+        let access_denied = |_path: &Path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "simulated unavailable source",
+            ))
+        };
+
+        super::maintain_orphaned_backup_histories_in_root_with_probe(
+            &backup_root,
+            10_000,
+            test_backup_settings().orphan_retention,
+            access_denied,
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_source_metadata(&bucket)
+                .unwrap()
+                .orphaned_since_ms,
+            None
+        );
+
+        let mut metadata = super::read_source_metadata(&bucket).unwrap();
+        metadata.orphaned_since_ms = Some(1_000);
+        super::write_source_metadata_record(&bucket, &metadata).unwrap();
+        super::maintain_orphaned_backup_histories_in_root_with_probe(
+            &backup_root,
+            1_000 + 366 * 24 * 60 * 60 * 1_000,
+            test_backup_settings().orphan_retention,
+            access_denied,
+        )
+        .unwrap();
+
+        assert!(bucket.exists());
+        assert_eq!(
+            super::read_source_metadata(&bucket)
+                .unwrap()
+                .orphaned_since_ms,
+            Some(1_000)
+        );
+        assert_eq!(scan_central_backup_dir(&bucket).unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unavailable_source_is_not_exposed_as_an_orphaned_history() {
+        let root = temporary_test_dir("orphan-unavailable-listing");
+        let backup_root = root.join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("offline-volume").join("Draft.md");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "manual checkpoint").unwrap();
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(2_600),
+            &test_backup_settings(),
+        )
+        .unwrap();
+        let mut histories = std::collections::HashMap::new();
+
+        super::append_backup_histories_with_probe(
+            &backup_root,
+            &mut histories,
+            &mut |_path| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "simulated unavailable source",
+                ))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(histories.len(), 1);
+        assert!(histories.into_values().next().unwrap().source_exists);
+        assert_eq!(
+            super::source_path_state_with_probe(&source, |_path| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "missing",
+                ))
+            }),
+            super::SourcePathState::Unavailable
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn expired_orphan_maintenance_removes_every_central_version_and_metadata() {
+        let root = temporary_test_dir("orphan-expired-whole-bucket");
+        let backup_root = root.join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let bucket = central_backup_dir_for_source(&backup_root, &source);
+        std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::write(&source, "checkpoint").unwrap();
+        for (kind, created_seconds) in [
+            (BackupKind::Previous, 100),
+            (BackupKind::Automatic, 200),
+            (BackupKind::Manual, 300),
+        ] {
+            create_central_backup(
+                &bucket,
+                &source,
+                kind,
+                UNIX_EPOCH + Duration::from_secs(created_seconds),
+                file_stats_for(&source).unwrap(),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            bucket.join(format!(
+                ".{}automatic.400.bak.partial",
+                backup_prefix_for_source(&source)
+            )),
+            "partial",
+        )
+        .unwrap();
+        super::write_source_metadata(
+            &bucket,
+            &source,
+            UNIX_EPOCH + Duration::from_secs(500),
+        )
+        .unwrap();
+        std::fs::remove_file(&source).unwrap();
+        let mut metadata = super::read_source_metadata(&bucket).unwrap();
+        metadata.orphaned_since_ms = Some(1_000);
+        super::write_source_metadata_record(&bucket, &metadata).unwrap();
+        let mut settings = test_backup_settings();
+        settings.orphan_retention = Duration::from_secs(7 * 24 * 60 * 60);
+
+        super::maintain_orphaned_backup_histories(
+            &backup_roots,
+            1_000 + 7 * 24 * 60 * 60 * 1_000,
+            &settings,
+        )
+        .unwrap();
+
+        assert!(!bucket.exists());
+        assert!(std::fs::read_dir(&backup_root).unwrap().next().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn expired_orphan_maintenance_preserves_bucket_with_unknown_content() {
+        let root = temporary_test_dir("orphan-expired-unknown-content");
+        let backup_root = root.join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        std::fs::write(&source, "manual checkpoint").unwrap();
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(1_000),
+            &test_backup_settings(),
+        )
+        .unwrap();
+        let bucket = central_backup_dir_for_source(&backup_root, &source);
+        std::fs::remove_file(&source).unwrap();
+        let mut metadata = super::read_source_metadata(&bucket).unwrap();
+        metadata.orphaned_since_ms = Some(1_000);
+        super::write_source_metadata_record(&bucket, &metadata).unwrap();
+        let unknown = bucket.join("do-not-delete.bin");
+        std::fs::write(&unknown, "unrecognized").unwrap();
+        let manual_backup = scan_central_backup_dir(&bucket).unwrap().remove(0).path;
+        let mut settings = test_backup_settings();
+        settings.orphan_retention = Duration::from_secs(7 * 24 * 60 * 60);
+
+        super::maintain_orphaned_backup_histories(
+            &backup_roots,
+            1_000 + 7 * 24 * 60 * 60 * 1_000,
+            &settings,
+        )
+        .unwrap();
+
+        assert!(bucket.exists());
+        assert!(manual_backup.exists());
+        assert!(unknown.exists());
+        assert!(bucket.join(super::SOURCE_METADATA_FILE_NAME).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn orphan_maintenance_clears_marker_when_source_returns() {
+        let root = temporary_test_dir("orphan-source-returned");
+        let backup_root = root.join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        std::fs::write(&source, "checkpoint").unwrap();
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(3_000),
+            &test_backup_settings(),
+        )
+        .unwrap();
+        std::fs::remove_file(&source).unwrap();
+        let bucket = central_backup_dir_for_source(&backup_root, &source);
+        super::maintain_orphaned_backup_histories(
+            &backup_roots,
+            5_000,
+            &test_backup_settings(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_source_metadata(&bucket)
+                .unwrap()
+                .orphaned_since_ms,
+            Some(5_000)
+        );
+
+        std::fs::write(&source, "restored").unwrap();
+        super::maintain_orphaned_backup_histories(
+            &backup_roots,
+            6_000,
+            &test_backup_settings(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            super::read_source_metadata(&bucket)
+                .unwrap()
+                .orphaned_since_ms,
+            None
+        );
+        assert_eq!(scan_central_backup_dir(&bucket).unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_history_deletion_removes_matching_buckets_across_roots_only() {
+        let root = temporary_test_dir("explicit-history-delete-cross-root");
+        let active_root = root.join("active").join("backups-v1");
+        let previous_root = root.join("previous").join("backups-v1");
+        let backup_roots = BackupRoots {
+            active: active_root.clone(),
+            readable: vec![active_root.clone(), previous_root.clone()],
+        };
+        let source = root.join("Draft.md");
+        std::fs::write(&source, "checkpoint").unwrap();
+        for (backup_root, created_seconds) in [(&active_root, 100), (&previous_root, 200)] {
+            let bucket = central_backup_dir_for_source(backup_root, &source);
+            std::fs::create_dir_all(&bucket).unwrap();
+            create_central_backup(
+                &bucket,
+                &source,
+                BackupKind::Manual,
+                UNIX_EPOCH + Duration::from_secs(created_seconds),
+                file_stats_for(&source).unwrap(),
+            )
+            .unwrap();
+            super::write_source_metadata(
+                &bucket,
+                &source,
+                UNIX_EPOCH + Duration::from_secs(created_seconds),
+            )
+            .unwrap();
+        }
+        let unrelated_source = root.join("Other.md");
+        let unrelated_bucket = central_backup_dir_for_source(&active_root, &unrelated_source);
+        std::fs::create_dir_all(&unrelated_bucket).unwrap();
+        std::fs::write(&unrelated_source, "other").unwrap();
+        super::write_source_metadata(&unrelated_bucket, &unrelated_source, UNIX_EPOCH).unwrap();
+        let legacy_dir = legacy_backup_dir_for_source(&source);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_backup = legacy_dir.join("Draft.md.manual.1.bak");
+        std::fs::write(&legacy_backup, "legacy").unwrap();
+
+        super::delete_backup_history_in_roots(&backup_roots, &source).unwrap();
+
+        assert!(!central_backup_dir_for_source(&active_root, &source).exists());
+        assert!(!central_backup_dir_for_source(&previous_root, &source).exists());
+        assert!(unrelated_bucket.exists());
+        assert!(legacy_backup.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_history_deletion_rejects_mismatched_bucket_metadata() {
+        let root = temporary_test_dir("explicit-history-delete-mismatch");
+        let backup_root = root.join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let other_source = root.join("Other.md");
+        std::fs::write(&source, "checkpoint").unwrap();
+        let bucket = central_backup_dir_for_source(&backup_root, &source);
+        std::fs::create_dir_all(&bucket).unwrap();
+        let backup = create_central_backup(
+            &bucket,
+            &source,
+            BackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(100),
+            file_stats_for(&source).unwrap(),
+        )
+        .unwrap()
+        .0;
+        super::write_source_metadata(&bucket, &other_source, UNIX_EPOCH).unwrap();
+
+        let error = super::delete_backup_history_in_roots(&backup_roots, &source).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(bucket.exists());
+        assert!(backup.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_history_deletion_prevalidates_all_roots_before_removing_any() {
+        let root = temporary_test_dir("explicit-history-delete-prevalidation");
+        let active_root = root.join("active").join("backups-v1");
+        let previous_root = root.join("previous").join("backups-v1");
+        let backup_roots = BackupRoots {
+            active: active_root.clone(),
+            readable: vec![active_root.clone(), previous_root.clone()],
+        };
+        let source = root.join("Draft.md");
+        std::fs::write(&source, "checkpoint").unwrap();
+        for (backup_root, created_seconds) in [(&active_root, 100), (&previous_root, 200)] {
+            let bucket = central_backup_dir_for_source(backup_root, &source);
+            std::fs::create_dir_all(&bucket).unwrap();
+            create_central_backup(
+                &bucket,
+                &source,
+                BackupKind::Manual,
+                UNIX_EPOCH + Duration::from_secs(created_seconds),
+                file_stats_for(&source).unwrap(),
+            )
+            .unwrap();
+            super::write_source_metadata(
+                &bucket,
+                &source,
+                UNIX_EPOCH + Duration::from_secs(created_seconds),
+            )
+            .unwrap();
+        }
+        let active_bucket = central_backup_dir_for_source(&active_root, &source);
+        let previous_bucket = central_backup_dir_for_source(&previous_root, &source);
+        std::fs::create_dir(previous_bucket.join("unknown-child")).unwrap();
+
+        let error = super::delete_backup_history_in_roots(&backup_roots, &source).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(active_bucket.exists());
+        assert_eq!(scan_central_backup_dir(&active_bucket).unwrap().len(), 1);
+        assert!(previous_bucket.exists());
+        assert_eq!(scan_central_backup_dir(&previous_bucket).unwrap().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -4177,6 +4974,7 @@ mod tests {
             max_total_bytes: 2_048 * MIB,
             max_backup_file_bytes: 256 * MIB,
             automatic_retention: Duration::from_secs(180 * 24 * 60 * 60),
+            orphan_retention: Duration::from_secs(365 * 24 * 60 * 60),
         }
     }
 
@@ -4226,6 +5024,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             create_markdown_file,
+            delete_markdown_backup_history,
             existing_markdown_file_stats,
             initial_markdown_file_paths,
             take_secondary_instance_markdown_paths,

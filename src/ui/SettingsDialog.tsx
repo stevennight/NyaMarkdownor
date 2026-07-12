@@ -391,6 +391,14 @@ export function SettingsDialog({
                     max={3650}
                     onChange={(value) => updateBackupPreference("automaticRetentionDays", value)}
                   />
+                  <NumberSettingRow
+                    label={t("Orphaned history retention")}
+                    suffix={t("days")}
+                    value={backupPreferences.orphanRetentionDays}
+                    min={7}
+                    max={3650}
+                    onChange={(value) => updateBackupPreference("orphanRetentionDays", value)}
+                  />
                 </section>
               </>
             )}

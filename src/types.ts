@@ -29,6 +29,7 @@ export type BackupPreferences = {
   maxTotalSizeMb: number;
   maxBackupFileSizeMb: number;
   automaticRetentionDays: number;
+  orphanRetentionDays: number;
 };
 
 export type AppPreferences = {

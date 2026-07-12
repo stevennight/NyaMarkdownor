@@ -1,4 +1,4 @@
-import { mergeAttributes, Node, type AnyExtension, type JSONContent, type MarkdownToken } from "@tiptap/core";
+import { Extension, mergeAttributes, Node, type AnyExtension, type JSONContent, type MarkdownToken } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import Bold from "@tiptap/extension-bold";
 import Code from "@tiptap/extension-code";
@@ -14,7 +14,11 @@ import { BulletList, ListItem, OrderedList, getListMarker } from "@tiptap/extens
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import { Markdown } from "@tiptap/markdown";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { decodeHTMLStrict } from "entities";
+import { codeHighlightClasses } from "./codeHighlight";
 import { localImageSourceForRender } from "./previewAssets";
 import { normalizeRichLinkHref } from "./richLinks";
 import { createRichMarkdownLinkInputRule } from "./richMarkdownLinkInput";
@@ -75,6 +79,44 @@ const BLOCK_HTML_TAGS = new Set([
 
 const VOID_HTML_TAGS = new Set(["base", "basefont", "col", "frame", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
 const MAX_PRESERVED_TABLE_SOURCE_LENGTH = 256 * 1024;
+const richCodeHighlightPluginKey = new PluginKey<DecorationSet>("richCodeHighlight");
+
+const RichCodeHighlight = Extension.create({
+  name: "richCodeHighlight",
+
+  addProseMirrorPlugins() {
+    return [new Plugin<DecorationSet>({
+      key: richCodeHighlightPluginKey,
+      state: {
+        init: (_config, state) => richCodeHighlightDecorations(state.doc),
+        apply: (transaction, decorations, _oldState, newState) => (
+          transaction.docChanged ? richCodeHighlightDecorations(newState.doc) : decorations
+        )
+      },
+      props: {
+        decorations: (state) => richCodeHighlightPluginKey.getState(state) ?? DecorationSet.empty
+      }
+    })];
+  }
+});
+
+function richCodeHighlightDecorations(document: ProseMirrorNode): DecorationSet {
+  const decorations: Decoration[] = [];
+  document.descendants((node, position) => {
+    if (node.type.name !== "codeBlock" || !node.textContent) return;
+
+    const language = typeof node.attrs.language === "string" ? node.attrs.language : "";
+    const contentStart = position + 1;
+    for (const range of codeHighlightClasses(node.textContent, language)) {
+      decorations.push(Decoration.inline(
+        contentStart + range.from,
+        contentStart + range.to,
+        { class: range.className }
+      ));
+    }
+  });
+  return DecorationSet.create(document, decorations);
+}
 
 const RichBold = Bold.extend({
   addAttributes() {
@@ -928,6 +970,7 @@ export function createRichMarkdownExtensions(documentFilePath: string | null): A
       isAllowedUri: (href) => normalizeRichLinkHref(href ?? "") !== null
     }),
     RichCodeBlock,
+    RichCodeHighlight,
     RichBulletList,
     RichOrderedList,
     RichListItem,

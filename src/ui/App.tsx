@@ -58,6 +58,7 @@ import {
   Moon,
   Eye,
   Ellipsis,
+  ListFilter,
   PanelLeft,
   PanelTop,
   PenLine,
@@ -110,6 +111,7 @@ import {
   type TableSortDirection
 } from "../lib/tables";
 import {
+  deleteMarkdownBackupHistory,
   listMarkdownBackups,
   listMarkdownBackupHistories,
   listMarkdownWorkspace,
@@ -171,11 +173,11 @@ import {
   loadDesktopDraftSnapshotsRecord,
   loadDraftSnapshots,
   loadDraftSnapshotsRecord,
-  prioritizeDraftSnapshots,
   rememberDraftSnapshot,
   rememberDraftSnapshots,
   saveDraftSnapshots,
   saveDraftSnapshotsImmediately,
+  snapshotDocumentKey,
   type DraftSnapshot
 } from "../lib/draftSnapshots";
 import { loadDesktopDraftDocumentRecord, loadDraftDocument, loadDraftDocumentRecord, saveDraftDocument, saveDraftDocumentImmediately } from "../lib/draftDocument";
@@ -362,12 +364,17 @@ type LocalImageInsertResult = {
 };
 
 type BackupComparisonState = {
-  backup: MarkdownBackup;
+  restore: () => void;
   tabId: string;
-  sourcePath: string;
-  backupMarkdown: string;
+  versionMarkdown: string;
   currentMarkdown: string;
   currentName: string;
+  versionLabel: string;
+  versionTitle?: string;
+  currentTitle?: string;
+  actionLabel?: string;
+  actionIcon?: "restore" | "open";
+  restoreDisabled?: boolean;
 };
 
 type EditorSelectionState = TextRange & {
@@ -446,10 +453,12 @@ export function App() {
   const [dropOverlayActive, setDropOverlayActive] = useState(false);
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
   const [tabDropTarget, setTabDropTarget] = useState<{ tabId: string; position: DocumentTabDropPosition } | null>(null);
+  const [tabListOpen, setTabListOpen] = useState(false);
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const viewMenuRef = useRef<HTMLDivElement | null>(null);
   const viewMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const tabListRef = useRef<HTMLDivElement | null>(null);
+  const tabListMenuRef = useRef<HTMLDivElement | null>(null);
   const workspaceRef = useRef<HTMLElement | null>(null);
   const editorPaneRef = useRef<HTMLElement | null>(null);
   const previewPaneRef = useRef<HTMLElement | null>(null);
@@ -598,9 +607,17 @@ export function App() {
     () => backupHistories.filter((history) => !history.sourceExists),
     [backupHistories]
   );
-  const visibleDraftSnapshots = useMemo(
-    () => prioritizeDraftSnapshots(draftSnapshots, documentState).slice(0, 6),
-    [draftSnapshots, documentState.fileName, documentState.filePath]
+  const currentDocumentSnapshotKey = useMemo(
+    () => snapshotDocumentKey(documentState),
+    [documentState.fileName, documentState.filePath]
+  );
+  const currentDocumentDraftSnapshots = useMemo(
+    () => draftSnapshots.filter((snapshot) => snapshotDocumentKey(snapshot) === currentDocumentSnapshotKey),
+    [currentDocumentSnapshotKey, draftSnapshots]
+  );
+  const otherDraftSnapshots = useMemo(
+    () => draftSnapshots.filter((snapshot) => snapshotDocumentKey(snapshot) !== currentDocumentSnapshotKey),
+    [currentDocumentSnapshotKey, draftSnapshots]
   );
   const workspaceFileView = useMemo(
     () => {
@@ -760,6 +777,18 @@ export function App() {
     document.addEventListener("pointerdown", closeViewMenuOnOutsidePointer);
     return () => document.removeEventListener("pointerdown", closeViewMenuOnOutsidePointer);
   }, [viewMenuOpen]);
+
+  useEffect(() => {
+    if (!tabListOpen) return undefined;
+
+    function closeTabListOnOutsidePointer(event: PointerEvent) {
+      if (tabListMenuRef.current?.contains(event.target as Node)) return;
+      setTabListOpen(false);
+    }
+
+    document.addEventListener("pointerdown", closeTabListOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeTabListOnOutsidePointer);
+  }, [tabListOpen]);
 
   useEffect(() => () => {
     if (editorFocusTimerRef.current !== null) window.clearTimeout(editorFocusTimerRef.current);
@@ -1422,6 +1451,13 @@ export function App() {
       return;
     }
     activateDocumentTab(tabId, { focusEditor: true });
+  }
+
+  function scrollTabList(direction: -1 | 1) {
+    tabListRef.current?.scrollBy({
+      left: direction * Math.max(160, Math.floor(tabListRef.current.clientWidth * 0.72)),
+      behavior: "smooth"
+    });
   }
 
   function moveDocumentTab(tabId: string, direction: -1 | 1) {
@@ -3816,7 +3852,7 @@ export function App() {
   }
 
   function createAutomaticDraftSnapshot() {
-    const snapshot = createDraftSnapshot(currentActiveDocumentTabForCommand().document);
+    const snapshot = createDraftSnapshot(currentActiveDocumentTabForCommand().document, Date.now(), "automatic");
     setDraftSnapshots((current) => {
       const next = rememberDraftSnapshot(current, snapshot);
       if (next !== current) {
@@ -3832,10 +3868,10 @@ export function App() {
     return preserveDocumentDraftSnapshot(document);
   }
 
-  function preserveDocumentDraftSnapshot(document: MarkdownDocument): boolean {
+  function preserveDocumentDraftSnapshot(document: MarkdownDocument, kind: DraftSnapshot["kind"] = "preserved"): boolean {
     if (!document.markdown.trim()) return false;
 
-    const snapshot = createDraftSnapshot(document);
+    const snapshot = createDraftSnapshot(document, Date.now(), kind);
     const currentSnapshots = draftSnapshotsRef.current;
     const next = rememberDraftSnapshot(currentSnapshots, snapshot);
     if (next === currentSnapshots) return false;
@@ -3848,7 +3884,7 @@ export function App() {
   function preserveDocumentDraftSnapshots(documents: MarkdownDocument[]): boolean {
     const snapshots = documents
       .filter((document) => document.markdown.trim())
-      .map((document) => createDraftSnapshot(document));
+      .map((document) => createDraftSnapshot(document, Date.now(), "preserved"));
     if (!snapshots.length) return false;
 
     const next = rememberDraftSnapshots(draftSnapshotsRef.current, snapshots);
@@ -3929,7 +3965,7 @@ export function App() {
   }
 
   function createLocalSnapshot() {
-    const snapshot = createDraftSnapshot(currentActiveDocumentTabForCommand().document);
+    const snapshot = createDraftSnapshot(currentActiveDocumentTabForCommand().document, Date.now(), "manual");
     const currentSnapshots = draftSnapshotsRef.current;
     const next = rememberDraftSnapshot(currentSnapshots, snapshot);
 
@@ -4618,12 +4654,12 @@ export function App() {
       }
 
       setBackupComparison({
-        backup,
+        restore: () => void restoreBackup(backup, document.filePath ?? undefined, tab.id),
         tabId: tab.id,
-        sourcePath: document.filePath,
-        backupMarkdown: restored.markdown,
+        versionMarkdown: restored.markdown,
         currentMarkdown: liveTab.document.markdown,
-        currentName: displayMarkdownDocumentName(liveTab.document)
+        currentName: displayMarkdownDocumentName(liveTab.document),
+        versionLabel: `${formatBackupTime(backup.modifiedMs)} - ${t(backupKindMessage(backup.kind))}`
       });
     } catch (error) {
       console.warn(error);
@@ -4723,9 +4759,43 @@ export function App() {
     }
   }
 
-  async function restoreDraftSnapshot(snapshot: DraftSnapshot) {
-    const tab = currentActiveDocumentTabForCommand();
+  async function deleteOrphanedBackupHistory(history: MarkdownBackupHistory) {
+    if (!await requestConfirmation({
+      title: "Delete this orphaned history?",
+      message: "This permanently deletes every retained backup version for this source file from all backup locations. This cannot be undone.",
+      confirmLabel: "Delete history",
+      cancelLabel: "Cancel",
+      tone: "danger"
+    })) return;
+
+    try {
+      await deleteMarkdownBackupHistory(history.sourcePath, backupPreferences);
+      setBackupHistories((current) => current.filter((candidate) => !sameLocalPath(candidate.sourcePath, history.sourcePath)));
+      showToast("Orphaned history deleted");
+
+      try {
+        setBackupHistories(await listMarkdownBackupHistories(backupPreferences));
+      } catch (error) {
+        console.warn(error);
+      }
+    } catch (error) {
+      console.warn(error);
+      showToast("Orphaned history could not be deleted");
+    }
+  }
+
+  async function restoreDraftSnapshot(snapshot: DraftSnapshot, expectedTabId?: string) {
+    const session = currentTabSessionForRecovery();
+    const tab = session.tabs.find((candidate) => candidate.id === session.activeTabId) ?? session.tabs[0] ?? activeTab;
     const document = tab.document;
+    if (
+      (expectedTabId && tab.id !== expectedTabId)
+      || snapshotDocumentKey(document) !== snapshotDocumentKey(snapshot)
+    ) {
+      showToast("The comparison belongs to another document");
+      return;
+    }
+
     if (isDocumentDirty(document) && !await requestConfirmation({
       title: "Restore this local snapshot?",
       message: "Restoring will replace the current unsaved editor content with the selected local snapshot after keeping a recovery snapshot of the current editor content.",
@@ -4733,7 +4803,19 @@ export function App() {
       cancelLabel: "Keep editing",
       tone: "danger"
     })) return;
-    preserveDirtyDraftSnapshotBeforeReplace(document);
+
+    const finalSession = currentTabSessionForRecovery();
+    const finalTab = finalSession.tabs.find((candidate) => candidate.id === tab.id);
+    if (
+      finalSession.activeTabId !== tab.id
+      || !finalTab
+      || snapshotDocumentKey(finalTab.document) !== snapshotDocumentKey(snapshot)
+    ) {
+      showToast("Restore canceled because the active file changed");
+      return;
+    }
+
+    preserveDirtyDraftSnapshotBeforeReplace(finalTab.document);
 
     richDocumentHistoriesRef.current.delete(tab.id);
     updateDocumentTab(tab.id, {
@@ -4745,9 +4827,67 @@ export function App() {
       lastBackupPath: null,
       fileStats: snapshot.fileStats
     });
-    clearManualPreviewSnapshot();
-    setDocumentTabExternalChange(activeTab.id, false);
+    clearManualPreviewSnapshot(tab.id);
+    setDocumentTabExternalChange(tab.id, false);
     showToast("Local snapshot restored into editor");
+  }
+
+  function compareDraftSnapshot(snapshot: DraftSnapshot) {
+    const tab = currentActiveDocumentTabForCommand();
+    const document = tab.document;
+    if (
+      snapshot.size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES
+      || new Blob([document.markdown]).size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES
+    ) {
+      showToast("Version is too large for interactive comparison");
+      return;
+    }
+
+    setBackupComparison({
+      restore: () => void restoreDraftSnapshot(snapshot, tab.id),
+      tabId: tab.id,
+      versionMarkdown: snapshot.markdown,
+      currentMarkdown: document.markdown,
+      currentName: displayMarkdownDocumentName(document),
+      versionLabel: `${formatBackupTime(snapshot.createdAt)} - ${t(draftSnapshotKindMessage(snapshot.kind))}`
+    });
+  }
+
+  function openDraftSnapshotAsNewTab(snapshot: DraftSnapshot) {
+    addDocumentTab({
+      fileName: `Recovered ${snapshot.fileName}`,
+      filePath: null,
+      markdown: snapshot.markdown,
+      lastSavedMarkdown: snapshot.markdown,
+      lineEnding: snapshot.lineEnding,
+      lastBackupPath: null,
+      fileStats: null
+    });
+    showToast("Opened local checkpoint as draft");
+  }
+
+  function compareOtherDraftSnapshot(snapshot: DraftSnapshot) {
+    if (
+      snapshot.size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES
+      || new Blob([snapshot.lastSavedMarkdown]).size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES
+    ) {
+      showToast("Version is too large for interactive comparison");
+      return;
+    }
+
+    const snapshotDisplayName = displayMarkdownDocumentName(snapshot);
+    setBackupComparison({
+      restore: () => openDraftSnapshotAsNewTab(snapshot),
+      tabId: "",
+      versionMarkdown: snapshot.lastSavedMarkdown,
+      currentMarkdown: snapshot.markdown,
+      currentName: snapshotDisplayName,
+      versionLabel: t("Last saved version"),
+      versionTitle: "Last saved version",
+      currentTitle: "Local checkpoint",
+      actionLabel: "Open checkpoint as draft",
+      actionIcon: "open"
+    });
   }
 
   async function deleteDraftSnapshot(snapshot: DraftSnapshot) {
@@ -5966,6 +6106,15 @@ export function App() {
       </header>
 
       <nav className="tabstrip" aria-label={t("Open documents")}>
+        <button
+          className="tab-scroll-control"
+          type="button"
+          aria-label={t("Scroll tabs left")}
+          title={t("Scroll tabs left")}
+          onClick={() => scrollTabList(-1)}
+        >
+          <ArrowLeft size={15} />
+        </button>
         <div className="tab-list" ref={tabListRef} role="tablist">
           {tabs.map((tab) => {
             const tabDirty = isDocumentDirty(tab.document);
@@ -6023,6 +6172,54 @@ export function App() {
             );
           })}
         </div>
+        <div className="tab-list-menu" ref={tabListMenuRef}>
+          <button
+            className={tabListOpen ? "tab-list-trigger active" : "tab-list-trigger"}
+            type="button"
+            aria-label={t("Open tab list")}
+            aria-haspopup="menu"
+            aria-expanded={tabListOpen}
+            title={t("Open tab list")}
+            onClick={() => setTabListOpen((current) => !current)}
+          >
+            <ListFilter size={15} />
+          </button>
+          {tabListOpen && (
+            <div className="tab-list-popover" role="menu" aria-label={t("Open documents")}>
+              {tabs.map((tab) => {
+                const tabDisplayName = displayMarkdownDocumentName(tab.document);
+                const active = tab.id === activeTab.id;
+                const dirty = isDocumentDirty(tab.document);
+                return (
+                  <button
+                    key={tab.id}
+                    className={active ? "tab-list-option active" : "tab-list-option"}
+                    type="button"
+                    role="menuitem"
+                    title={tab.document.filePath ?? tabDisplayName}
+                    onClick={() => {
+                      setTabListOpen(false);
+                      switchDocumentTab(tab.id);
+                    }}
+                  >
+                    <FileText size={14} />
+                    <span>{tabDisplayName}</span>
+                    {dirty && <i aria-label={t("Unsaved changes")} />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <button
+          className="tab-scroll-control"
+          type="button"
+          aria-label={t("Scroll tabs right")}
+          title={t("Scroll tabs right")}
+          onClick={() => scrollTabList(1)}
+        >
+          <ArrowRight size={15} />
+        </button>
         <button
           className="tab-new"
           type="button"
@@ -6199,8 +6396,11 @@ export function App() {
           {hasRecoveryContent && (
             <section className="backup-section">
               {(documentState.filePath || backupLoading || backups.length > 0) && (
-                <>
-                  <div className="section-label recovery-section-label">{t("Saved file history")}</div>
+                <section className="recovery-group recovery-file-history">
+                  <div className="recovery-group-heading">
+                    <div className="section-label recovery-section-label">{t("Saved file history")}</div>
+                    <p>{t("Versions written beside a disk file before it is overwritten")}</p>
+                  </div>
                   {backupLoading ? (
                     <div className="backup-empty">{t("Loading backups")}</div>
                   ) : visibleBackups.map((backup) => (
@@ -6241,72 +6441,144 @@ export function App() {
                       </span>
                     </button>
                   )}
-                </>
+                </section>
               )}
               {orphanedBackupHistories.length > 0 && (
-                <>
-                  <div className="section-label recovery-section-label detached-history-label">{t("Detached file history")}</div>
-                  {orphanedBackupHistories.map((history) => (
-                    <button
-                      key={history.sourcePath}
-                      className="backup-item"
-                      type="button"
-                      onClick={() => void openOrphanedBackupHistory(history)}
-                      title={`${t("Open latest version as draft")} - ${history.sourcePath}`}
-                    >
-                      <FileText size={14} />
-                      <span>
-                        <strong>{history.fileName}</strong>
-                        <small>
-                          {t("{count} retained versions", { count: history.backupCount })} - {formatBackupTime(history.latestMs)} - {formatBytes(history.totalSize)}
-                        </small>
-                      </span>
-                    </button>
-                  ))}
-                </>
-              )}
-              <div className="section-label recovery-section-label local-snapshot-label">{t("Local recovery snapshots")}</div>
-              <button
-                className="backup-item"
-                type="button"
-                onClick={createLocalSnapshot}
-                disabled={!documentState.markdown.trim()}
-                title={t("Save a local recovery point for the current editor content")}
-              >
-                <History size={14} />
-                <span>
-                  <strong>{t("Create local snapshot")}</strong>
-                  <small>{t("Manual recovery point")}</small>
-                </span>
-              </button>
-              {visibleDraftSnapshots.map((snapshot) => {
-                const snapshotDisplayName = displayMarkdownDocumentName(snapshot);
-                return (
-                  <div key={snapshot.id} className="backup-row">
-                    <button
-                      className="backup-item snapshot-restore"
-                      type="button"
-                      onClick={() => restoreDraftSnapshot(snapshot)}
-                      title={snapshot.filePath ?? snapshotDisplayName}
-                    >
-                      <RotateCcw size={14} />
-                      <span>
-                        <strong>{snapshotDisplayName}</strong>
-                        <small>{formatBackupTime(snapshot.createdAt)} - {formatBytes(snapshot.size)}</small>
-                      </span>
-                    </button>
-                    <button
-                      className="backup-delete"
-                      type="button"
-                      aria-label={`Delete ${snapshotDisplayName} snapshot`}
-                      title={t("Delete local snapshot")}
-                      onClick={() => deleteDraftSnapshot(snapshot)}
-                    >
-                      <Trash2 size={13} />
-                    </button>
+                <section className="recovery-group recovery-orphaned-history">
+                  <div className="recovery-group-heading">
+                    <div className="section-label recovery-section-label detached-history-label">{t("Detached file history")}</div>
+                    <p>{t("Versions whose original disk file is no longer available")}</p>
                   </div>
-                );
-              })}
+                  {orphanedBackupHistories.map((history) => (
+                    <div key={history.sourcePath} className="backup-row">
+                      <button
+                        className="backup-item"
+                        type="button"
+                        onClick={() => void openOrphanedBackupHistory(history)}
+                        title={`${t("Open latest version as draft")} - ${history.sourcePath}`}
+                      >
+                        <FileText size={14} />
+                        <span>
+                          <strong>{history.fileName}</strong>
+                          <small>
+                            {t("{count} retained versions", { count: history.backupCount })} - {formatBackupTime(history.latestMs)} - {formatBytes(history.totalSize)}
+                          </small>
+                        </span>
+                      </button>
+                      <button
+                        className="backup-delete"
+                        type="button"
+                        aria-label={`${t("Delete orphaned history")} - ${history.fileName}`}
+                        title={t("Delete orphaned history")}
+                        onClick={() => void deleteOrphanedBackupHistory(history)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </section>
+              )}
+              <section className="recovery-group recovery-local-snapshots">
+                <div className="recovery-group-heading">
+                  <div className="section-label recovery-section-label local-snapshot-label">{t("Local recovery checkpoints")}</div>
+                  <p>{t("Editor copies kept on this device after idle edits, before replacement, or when created manually")}</p>
+                </div>
+                <button
+                  className="backup-item"
+                  type="button"
+                  onClick={createLocalSnapshot}
+                  disabled={!documentState.markdown.trim()}
+                  title={t("Save a local recovery point for the current editor content")}
+                >
+                  <History size={14} />
+                  <span>
+                    <strong>{t("Create local checkpoint")}</strong>
+                    <small>{t("Manual recovery point")}</small>
+                  </span>
+                </button>
+                {currentDocumentDraftSnapshots.map((snapshot) => {
+                  const snapshotDisplayName = displayMarkdownDocumentName(snapshot);
+                  return (
+                    <div key={snapshot.id} className="backup-row">
+                      <button
+                        className="backup-item snapshot-restore"
+                        type="button"
+                        onClick={() => restoreDraftSnapshot(snapshot)}
+                        title={snapshot.filePath ?? snapshotDisplayName}
+                      >
+                        <RotateCcw size={14} />
+                        <span>
+                          <strong>{formatBackupTime(snapshot.createdAt)}</strong>
+                          <small>{t(draftSnapshotKindMessage(snapshot.kind))} - {formatBytes(snapshot.size)}</small>
+                        </span>
+                      </button>
+                      <button
+                        className="backup-compare"
+                        type="button"
+                        aria-label={t("Compare with current editor")}
+                        title={t("Compare with current editor")}
+                        onClick={() => compareDraftSnapshot(snapshot)}
+                      >
+                        <GitCompareArrows size={14} />
+                      </button>
+                      <button
+                        className="backup-delete"
+                        type="button"
+                        aria-label={`Delete ${snapshotDisplayName} snapshot`}
+                        title={t("Delete local snapshot")}
+                        onClick={() => deleteDraftSnapshot(snapshot)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </section>
+              {otherDraftSnapshots.length > 0 && (
+                <section className="recovery-group recovery-other-snapshots">
+                  <div className="recovery-group-heading">
+                    <div className="section-label recovery-section-label">{t("Other document checkpoints")}</div>
+                    <p>{t("Open these as independent drafts, or compare each checkpoint with its last saved content")}</p>
+                  </div>
+                  {otherDraftSnapshots.map((snapshot) => {
+                    const snapshotDisplayName = displayMarkdownDocumentName(snapshot);
+                    return (
+                      <div key={snapshot.id} className="backup-row">
+                        <button
+                          className="backup-item"
+                          type="button"
+                          onClick={() => openDraftSnapshotAsNewTab(snapshot)}
+                          title={snapshot.filePath ?? snapshotDisplayName}
+                        >
+                          <FileText size={14} />
+                          <span>
+                            <strong>{snapshotDisplayName}</strong>
+                            <small>{formatBackupTime(snapshot.createdAt)} - {t(draftSnapshotKindMessage(snapshot.kind))} - {formatBytes(snapshot.size)}</small>
+                          </span>
+                        </button>
+                        <button
+                          className="backup-compare"
+                          type="button"
+                          aria-label={t("Compare checkpoint with last saved version")}
+                          title={t("Compare checkpoint with last saved version")}
+                          onClick={() => compareOtherDraftSnapshot(snapshot)}
+                        >
+                          <GitCompareArrows size={14} />
+                        </button>
+                        <button
+                          className="backup-delete"
+                          type="button"
+                          aria-label={`Delete ${snapshotDisplayName} snapshot`}
+                          title={t("Delete local snapshot")}
+                          onClick={() => deleteDraftSnapshot(snapshot)}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </section>
+              )}
               {!backupLoading && backups.length === 0 && draftSnapshots.length === 0 && (
                 <div className="backup-empty">{t("No recovery points yet")}</div>
               )}
@@ -6838,17 +7110,22 @@ export function App() {
       <BackupCompareDialog
         open={backupComparison !== null}
         fileName={backupComparison?.currentName ?? ""}
-        backupMarkdown={backupComparison?.backupMarkdown ?? ""}
+        backupMarkdown={backupComparison?.versionMarkdown ?? ""}
         currentMarkdown={backupComparison?.currentMarkdown ?? ""}
-        backupLabel={backupComparison ? `${formatBackupTime(backupComparison.backup.modifiedMs)} - ${t(backupKindMessage(backupComparison.backup.kind))}` : undefined}
+        backupLabel={backupComparison?.versionLabel}
         currentLabel={backupComparison?.currentName}
+        versionTitle={backupComparison?.versionTitle}
+        currentTitle={backupComparison?.currentTitle}
+        actionLabel={backupComparison?.actionLabel}
+        actionIcon={backupComparison?.actionIcon}
+        restoreDisabled={backupComparison?.restoreDisabled}
         t={t}
         onClose={() => setBackupComparison(null)}
         onRestore={() => {
           const comparison = backupComparison;
           if (!comparison) return;
           setBackupComparison(null);
-          void restoreBackup(comparison.backup, comparison.sourcePath, comparison.tabId);
+          comparison.restore();
         }}
       />
       <SettingsDialog
@@ -7096,6 +7373,12 @@ function backupKindMessage(kind: MarkdownBackup["kind"]): string {
   if (kind === "manual") return "Before manual save";
   if (kind === "previous") return "Previous saved version";
   return "Legacy backup";
+}
+
+function draftSnapshotKindMessage(kind: DraftSnapshot["kind"]): string {
+  if (kind === "automatic") return "Automatic editor checkpoint";
+  if (kind === "manual") return "Manual editor checkpoint";
+  return "Protected before replacement";
 }
 
 function formatBytes(bytes: number): string {

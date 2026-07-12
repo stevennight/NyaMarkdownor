@@ -1,6 +1,7 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, type MutableRefObject } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type MutableRefObject } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { type Editor } from "@tiptap/core";
+import { Trash2 } from "lucide-react";
 import { DOMSerializer, type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { CellSelection, TableMap } from "@tiptap/pm/tables";
 import type { MarkdownBlockCommand, MarkdownListIndentDirection, MarkdownTextCommand } from "../lib/editorCommands";
@@ -20,7 +21,7 @@ import type { TableSortDirection } from "../lib/tables";
 import { getScrollProgress, setScrollProgress } from "../lib/scrollSync";
 import { activeRichHeadingIndexAtPosition, richHeadingPositionAtIndex } from "../lib/richOutlineNavigation";
 import { uniqueRichTextSelectionForText } from "../lib/richSelectionText";
-import { splitMarkdownFrontMatter, withMarkdownFrontMatter } from "../lib/markdownFrontMatter";
+import { markdownFrontMatterEditor, promoteMarkdownFrontMatter, splitMarkdownFrontMatter, updateMarkdownFrontMatterContent, withMarkdownFrontMatter } from "../lib/markdownFrontMatter";
 import { shouldHandleSmartCopy } from "../lib/selectionCopy";
 import { richTableStructureTransaction, type RichTableStructureCommand } from "../lib/richTableStructure";
 import { createRichMarkdownExtensions } from "../lib/richMarkdownExtensions";
@@ -111,6 +112,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   const activeHeadingIndexRef = useRef<number | null | undefined>(undefined);
   const synchronizedMarkdownRef = useRef(markdown);
   const frontMatterRef = useRef(splitMarkdownFrontMatter(markdown).frontMatter);
+  const lastEditSurfaceRef = useRef<"body" | "front-matter">("body");
   const pendingHistoryActionRef = useRef<RichMarkdownSyncSource>("input");
   const markdownSyncRef = useRef<ReturnType<typeof createRichMarkdownSyncScheduler> | null>(null);
   onChangeRef.current = onChange;
@@ -125,9 +127,35 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   onScrollProgressRef.current = onScrollProgress;
   if (!markdownSyncRef.current) {
     markdownSyncRef.current = createRichMarkdownSyncScheduler((nextMarkdown, source) => {
-      const fullMarkdown = withMarkdownFrontMatter(frontMatterRef.current, nextMarkdown);
+      const promotion = promoteMarkdownFrontMatter(frontMatterRef.current, nextMarkdown);
+      if (promotion.promoted) {
+        frontMatterRef.current = promotion.frontMatter;
+        lastEditSurfaceRef.current = "body";
+        const currentEditor = editorRef.current;
+        const editorWasFocused = Boolean(
+          currentEditor
+          && !currentEditor.isDestroyed
+          && document.activeElement === currentEditor.view.dom
+        );
+        if (currentEditor && !currentEditor.isDestroyed) {
+          currentEditor.commands.setContent(promotion.body, { contentType: "markdown", emitUpdate: false });
+          reportTableContext(currentEditor, tableActiveRef, onTableContextChangeRef);
+          reportTableSelection(currentEditor, tableSelectionRef, onTableSelectionChangeRef);
+          headingPositionsRef.current = richHeadingPositions(currentEditor);
+          reportActiveRichHeading(currentEditor, headingPositionsRef, activeHeadingIndexRef, onActiveHeadingIndexChangeRef);
+
+          if (editorWasFocused) {
+            window.requestAnimationFrame(() => {
+              if (!currentEditor.isDestroyed) currentEditor.commands.focus("end");
+            });
+          }
+        }
+      }
+
+      const fullMarkdown = withMarkdownFrontMatter(promotion.frontMatter, promotion.body);
       synchronizedMarkdownRef.current = fullMarkdown;
       onChangeRef.current(fullMarkdown, source);
+
     });
   }
 
@@ -144,6 +172,10 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
       handleKeyDown: (_view, event) => {
         const action = richHistoryActionForKeyEvent(event);
         if (!action) return false;
+        if (lastEditSurfaceRef.current === "front-matter") {
+          markdownSyncRef.current?.flush();
+          return onHistoryActionRef.current(action);
+        }
         return runRichHistoryAction(
           editorRef.current,
           action,
@@ -170,7 +202,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
         },
         copy: (_view, event) => {
           const currentEditor = editorRef.current;
-          if (!currentEditor || !shouldHandleSmartCopy(smartCopyRef.current, !currentEditor.state.selection.empty)) return false;
+          if (!currentEditor || currentEditor.isDestroyed || !shouldHandleSmartCopy(smartCopyRef.current, !currentEditor.state.selection.empty)) return false;
 
           const payload = richSelectionClipboardContent(currentEditor);
           const copied = payload ? writeClipboardEventData(event, payload) : null;
@@ -182,7 +214,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
         },
         paste: (_view, event) => {
           const currentEditor = editorRef.current;
-          if (!currentEditor) return false;
+          if (!currentEditor || currentEditor.isDestroyed) return false;
 
           const table = clipboardTableRowsFromData({
             text: event.clipboardData?.getData("text/plain"),
@@ -220,12 +252,12 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
       }
     },
     onUpdate: ({ editor: currentEditor }) => {
+      if (currentEditor.isDestroyed) return;
+      lastEditSurfaceRef.current = "body";
       const source = pendingHistoryActionRef.current;
       pendingHistoryActionRef.current = "input";
       markdownSyncRef.current?.schedule(
-        () => currentEditor.markdown?.serialize(
-          withoutGeneratedTrailingParagraph(currentEditor.getJSON())
-        ) ?? currentEditor.getMarkdown(),
+        () => serializeRichMarkdown(currentEditor, splitMarkdownFrontMatter(synchronizedMarkdownRef.current).body),
         source,
         richMarkdownSyncDelayFor(currentEditor.state.doc.content.size)
       );
@@ -251,8 +283,12 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
     }
   });
 
+  // Keep the instance available even during the short window before Tiptap's
+  // onCreate callback runs. Input can arrive as soon as the editor is painted.
+  editorRef.current = editor;
+
   useEffect(() => {
-    if (!editor) return;
+    if (!editor || editor.isDestroyed) return;
     if (synchronizedMarkdownRef.current === markdown) return;
     const next = splitMarkdownFrontMatter(markdown);
     markdownSyncRef.current?.cancel();
@@ -299,7 +335,13 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
     scrollToHeading: (headingIndex) => scrollToRichHeading(editor, headingPositionsRef.current, headingIndex),
     flushMarkdownSync: () => markdownSyncRef.current?.flush() ?? false,
     getScrollProgress: () => scrollHostRef.current ? getScrollProgress(scrollHostRef.current) : null,
-    runHistoryAction: (action) => runRichHistoryAction(editor, action, markdownSyncRef.current, pendingHistoryActionRef, onHistoryActionRef),
+    runHistoryAction: (action) => {
+      if (lastEditSurfaceRef.current === "front-matter") {
+        markdownSyncRef.current?.flush();
+        return onHistoryActionRef.current(action);
+      }
+      return runRichHistoryAction(editor, action, markdownSyncRef.current, pendingHistoryActionRef, onHistoryActionRef);
+    },
     runTextCommand: (command) => runRichTextCommand(editor, command),
     getLinkState: () => richLinkState(editor),
     setLink: (href) => setRichLink(editor, href),
@@ -326,8 +368,99 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
     getTableClipboardContent: () => richTableClipboardContent(editor)
   }), [editor]);
 
+  const frontMatterEditor = markdownFrontMatterEditor(splitMarkdownFrontMatter(markdown).frontMatter);
+
+  function updateFrontMatter(event: ChangeEvent<HTMLTextAreaElement>) {
+    markdownSyncRef.current?.flush();
+    const nextFrontMatter = updateMarkdownFrontMatterContent(frontMatterRef.current, event.target.value);
+    if (nextFrontMatter === frontMatterRef.current) return;
+
+    const current = splitMarkdownFrontMatter(synchronizedMarkdownRef.current);
+    const nextMarkdown = withMarkdownFrontMatter(nextFrontMatter, current.body);
+    lastEditSurfaceRef.current = "front-matter";
+    frontMatterRef.current = nextFrontMatter;
+    synchronizedMarkdownRef.current = nextMarkdown;
+    onChangeRef.current(nextMarkdown, "input");
+  }
+
+  function handleFrontMatterKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if ((event.key === "Backspace" || event.key === "Delete") && event.currentTarget.value.length === 0) {
+      event.preventDefault();
+      removeFrontMatter();
+      return;
+    }
+
+    const action = richHistoryActionForKeyEvent(event);
+    if (!action) return;
+
+    event.preventDefault();
+    markdownSyncRef.current?.flush();
+    onHistoryActionRef.current(action);
+  }
+
+  function removeFrontMatter() {
+    markdownSyncRef.current?.flush();
+    const current = splitMarkdownFrontMatter(synchronizedMarkdownRef.current);
+    if (!current.frontMatter && !frontMatterRef.current) return;
+
+    let body = current.body;
+    const duplicate = splitMarkdownFrontMatter(body);
+    if (duplicate.frontMatter && duplicate.frontMatter === current.frontMatter) {
+      body = duplicate.body;
+    }
+
+    lastEditSurfaceRef.current = "front-matter";
+    frontMatterRef.current = "";
+    synchronizedMarkdownRef.current = body;
+
+    const currentEditor = editorRef.current;
+    if (currentEditor && !currentEditor.isDestroyed) {
+      currentEditor.commands.setContent(body, { contentType: "markdown", emitUpdate: false });
+      reportTableContext(currentEditor, tableActiveRef, onTableContextChangeRef);
+      reportTableSelection(currentEditor, tableSelectionRef, onTableSelectionChangeRef);
+      headingPositionsRef.current = richHeadingPositions(currentEditor);
+      reportActiveRichHeading(currentEditor, headingPositionsRef, activeHeadingIndexRef, onActiveHeadingIndexChangeRef);
+    }
+
+    onChangeRef.current(body, "input");
+    window.requestAnimationFrame(() => {
+      const nextEditor = editorRef.current;
+      if (nextEditor && !nextEditor.isDestroyed) nextEditor.commands.focus("start");
+    });
+  }
+
   return (
     <div ref={scrollHostRef} className="wysiwyg-editor markdown-body">
+      {frontMatterEditor && (
+        <section
+          className="wysiwyg-front-matter"
+          data-format={frontMatterEditor.format.toLowerCase()}
+          aria-label={`Document properties (${frontMatterEditor.format})`}
+        >
+          <div className="wysiwyg-front-matter-header">
+            <label htmlFor="wysiwyg-front-matter-content">{frontMatterEditor.format}</label>
+            <button
+              className="wysiwyg-front-matter-delete"
+              type="button"
+              aria-label="Delete document properties"
+              title="Delete document properties"
+              onClick={removeFrontMatter}
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+          <textarea
+            id="wysiwyg-front-matter-content"
+            className="wysiwyg-front-matter-content"
+            value={frontMatterEditor.content}
+            aria-label={`${frontMatterEditor.format} document properties`}
+            onChange={updateFrontMatter}
+            onKeyDown={handleFrontMatterKeyDown}
+            rows={Math.max(1, frontMatterEditor.content.split(/\r?\n/).length)}
+            spellCheck={false}
+          />
+        </section>
+      )}
       <EditorContent editor={editor} />
     </div>
   );
@@ -380,7 +513,7 @@ function richHeadingPositions(editor: Editor): number[] {
 }
 
 function scrollToRichHeading(editor: Editor | null, headingPositions: readonly number[], headingIndex: number): boolean {
-  if (!editor) return false;
+  if (!editor || editor.isDestroyed) return false;
   const position = richHeadingPositionAtIndex(headingPositions, headingIndex);
   if (position === null) return false;
 
@@ -402,7 +535,7 @@ function reportActiveRichHeading(
 }
 
 function richSelectionClipboardContent(editor: Editor | null): RichMarkdownClipboardContent | null {
-  if (!editor) return null;
+  if (!editor || editor.isDestroyed) return null;
 
   if (editor.state.selection instanceof CellSelection) {
     const table = richTableClipboardContent(editor);
@@ -431,7 +564,7 @@ function richSelectionClipboardContent(editor: Editor | null): RichMarkdownClipb
 }
 
 function richTableClipboardContent(editor: Editor | null): RichTableClipboardContent | null {
-  if (!editor) return null;
+  if (!editor || editor.isDestroyed) return null;
 
   const selection = editor.state.selection;
   const tableContext = richTableContext(editor, selection instanceof CellSelection);
@@ -507,7 +640,13 @@ function selectRichTableCell(editor: Editor, row: number, column: number): boole
   return true;
 }
 
-function richHistoryActionForKeyEvent(event: KeyboardEvent): RichDocumentHistoryAction | null {
+function richHistoryActionForKeyEvent(event: {
+  altKey: boolean;
+  ctrlKey: boolean;
+  key: string;
+  metaKey: boolean;
+  shiftKey: boolean;
+}): RichDocumentHistoryAction | null {
   if (!(event.ctrlKey || event.metaKey) || event.altKey) return null;
   const key = event.key.toLowerCase();
   if (key === "z") return event.shiftKey ? "redo" : "undo";
@@ -522,7 +661,7 @@ function runRichHistoryAction(
   pendingAction: MutableRefObject<RichMarkdownSyncSource>,
   fallback: MutableRefObject<(action: RichDocumentHistoryAction) => boolean>
 ): boolean {
-  if (!editor) return false;
+  if (!editor || editor.isDestroyed) return false;
 
   scheduler?.flush();
   pendingAction.current = action;
@@ -533,6 +672,18 @@ function runRichHistoryAction(
 
   pendingAction.current = "input";
   return fallback.current(action);
+}
+
+function serializeRichMarkdown(editor: Editor, fallback: string): string {
+  if (editor.isDestroyed) return fallback;
+
+  try {
+    return editor.markdown?.serialize(
+      withoutGeneratedTrailingParagraph(editor.getJSON())
+    ) ?? editor.getMarkdown();
+  } catch {
+    return fallback;
+  }
 }
 
 function clipboardTableSourceLabel(source: ClipboardTableSource): string {

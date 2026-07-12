@@ -6,6 +6,8 @@ const SNAPSHOT_STORAGE_KEY = "nya-markdownor-draft-snapshots-v1";
 const MAX_SNAPSHOTS_PER_DOCUMENT = 8;
 const MAX_SNAPSHOTS_TOTAL = 32;
 
+export type DraftSnapshotKind = "automatic" | "manual" | "preserved";
+
 export type DraftSnapshot = {
   id: string;
   fileName: string;
@@ -16,6 +18,7 @@ export type DraftSnapshot = {
   fileStats: MarkdownFileStats | null;
   createdAt: number;
   size: number;
+  kind: DraftSnapshotKind;
 };
 
 export type DraftSnapshotsRecord = {
@@ -29,7 +32,11 @@ export type DraftSnapshotsUpdate = {
   changed: boolean;
 };
 
-export function createDraftSnapshot(document: MarkdownDocument, createdAt = Date.now()): DraftSnapshot {
+export function createDraftSnapshot(
+  document: MarkdownDocument,
+  createdAt = Date.now(),
+  kind: DraftSnapshotKind = "preserved"
+): DraftSnapshot {
   const key = document.filePath ?? document.fileName;
   return {
     id: `${createdAt}-${hashString(`${key}\n${document.markdown}`)}`,
@@ -40,7 +47,8 @@ export function createDraftSnapshot(document: MarkdownDocument, createdAt = Date
     lineEnding: document.lineEnding,
     fileStats: document.fileStats ?? null,
     createdAt,
-    size: new Blob([document.markdown]).size
+    size: new Blob([document.markdown]).size,
+    kind
   };
 }
 
@@ -231,8 +239,13 @@ function normalizeDraftSnapshot(value: unknown): DraftSnapshot | null {
     lineEnding: isMarkdownLineEnding(snapshot.lineEnding) ? snapshot.lineEnding : normalized.lineEnding,
     fileStats: snapshot.fileStats,
     createdAt: snapshot.createdAt,
-    size: new Blob([normalized.markdown]).size
+    size: new Blob([normalized.markdown]).size,
+    kind: isDraftSnapshotKind(snapshot.kind) ? snapshot.kind : "preserved"
   };
+}
+
+function isDraftSnapshotKind(value: unknown): value is DraftSnapshotKind {
+  return value === "automatic" || value === "manual" || value === "preserved";
 }
 
 function isFileStats(value: unknown): value is MarkdownFileStats {

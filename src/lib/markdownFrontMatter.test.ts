@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { splitMarkdownFrontMatter, withMarkdownFrontMatter } from "./markdownFrontMatter";
+import {
+  markdownFrontMatterEditor,
+  promoteMarkdownFrontMatter,
+  splitMarkdownFrontMatter,
+  updateMarkdownFrontMatterContent,
+  withMarkdownFrontMatter
+} from "./markdownFrontMatter";
 
 describe("Markdown front matter", () => {
   it("separates and restores YAML front matter without changing its bytes", () => {
@@ -49,5 +55,56 @@ describe("Markdown front matter", () => {
     const markdown = "Intro\n---\nname: workflow-skill\n---\n";
 
     expect(splitMarkdownFrontMatter(markdown)).toEqual({ frontMatter: "", body: markdown });
+  });
+
+  it("promotes newly completed visual-editor front matter out of the document body", () => {
+    expect(promoteMarkdownFrontMatter("", "---\nname: n\n---\n# Body")).toEqual({
+      frontMatter: "---\nname: n\n---\n",
+      body: "# Body",
+      promoted: true
+    });
+    expect(promoteMarkdownFrontMatter("", "Intro\n---\nname: n\n---")).toEqual({
+      frontMatter: "",
+      body: "Intro\n---\nname: n\n---",
+      promoted: false
+    });
+  });
+
+  it("does not promote a second front matter block when one already exists", () => {
+    expect(promoteMarkdownFrontMatter("---\ntitle: Existing\n---\n", "---\nname: body\n---")).toEqual({
+      frontMatter: "---\ntitle: Existing\n---\n",
+      body: "---\nname: body\n---",
+      promoted: false
+    });
+  });
+
+  it("builds a visual-editor model without exposing the delimiters", () => {
+    expect(markdownFrontMatterEditor("---\r\nname: workflow-skill\r\ndescription: xxx\r\n---\r\n")).toEqual({
+      delimiter: "---",
+      format: "YAML",
+      content: "name: workflow-skill\r\ndescription: xxx",
+      lineEnding: "\r\n",
+      trailingLineEnding: true
+    });
+    expect(markdownFrontMatterEditor("+++\nname = 'Draft'\n+++")).toEqual({
+      delimiter: "+++",
+      format: "TOML",
+      content: "name = 'Draft'",
+      lineEnding: "\n",
+      trailingLineEnding: false
+    });
+  });
+
+  it("updates only front matter content while preserving its envelope", () => {
+    expect(updateMarkdownFrontMatterContent(
+      "---\r\nname: old\r\n---\r\n",
+      "name: new\ndescription: changed"
+    )).toBe("---\r\nname: new\r\ndescription: changed\r\n---\r\n");
+    expect(updateMarkdownFrontMatterContent("---\n---\n", "name: added"))
+      .toBe("---\nname: added\n---\n");
+    expect(updateMarkdownFrontMatterContent("---\nname: removed\n---\n", ""))
+      .toBe("---\n---\n");
+    expect(updateMarkdownFrontMatterContent("not front matter", "name: ignored"))
+      .toBe("not front matter");
   });
 });

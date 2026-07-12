@@ -9,6 +9,7 @@ import { tableCellBoundaryRange, unescapedPipeIndexes } from "./tableSourceRange
 import { normalizeTextRanges } from "./textRanges";
 import { clampSelectionRangesToTableBlock, tableBlockForSelectionRanges } from "./tableSelectionRanges";
 import { splitMarkdownFrontMatter } from "./markdownFrontMatter";
+import { highlightCodeHtml } from "./codeHighlight";
 
 const markdownIt = new MarkdownIt({
   html: false,
@@ -140,6 +141,14 @@ markdownIt.renderer.rules.image = (tokens, index, options, env, self) => {
   return self.renderToken(tokens, index, options);
 };
 
+markdownIt.renderer.rules.fence = (tokens, index, options, env, self) => {
+  const token = tokens[index];
+  const language = token.info.trim().split(/\s+/, 1)[0] ?? "";
+  const languageAttribute = language ? ` data-language="${escapeHtmlText(language)}"` : "";
+  const classAttribute = language ? ` class="language-${escapeHtmlText(language)}"` : "";
+  return `<pre${languageAttribute}><code${classAttribute}>${highlightCodeHtml(token.content, language)}</code></pre>\n`;
+};
+
 export function renderMarkdown(markdown: string): RenderedMarkdown {
   return {
     html: renderMarkdownHtml(markdown),
@@ -149,7 +158,7 @@ export function renderMarkdown(markdown: string): RenderedMarkdown {
 
 export function renderMarkdownHtml(markdown: string): string {
   const { frontMatter, body } = splitMarkdownFrontMatter(markdown);
-  return renderMarkdownFragment(body, frontMatterLineCount(frontMatter));
+  return `${renderFrontMatterPreview(frontMatter)}${renderMarkdownFragment(body, frontMatterLineCount(frontMatter))}`;
 }
 
 export function markdownToHtmlFragment(markdown: string): string {
@@ -161,6 +170,43 @@ function renderMarkdownFragment(markdown: string, sourceLineOffset: number): str
     headingIds: new Map<string, number>(),
     sourceLineOffset
   });
+}
+
+function renderFrontMatterPreview(frontMatter: string): string {
+  if (!frontMatter) return "";
+
+  const isToml = frontMatter.startsWith("+++");
+  const format = isToml ? "TOML" : "YAML";
+  const propertyPattern = isToml
+    ? /^([A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=[ \t]*(.*)$/
+    : /^([A-Za-z_][A-Za-z0-9_.-]*)[ \t]*:[ \t]*(.*)$/;
+  const normalized = frontMatter.replace(/\r\n?/g, "\n");
+  const lines = normalized.endsWith("\n")
+    ? normalized.slice(0, -1).split("\n")
+    : normalized.split("\n");
+  const rows = lines.slice(1, -1)
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const property = line.match(propertyPattern);
+      if (!property) {
+        return `<div class="front-matter-preview-row front-matter-preview-raw"><span>${escapeHtmlText(line)}</span></div>`;
+      }
+
+      return [
+        '<div class="front-matter-preview-row">',
+        `<span class="front-matter-preview-key">${escapeHtmlText(property[1])}</span>`,
+        `<span class="front-matter-preview-value">${escapeHtmlText(property[2])}</span>`,
+        "</div>"
+      ].join("");
+    })
+    .join("");
+
+  return [
+    `<section class="front-matter-preview" data-format="${format.toLowerCase()}" aria-label="Document properties (${format})">`,
+    `<div class="front-matter-preview-header">${format}</div>`,
+    `<div class="front-matter-preview-content">${rows}</div>`,
+    "</section>\n"
+  ].join("");
 }
 
 export function markdownRangeToClipboardPayload(markdown: string, selection: TextRange): { plainText: string; markdown: string; html: string } {

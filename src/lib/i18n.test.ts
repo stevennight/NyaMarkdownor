@@ -23,6 +23,11 @@ describe("i18n", () => {
     expect(createTranslator("zh-CN")("Backup location")).toBe("备份位置");
     expect(createTranslator("zh-CN")("System local data")).toBe("系统本地数据目录");
     expect(createTranslator("zh-CN")("Automatic versions per file")).toBe("每个文件的自动版本数");
+    expect(createTranslator("zh-CN")("Orphaned history retention")).toBe("孤立历史保留时长");
+    expect(createTranslator("zh-CN")("Delete orphaned history")).toBe("删除孤立历史");
+    expect(createTranslator("zh-CN")("This permanently deletes every retained backup version for this source file from all backup locations. This cannot be undone."))
+      .toBe("这会从所有备份位置永久删除该源文件的全部保留版本，且无法恢复。");
+    expect(createTranslator("en")("Orphaned history retention")).toBe("Orphaned history retention");
     expect(createTranslator("en")("Use system location")).toBe("Use system location");
     expect(createTranslator("zh-CN")("Show {count} older versions", { count: 18 })).toBe("显示其余 18 个版本");
     expect(translate("zh-CN", "{count} files", { count: 3 })).toBe("3 files");

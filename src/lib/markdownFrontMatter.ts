@@ -3,6 +3,18 @@ export type MarkdownFrontMatter = {
   body: string;
 };
 
+export type MarkdownFrontMatterEditor = {
+  delimiter: "---" | "+++";
+  format: "YAML" | "TOML";
+  content: string;
+  lineEnding: "\n" | "\r\n";
+  trailingLineEnding: boolean;
+};
+
+export type MarkdownFrontMatterPromotion = MarkdownFrontMatter & {
+  promoted: boolean;
+};
+
 export function splitMarkdownFrontMatter(markdown: string): MarkdownFrontMatter {
   const opening = markdown.match(/^(---|\+\+\+)\r?\n/);
   if (!opening) return { frontMatter: "", body: markdown };
@@ -39,4 +51,49 @@ export function withMarkdownFrontMatter(frontMatter: string, body: string): stri
 
   const lineEnding = frontMatter.includes("\r\n") ? "\r\n" : "\n";
   return `${frontMatter}${lineEnding}${body}`;
+}
+
+export function promoteMarkdownFrontMatter(currentFrontMatter: string, body: string): MarkdownFrontMatterPromotion {
+  if (currentFrontMatter) {
+    return { frontMatter: currentFrontMatter, body, promoted: false };
+  }
+
+  const detected = splitMarkdownFrontMatter(body);
+  return detected.frontMatter
+    ? { ...detected, promoted: true }
+    : { frontMatter: "", body, promoted: false };
+}
+
+export function markdownFrontMatterEditor(frontMatter: string): MarkdownFrontMatterEditor | null {
+  if (!frontMatter) return null;
+
+  const delimiter = frontMatter.startsWith("+++") ? "+++" : "---";
+  const lineEnding = frontMatter.includes("\r\n") ? "\r\n" : "\n";
+  const trailingLineEnding = frontMatter.endsWith(lineEnding);
+  const withoutTrailingLineEnding = trailingLineEnding
+    ? frontMatter.slice(0, -lineEnding.length)
+    : frontMatter;
+  const openingEnd = withoutTrailingLineEnding.indexOf(lineEnding);
+  const closingStart = withoutTrailingLineEnding.lastIndexOf(lineEnding);
+  if (openingEnd < 0 || closingStart < openingEnd) return null;
+
+  return {
+    delimiter,
+    format: delimiter === "+++" ? "TOML" : "YAML",
+    content: withoutTrailingLineEnding.slice(openingEnd + lineEnding.length, closingStart),
+    lineEnding,
+    trailingLineEnding
+  };
+}
+
+export function updateMarkdownFrontMatterContent(frontMatter: string, content: string): string {
+  const editor = markdownFrontMatterEditor(frontMatter);
+  if (!editor) return frontMatter;
+
+  const normalizedContent = content.replace(/\r\n?|\n/g, editor.lineEnding);
+  return editor.delimiter
+    + editor.lineEnding
+    + (normalizedContent ? `${normalizedContent}${editor.lineEnding}` : "")
+    + editor.delimiter
+    + (editor.trailingLineEnding ? editor.lineEnding : "");
 }

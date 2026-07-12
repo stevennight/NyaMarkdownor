@@ -23,7 +23,8 @@ export const defaultBackupPreferences: BackupPreferences = {
   maxTotalFiles: 2048,
   maxTotalSizeMb: 2048,
   maxBackupFileSizeMb: 256,
-  automaticRetentionDays: 180
+  automaticRetentionDays: 180,
+  orphanRetentionDays: 365
 };
 
 export const defaultPreferences: AppPreferences = {
@@ -135,7 +136,8 @@ export function normalizeBackupPreferences(value: Partial<BackupPreferences> | n
     maxTotalFiles: clampNumber(backup.maxTotalFiles, 128, 20000, defaultBackupPreferences.maxTotalFiles),
     maxTotalSizeMb,
     maxBackupFileSizeMb,
-    automaticRetentionDays: clampNumber(backup.automaticRetentionDays, 7, 3650, defaultBackupPreferences.automaticRetentionDays)
+    automaticRetentionDays: clampNumber(backup.automaticRetentionDays, 7, 3650, defaultBackupPreferences.automaticRetentionDays),
+    orphanRetentionDays: clampNumber(backup.orphanRetentionDays, 7, 3650, defaultBackupPreferences.orphanRetentionDays)
   };
 }
 

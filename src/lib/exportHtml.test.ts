@@ -25,13 +25,15 @@ describe("HTML export", () => {
     expect(html).toContain("&lt;script&gt;");
   });
 
-  it("exports the document body without YAML front matter", () => {
+  it("exports YAML front matter as a styled property block", () => {
     const html = createExportHtmlDocument("---\nname: workflow-skill\ndescription: xxx\n---\n# Guide", {
       title: "Guide.md"
     });
 
-    expect(html).not.toContain("workflow-skill");
-    expect(html).not.toContain("description: xxx");
+    expect(html).toContain('class="front-matter-preview"');
+    expect(html).toContain("workflow-skill");
+    expect(html).toContain("description");
+    expect(html).not.toContain("<hr>");
     expect(html).toContain('<h1 id="guide">Guide</h1>');
   });
 });

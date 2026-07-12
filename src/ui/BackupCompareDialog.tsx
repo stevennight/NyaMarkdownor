@@ -3,8 +3,8 @@ import { EditorState } from "@codemirror/state";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { EditorView, lineNumbers } from "@codemirror/view";
-import { unifiedMergeView } from "@codemirror/merge";
-import { ArrowRight, GitCompareArrows, RotateCcw, X } from "lucide-react";
+import { MergeView } from "@codemirror/merge";
+import { ArrowRight, FileText, GitCompareArrows, RotateCcw, X } from "lucide-react";
 import type { Translator } from "../lib/i18n";
 import "./BackupCompareDialog.css";
 
@@ -15,6 +15,10 @@ export type BackupCompareDialogProps = {
   currentMarkdown: string;
   backupLabel?: string;
   currentLabel?: string;
+  versionTitle?: string;
+  currentTitle?: string;
+  actionLabel?: string;
+  actionIcon?: "restore" | "open";
   restoreDisabled?: boolean;
   t: Translator;
   onClose: () => void;
@@ -28,6 +32,10 @@ export function BackupCompareDialog({
   currentMarkdown,
   backupLabel,
   currentLabel,
+  versionTitle,
+  currentTitle,
+  actionLabel,
+  actionIcon = "restore",
   restoreDisabled = false,
   t,
   onClose,
@@ -85,54 +93,50 @@ export function BackupCompareDialog({
     const host = diffHostRef.current;
     if (!open || !host) return undefined;
 
-    const view = new EditorView({
+    const readOnlyExtensions = [
+      EditorState.readOnly.of(true),
+      EditorView.editable.of(false),
+      lineNumbers(),
+      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      markdown({ base: markdownLanguage }),
+      EditorView.lineWrapping,
+      EditorView.theme({
+        "&": {
+          height: "100%",
+          background: "var(--editor-bg)",
+          color: "var(--text)"
+        },
+        ".cm-scroller": {
+          fontFamily: "var(--mono)",
+          fontSize: "13px",
+          lineHeight: "1.58",
+          overflow: "auto"
+        },
+        ".cm-content": {
+          minHeight: "100%",
+          padding: "14px 20px 64px"
+        },
+        ".cm-gutters": {
+          background: "var(--surface-raised)",
+          color: "var(--subtle)",
+          borderRight: "1px solid var(--line)"
+        },
+        ".cm-focused": {
+          outline: "none"
+        }
+      })
+    ];
+
+    const view = new MergeView({
       parent: host,
-      doc: currentMarkdown,
-      extensions: [
-        EditorState.readOnly.of(true),
-        EditorView.editable.of(false),
-        lineNumbers(),
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-        markdown({ base: markdownLanguage }),
-        unifiedMergeView({
-          original: backupMarkdown,
-          highlightChanges: true,
-          gutter: true,
-          syntaxHighlightDeletions: true,
-          allowInlineDiffs: true,
-          mergeControls: false,
-          collapseUnchanged: {
-            margin: 3,
-            minSize: 8
-          }
-        }),
-        EditorView.lineWrapping,
-        EditorView.theme({
-          "&": {
-            height: "100%",
-            background: "var(--editor-bg)",
-            color: "var(--text)"
-          },
-          ".cm-scroller": {
-            fontFamily: "var(--mono)",
-            fontSize: "13px",
-            lineHeight: "1.58",
-            overflow: "auto"
-          },
-          ".cm-content": {
-            minHeight: "100%",
-            padding: "14px 20px 64px"
-          },
-          ".cm-gutters": {
-            background: "var(--surface-raised)",
-            color: "var(--subtle)",
-            borderRight: "1px solid var(--line)"
-          },
-          ".cm-focused": {
-            outline: "none"
-          }
-        })
-      ]
+      a: { doc: backupMarkdown, extensions: readOnlyExtensions },
+      b: { doc: currentMarkdown, extensions: readOnlyExtensions },
+      highlightChanges: true,
+      gutter: true,
+      collapseUnchanged: {
+        margin: 3,
+        minSize: 8
+      }
     });
 
     return () => view.destroy();
@@ -174,7 +178,7 @@ export function BackupCompareDialog({
           <div className="backup-compare-version backup-compare-version-old">
             <span aria-hidden="true">-</span>
             <div>
-              <strong>{t("Older version")}</strong>
+              <strong>{t(versionTitle ?? "Older version")}</strong>
               {backupLabel && <small>{backupLabel}</small>}
             </div>
           </div>
@@ -184,7 +188,7 @@ export function BackupCompareDialog({
           <div className="backup-compare-version backup-compare-version-current">
             <span aria-hidden="true">+</span>
             <div>
-              <strong>{t("Current editor")}</strong>
+              <strong>{t(currentTitle ?? "Current editor")}</strong>
               {currentLabel && <small>{currentLabel}</small>}
             </div>
           </div>
@@ -202,8 +206,8 @@ export function BackupCompareDialog({
             disabled={restoreDisabled}
             onClick={onRestore}
           >
-            <RotateCcw aria-hidden="true" />
-            <span>{t("Restore this version")}</span>
+            {actionIcon === "open" ? <FileText aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}
+            <span>{t(actionLabel ?? "Restore this version")}</span>
           </button>
         </footer>
       </section>

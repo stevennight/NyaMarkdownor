@@ -209,6 +209,20 @@ export async function listMarkdownBackupHistories(
   });
 }
 
+export async function deleteMarkdownBackupHistory(
+  sourcePath: string,
+  backupSettings?: BackupPreferences
+): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("Deleting backup history requires the desktop app.");
+  }
+
+  await invoke("delete_markdown_backup_history", {
+    sourcePath,
+    ...(backupSettings ? { backupSettings } : {})
+  });
+}
+
 export async function pickMarkdownBackupDirectory(): Promise<string | null> {
   if (!isTauriRuntime()) throw new Error("Choosing a backup folder requires the desktop app.");
   return invoke<string | null>("pick_markdown_backup_directory");

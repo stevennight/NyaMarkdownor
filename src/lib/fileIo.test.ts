@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import type { BackupPreferences } from "../types";
-import { createMarkdownFile, ensureHtmlName, ensureHtmlPath, ensureMarkdownName, ensureMarkdownPath, importMarkdownFilesAsDrafts, isTauriRuntime, listMarkdownBackupHistories, listMarkdownBackups, manageFileAssociation, openedFileHasLocalBinding, openMarkdownFiles, openMarkdownFilesToast, openMarkdownFilesToastWithFailures, pickMarkdownBackupDirectory, readMarkdownBackup, readMarkdownPath, revealMarkdownFile, saveMarkdownFile, supportsBrowserFileAccess, uniqueOpenPaths } from "./fileIo";
+import { createMarkdownFile, deleteMarkdownBackupHistory, ensureHtmlName, ensureHtmlPath, ensureMarkdownName, ensureMarkdownPath, importMarkdownFilesAsDrafts, isTauriRuntime, listMarkdownBackupHistories, listMarkdownBackups, manageFileAssociation, openedFileHasLocalBinding, openMarkdownFiles, openMarkdownFilesToast, openMarkdownFilesToastWithFailures, pickMarkdownBackupDirectory, readMarkdownBackup, readMarkdownPath, revealMarkdownFile, saveMarkdownFile, supportsBrowserFileAccess, uniqueOpenPaths } from "./fileIo";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -18,7 +18,8 @@ const backupSettings: BackupPreferences = {
   maxTotalFiles: 2048,
   maxTotalSizeMb: 2048,
   maxBackupFileSizeMb: 256,
-  automaticRetentionDays: 180
+  automaticRetentionDays: 180,
+  orphanRetentionDays: 365
 };
 
 afterEach(() => {
@@ -341,6 +342,23 @@ describe("file IO path helpers", () => {
     expect(invokeMock).toHaveBeenCalledWith("stat_markdown_file", {
       path: "D:/missing/Orphan.md"
     });
+  });
+
+  it("deletes all backup history for a source with the configured backup roots", async () => {
+    vi.stubGlobal("isTauri", true);
+    invokeMock.mockResolvedValue(undefined);
+
+    await expect(deleteMarkdownBackupHistory("D:/missing/Orphan.md", backupSettings)).resolves.toBeUndefined();
+    expect(invokeMock).toHaveBeenCalledWith("delete_markdown_backup_history", {
+      sourcePath: "D:/missing/Orphan.md",
+      backupSettings
+    });
+  });
+
+  it("rejects backup history deletion outside the desktop runtime", async () => {
+    await expect(deleteMarkdownBackupHistory("D:/missing/Orphan.md", backupSettings))
+      .rejects.toThrow("Deleting backup history requires the desktop app.");
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 
   it("routes backup directory selection through the desktop command", async () => {

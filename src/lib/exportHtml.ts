@@ -39,6 +39,7 @@ function exportStyles(): string {
       --line: rgba(32, 42, 52, 0.16);
       --accent: #2f7f6f;
       --code-bg: rgba(47, 127, 111, 0.08);
+      --property-bg: rgba(47, 127, 111, 0.07);
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -49,6 +50,7 @@ function exportStyles(): string {
         --line: rgba(232, 236, 234, 0.14);
         --accent: #66b8a5;
         --code-bg: rgba(102, 184, 165, 0.12);
+        --property-bg: rgba(102, 184, 165, 0.1);
       }
     }
     * { box-sizing: border-box; }
@@ -73,6 +75,52 @@ function exportStyles(): string {
     h3 { font-size: 1.2rem; }
     p, ul, ol, blockquote, table, pre { margin: 0.85em 0; }
     a { color: var(--accent); }
+    .front-matter-preview {
+      container-type: inline-size;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--accent);
+      border-radius: 6px;
+      background: var(--property-bg);
+      margin: 0 0 1.35em;
+      color: var(--muted);
+      font-size: 0.9em;
+    }
+    .front-matter-preview-header {
+      border-bottom: 1px solid var(--line);
+      font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 7px 12px;
+    }
+    .front-matter-preview-row {
+      display: grid;
+      grid-template-columns: minmax(90px, 0.28fr) minmax(0, 1fr);
+      gap: 12px;
+      padding: 8px 12px;
+    }
+    .front-matter-preview-row + .front-matter-preview-row { border-top: 1px solid var(--line); }
+    .front-matter-preview-key {
+      color: var(--accent);
+      font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .front-matter-preview-value, .front-matter-preview-raw {
+      min-width: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .front-matter-preview-raw {
+      grid-template-columns: minmax(0, 1fr);
+      font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    }
+    @container (max-width: 320px) {
+      .front-matter-preview-row {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 2px;
+      }
+    }
     blockquote {
       border-left: 3px solid var(--accent);
       color: var(--muted);

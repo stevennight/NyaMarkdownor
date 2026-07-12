@@ -55,7 +55,8 @@ describe("preferences", () => {
         maxTotalFiles: 24,
         maxTotalSizeMb: 99999,
         maxBackupFileSizeMb: 1,
-        automaticRetentionDays: 99999
+        automaticRetentionDays: 99999,
+        orphanRetentionDays: 0
       } as never
     });
 
@@ -68,7 +69,8 @@ describe("preferences", () => {
       maxTotalFiles: 128,
       maxTotalSizeMb: 32768,
       maxBackupFileSizeMb: 16,
-      automaticRetentionDays: 3650
+      automaticRetentionDays: 3650,
+      orphanRetentionDays: 7
     });
   });
 

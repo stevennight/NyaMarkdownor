@@ -177,11 +177,13 @@
 .backup-compare-diff {
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
   background: var(--editor-bg);
 }
 
-.backup-compare-diff .cm-editor {
+.backup-compare-diff .cm-mergeView {
+  min-width: 720px;
+  min-height: 100%;
   height: 100%;
 }
 
@@ -189,22 +191,22 @@
   overscroll-behavior: contain;
 }
 
-.backup-compare-diff .cm-editor.cm-merge-b .cm-changedLine,
+.backup-compare-diff .cm-editor .cm-changedLine,
 .backup-compare-diff .cm-editor .cm-inlineChangedLine {
   background: color-mix(in srgb, #2f8f5b, transparent 90%) !important;
 }
 
-.backup-compare-diff .cm-editor .cm-deletedChunk {
+.backup-compare-diff .cm-editor.cm-merge-a .cm-changedLine,
+.backup-compare-diff .cm-editor.cm-merge-a .cm-inlineChangedLine {
   background: color-mix(in srgb, var(--danger), transparent 91%) !important;
-  border-block: 1px solid color-mix(in srgb, var(--danger), transparent 82%);
 }
 
-.backup-compare-diff .cm-editor.cm-merge-b .cm-changedText {
+.backup-compare-diff .cm-editor:not(.cm-merge-a) .cm-changedText {
   background: color-mix(in srgb, #2f8f5b, transparent 76%) !important;
   text-decoration: none;
 }
 
-.backup-compare-diff .cm-editor .cm-deletedChunk .cm-deletedText {
+.backup-compare-diff .cm-editor.cm-merge-a .cm-changedText {
   background: color-mix(in srgb, var(--danger), transparent 78%) !important;
   text-decoration: none;
 }
@@ -286,8 +288,11 @@
   }
 
   .backup-compare-diff .cm-content {
-    min-width: max-content;
     padding-inline: 12px;
+  }
+
+  .backup-compare-diff .cm-mergeView {
+    min-width: 620px;
   }
 
   .backup-compare-actions {
