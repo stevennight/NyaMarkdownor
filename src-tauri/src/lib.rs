@@ -27,10 +27,63 @@ const MAX_WORKSPACE_FILES: usize = 800;
 const SUPPORTED_MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkdn", "mdwn", "txt"];
 const LINUX_DESKTOP_ENTRY: &str = "dev.nyamarkdownor.app.desktop";
 const FILE_CHANGED_DURING_SAVE_ERROR: &str = "File changed on disk before save.";
+const DEFAULT_UPDATE_REPOSITORY: &str = "stevennight/NyaMarkdownor";
 #[cfg(windows)]
 const CP_GBK: u32 = 936;
 #[cfg(windows)]
 const CP_GB18030: u32 = 54936;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildInfo {
+    name: String,
+    version: String,
+    commit: String,
+    build_date: String,
+    update_repository: String,
+}
+
+fn application_version() -> &'static str {
+    option_env!("NYAMARKDOWNOR_VERSION").unwrap_or(concat!(env!("CARGO_PKG_VERSION"), "-dev"))
+}
+
+fn build_info() -> BuildInfo {
+    BuildInfo {
+        name: "NyaMarkdownor".to_string(),
+        version: application_version().to_string(),
+        commit: option_env!("NYAMARKDOWNOR_COMMIT")
+            .unwrap_or_default()
+            .to_string(),
+        build_date: option_env!("NYAMARKDOWNOR_BUILD_DATE")
+            .unwrap_or_default()
+            .to_string(),
+        update_repository: option_env!("NYAMARKDOWNOR_UPDATE_REPOSITORY")
+            .unwrap_or(DEFAULT_UPDATE_REPOSITORY)
+            .to_string(),
+    }
+}
+
+pub fn version_output() -> String {
+    let info = build_info();
+    let mut parts = vec![format!("{} v{}", info.name, info.version)];
+
+    if !info.commit.is_empty() {
+        parts.push(format!("commit={}", info.commit));
+    }
+    if !info.build_date.is_empty() {
+        parts.push(format!("built={}", info.build_date));
+    }
+    if !info.update_repository.is_empty() {
+        parts.push(format!("updates={}", info.update_repository));
+    }
+
+    parts.join(" ")
+}
+
+#[tauri::command]
+fn get_build_info() -> BuildInfo {
+    build_info()
+}
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -5023,6 +5076,7 @@ pub fn run() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            get_build_info,
             create_markdown_file,
             delete_markdown_backup_history,
             existing_markdown_file_stats,

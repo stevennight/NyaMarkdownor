@@ -3,6 +3,7 @@ import {
   FileText,
   FolderOpen,
   History,
+  Info,
   PenLine,
   RotateCcw,
   SlidersHorizontal,
@@ -10,6 +11,7 @@ import {
   type LucideIcon
 } from "lucide-react";
 import type { BackupPreferences, EditorDensity, LanguagePreference, TableHeightMode, ThemeMode, ViewMode } from "../types";
+import type { BuildInfo } from "../lib/buildInfo";
 import type { FileAssociationScope } from "../lib/fileIo";
 import type { Translator } from "../lib/i18n";
 
@@ -31,6 +33,7 @@ type SettingsDialogProps = {
   tableMaxHeightVh: number;
   backupPreferences: BackupPreferences;
   backupDirectoryAvailable: boolean;
+  buildInfo: BuildInfo;
   t: Translator;
   onClose: () => void;
   onViewModeChange: (value: ViewMode) => void;
@@ -51,7 +54,7 @@ type SettingsDialogProps = {
   onBackupPreferencesChange: (value: BackupPreferences) => void;
 };
 
-type SettingsCategoryId = "general" | "editor" | "files" | "backups";
+type SettingsCategoryId = "general" | "editor" | "files" | "backups" | "about";
 
 type SettingsCategory = {
   id: SettingsCategoryId;
@@ -77,6 +80,7 @@ export function SettingsDialog({
   tableMaxHeightVh,
   backupPreferences,
   backupDirectoryAvailable,
+  buildInfo,
   t,
   onClose,
   onViewModeChange,
@@ -120,7 +124,8 @@ export function SettingsDialog({
       : []),
     ...(backupDirectoryAvailable
       ? [{ id: "backups" as const, label: t("Backups"), icon: History }]
-      : [])
+      : []),
+    { id: "about", label: t("About"), icon: Info }
   ];
   const selectedCategory = categories.find((category) => category.id === activeCategory) ?? categories[0];
 
@@ -399,6 +404,32 @@ export function SettingsDialog({
                     max={3650}
                     onChange={(value) => updateBackupPreference("orphanRetentionDays", value)}
                   />
+                </section>
+              </>
+            )}
+
+            {selectedCategory.id === "about" && (
+              <>
+                <section className="settings-section">
+                  <div className="settings-section-title">NyaMarkdownor</div>
+                  <div className="settings-row">
+                    <span>{t("Version")}</span>
+                    <output className="settings-build-value">v{buildInfo.version}</output>
+                  </div>
+                  <div className="settings-row">
+                    <span>{t("Commit")}</span>
+                    <output className="settings-build-value">{buildInfo.commit || t("Development build")}</output>
+                  </div>
+                  <div className="settings-row">
+                    <span>{t("Build date")}</span>
+                    <output className="settings-build-value">{buildInfo.buildDate || t("Development build")}</output>
+                  </div>
+                </section>
+                <section className="settings-section">
+                  <div className="settings-row">
+                    <span>{t("Release repository")}</span>
+                    <output className="settings-build-value">{buildInfo.updateRepository}</output>
+                  </div>
                 </section>
               </>
             )}

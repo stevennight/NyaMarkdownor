@@ -3257,6 +3257,17 @@ kbd {
   white-space: nowrap;
 }
 
+.settings-build-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .settings-actions {
   display: flex;
   flex-wrap: wrap;

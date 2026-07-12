@@ -1,8 +1,29 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+const processEnvironment = (globalThis as typeof globalThis & {
+  process?: { env?: Record<string, string | undefined> };
+}).process?.env;
+
+function environmentValue(name: string): string {
+  return processEnvironment?.[name]?.trim() ?? "";
+}
+
+const packageVersion = environmentValue("npm_package_version") || "0.1.0";
+
+const buildInfo = {
+  name: "NyaMarkdownor",
+  version: environmentValue("NYAMARKDOWNOR_VERSION") || `${packageVersion}-dev`,
+  commit: environmentValue("NYAMARKDOWNOR_COMMIT"),
+  buildDate: environmentValue("NYAMARKDOWNOR_BUILD_DATE") || new Date().toISOString(),
+  updateRepository: environmentValue("NYAMARKDOWNOR_UPDATE_REPOSITORY") || "stevennight/NyaMarkdownor"
+};
+
 export default defineConfig({
   plugins: [react()],
+  define: {
+    __APP_INFO__: JSON.stringify(buildInfo)
+  },
   clearScreen: false,
   server: {
     host: "127.0.0.1",

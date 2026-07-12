@@ -28,6 +28,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "windows": {
+      "wix": {
+        "upgradeCode": "95658019-a975-5c3e-9346-5b2db9134620"
+      }
+    },
     "fileAssociations": [
       {
         "ext": ["md", "markdown", "mdown", "mkdn", "mdwn"],

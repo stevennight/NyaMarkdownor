@@ -141,6 +141,7 @@ import {
   type SavedExport
 } from "../lib/fileIo";
 import { copyRichContent, copyText, writeClipboardEventData } from "../lib/clipboard";
+import { bundledBuildInfo, resolveBuildInfo, type BuildInfo } from "../lib/buildInfo";
 import {
   applyMarkdownBlockCommand,
   applyMarkdownListIndentation,
@@ -439,6 +440,7 @@ export function App() {
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [buildInfo, setBuildInfo] = useState<BuildInfo>(bundledBuildInfo);
   const [tableSizeDialogOpen, setTableSizeDialogOpen] = useState(false);
   const [tableSizeDraft, setTableSizeDraft] = useState<TableSizeDraft>({ columns: 3, bodyRows: 2 });
   const [richTableActive, setRichTableActive] = useState(false);
@@ -500,6 +502,18 @@ export function App() {
   const secondaryInstanceOpenHandlerRef = useRef<((paths: string[]) => void) | null>(null);
   const queuedSecondaryInstancePathsRef = useRef<string[][]>([]);
   const inactiveDiskReviewCursorRef = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void resolveBuildInfo().then((nextBuildInfo) => {
+      if (!cancelled) setBuildInfo(nextBuildInfo);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const activeTab = useMemo<DocumentTab>(() => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? createDocumentTab(createDefaultDocument()), [activeTabId, tabs]);
   const documentState = activeTab.document;
@@ -7206,6 +7220,7 @@ export function App() {
         tableMaxHeightVh={tableMaxHeightVh}
         backupPreferences={backupPreferences}
         backupDirectoryAvailable={desktopRuntime}
+        buildInfo={buildInfo}
         t={t}
         onClose={() => setSettingsOpen(false)}
         onViewModeChange={setViewMode}

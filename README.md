@@ -25,6 +25,12 @@ In the browser preview, the UI is deliberately draft-only: New creates an unboun
 
 The frontend dev server is pinned to `http://127.0.0.1:8765` so Tauri and Vite use the same local endpoint.
 
+## Releases
+
+The packaged app reports its version, commit, UTC build time, and release repository in **Settings > About**. Local builds use the development version derived from `package.json` (for example, `0.1.0-dev`).
+
+Publishing a `vX.Y.Z` tag runs the release workflow. It injects that semantic version into the Tauri bundle, frontend, and Rust backend, then publishes Windows, macOS, and Linux installers with SHA-256 checksum files. `npm run desktop:build` accepts the same metadata through `NYAMARKDOWNOR_VERSION`, `NYAMARKDOWNOR_COMMIT`, `NYAMARKDOWNOR_BUILD_DATE`, and `NYAMARKDOWNOR_UPDATE_REPOSITORY`; release versions must omit the leading `v`.
+
 Run the frontend verification suite sequentially:
 
 ```bash

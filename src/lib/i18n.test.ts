@@ -19,6 +19,8 @@ describe("i18n", () => {
     expect(createTranslator("zh-CN")("General")).toBe("常规");
     expect(createTranslator("zh-CN")("Settings categories")).toBe("设置分类");
     expect(createTranslator("zh-CN")("Version history")).toBe("版本历史");
+    expect(createTranslator("zh-CN")("About")).toBe("关于");
+    expect(createTranslator("zh-CN")("Build date")).toBe("构建时间");
     expect(createTranslator("zh-CN")("Scroll long tables")).toBe("长表格内部滚动");
     expect(createTranslator("zh-CN")("Backup location")).toBe("备份位置");
     expect(createTranslator("zh-CN")("System local data")).toBe("系统本地数据目录");

@@ -9,7 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "desktop:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
-    "desktop:build": "tauri build",
+    "desktop:build": "node scripts/tauri-build.mjs",
     "check": "tsc --noEmit",
     "test": "vitest run",
     "verify": "npm run test && npm run check && npm run build"
