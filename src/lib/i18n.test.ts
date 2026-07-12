@@ -19,6 +19,9 @@ describe("i18n", () => {
     expect(createTranslator("zh-CN")("General")).toBe("常规");
     expect(createTranslator("zh-CN")("Settings categories")).toBe("设置分类");
     expect(createTranslator("zh-CN")("Version history")).toBe("版本历史");
+    expect(createTranslator("zh-CN")("File changed on disk")).toBe("磁盘文件已变更");
+    expect(createTranslator("zh-CN")("Compare versions")).toBe("比较版本");
+    expect(createTranslator("zh-CN")("Reload from disk")).toBe("从磁盘重新加载");
     expect(createTranslator("zh-CN")("About")).toBe("关于");
     expect(createTranslator("zh-CN")("Build date")).toBe("构建时间");
     expect(createTranslator("zh-CN")("Scroll long tables")).toBe("长表格内部滚动");

@@ -1,7 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { inactiveDiskReviewCandidates, tabMatchesDiskReviewCandidate } from "./diskReview";
+import {
+  diskReviewVersionKey,
+  inactiveDiskReviewCandidates,
+  shouldPromptForDiskReview,
+  tabMatchesDiskReviewCandidate
+} from "./diskReview";
 
 describe("disk review tab candidates", () => {
+  it("prompts each tab once for a detected disk version", () => {
+    const firstVersion = { modifiedMs: 10, size: 5 };
+    const firstKey = diskReviewVersionKey("other", firstVersion);
+
+    expect(firstKey).toBe("other\u000010\u00005");
+    expect(shouldPromptForDiskReview(undefined, "other", firstVersion)).toBe(true);
+    expect(shouldPromptForDiskReview(firstKey ?? undefined, "other", firstVersion)).toBe(false);
+    expect(shouldPromptForDiskReview(firstKey ?? undefined, "other", { modifiedMs: 11, size: 5 })).toBe(true);
+    expect(shouldPromptForDiskReview(firstKey ?? undefined, "another", firstVersion)).toBe(true);
+    expect(shouldPromptForDiskReview(undefined, "other", null)).toBe(false);
+  });
+
   it("checks inactive disk-backed tabs without polling drafts or the active tab", () => {
     expect(inactiveDiskReviewCandidates([
       tab("active", "D:/notes/active.md"),

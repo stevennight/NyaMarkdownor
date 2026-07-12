@@ -226,7 +226,13 @@ import {
 } from "../lib/richDocumentHistory";
 import type { RichMarkdownSyncSource } from "../lib/richMarkdownSync";
 import type { RichTableSelectionSummary } from "../lib/richTableSelection";
-import { inactiveDiskReviewCandidates, tabMatchesDiskReviewCandidate, type DiskReviewCandidate } from "../lib/diskReview";
+import {
+  diskReviewVersionKey,
+  inactiveDiskReviewCandidates,
+  shouldPromptForDiskReview,
+  tabMatchesDiskReviewCandidate,
+  type DiskReviewCandidate
+} from "../lib/diskReview";
 import { getTabNavigationShortcut, getTableSelectionShortcut, type TabNavigationShortcut, type TableSelectionShortcut } from "../lib/appShortcuts";
 import { documentWindowTitle } from "../lib/windowTitle";
 import { sameLocalPath } from "../lib/localPathKeys";
@@ -382,6 +388,12 @@ type BackupComparisonState = {
   restoreDisabled?: boolean;
 };
 
+type ExternalDiskReviewState = {
+  tabId: string;
+  filePath: string;
+  diskFile: OpenedFile;
+};
+
 type EditorSelectionState = TextRange & {
   ranges: TextRange[];
   cursorPosition?: DocumentCursorPosition;
@@ -432,6 +444,7 @@ export function App() {
   const [showAllBackups, setShowAllBackups] = useState(false);
   const [backupHistories, setBackupHistories] = useState<MarkdownBackupHistory[]>([]);
   const [backupComparison, setBackupComparison] = useState<BackupComparisonState | null>(null);
+  const [externalDiskReview, setExternalDiskReview] = useState<ExternalDiskReviewState | null>(null);
   const [draftSnapshots, setDraftSnapshots] = useState(loadDraftSnapshots);
   const [desktopProfileReady, setDesktopProfileReady] = useState(!isTauriRuntime());
   const [desktopRecoveryReady, setDesktopRecoveryReady] = useState(!isTauriRuntime());
@@ -502,6 +515,7 @@ export function App() {
   const secondaryInstanceOpenHandlerRef = useRef<((paths: string[]) => void) | null>(null);
   const queuedSecondaryInstancePathsRef = useRef<string[][]>([]);
   const inactiveDiskReviewCursorRef = useRef(0);
+  const promptedExternalDiskVersionsRef = useRef(new Map<string, string>());
 
   useEffect(() => {
     let cancelled = false;
@@ -549,6 +563,10 @@ export function App() {
   }
 
   function setDocumentTabExternalChange(tabId: string, changed: boolean) {
+    if (!changed) {
+      promptedExternalDiskVersionsRef.current.delete(tabId);
+      setExternalDiskReview((current) => current?.tabId === tabId ? null : current);
+    }
     setExternalChangeTabIds((current) => {
       if (current.has(tabId) === changed) return current;
       const next = new Set(current);
@@ -562,15 +580,35 @@ export function App() {
   }
 
   function clearExternalChangeState() {
+    promptedExternalDiskVersionsRef.current.clear();
+    setExternalDiskReview(null);
     setExternalChangeTabIds((current) => current.size ? new Set() : current);
   }
 
   function pruneExternalChangeState(nextTabs: readonly DocumentTab[]) {
     const liveTabIds = new Set(nextTabs.map((tab) => tab.id));
+    for (const tabId of promptedExternalDiskVersionsRef.current.keys()) {
+      if (!liveTabIds.has(tabId)) promptedExternalDiskVersionsRef.current.delete(tabId);
+    }
+    setExternalDiskReview((current) => current && !liveTabIds.has(current.tabId) ? null : current);
     setExternalChangeTabIds((current) => {
       if ([...current].every((tabId) => liveTabIds.has(tabId))) return current;
       return new Set([...current].filter((tabId) => liveTabIds.has(tabId)));
     });
+  }
+
+  function promptForExternalDiskReview(
+    tabId: string,
+    filePath: string,
+    diskFile: OpenedFile,
+    stats: MarkdownFileStats | null
+  ) {
+    if (!shouldPromptForDiskReview(promptedExternalDiskVersionsRef.current.get(tabId), tabId, stats)) return;
+    const versionKey = diskReviewVersionKey(tabId, stats);
+    if (!versionKey) return;
+
+    promptedExternalDiskVersionsRef.current.set(tabId, versionKey);
+    setExternalDiskReview({ tabId, filePath, diskFile });
   }
 
   function updateDocumentTab(tabId: string, update: SetStateAction<MarkdownDocument>) {
@@ -1194,6 +1232,7 @@ export function App() {
         if (changeKind === "content") {
           lastReviewedContentChangeStatsKey = currentStatsKey;
           setDocumentTabExternalChange(tabId, true);
+          promptForExternalDiskReview(tabId, diskPath, diskFile, diskFile.fileStats ?? currentStats);
           return;
         }
 
@@ -3559,6 +3598,121 @@ export function App() {
     showToast("Removed from recent files");
   }
 
+  function applyDiskFileToDocumentTab(tabId: string, expectedPath: string, opened: OpenedFile): boolean {
+    const session = currentTabSessionForRecovery();
+    const liveTab = session.tabs.find((candidate) => candidate.id === tabId);
+    if (
+      session.activeTabId !== tabId
+      || !liveTab?.document.filePath
+      || !sameLocalPath(liveTab.document.filePath, expectedPath)
+    ) {
+      showToast("Reload canceled because the active file changed");
+      return false;
+    }
+
+    preserveDirtyDraftSnapshotBeforeReplace(liveTab.document);
+    richDocumentHistoriesRef.current.delete(tabId);
+    updateDocumentTab(tabId, {
+      fileName: opened.name,
+      filePath: opened.path,
+      markdown: opened.markdown,
+      lastSavedMarkdown: opened.markdown,
+      lineEnding: opened.lineEnding,
+      lastBackupPath: null,
+      fileStats: opened.fileStats ?? null
+    });
+    clearManualPreviewSnapshot(tabId);
+    setDocumentTabExternalChange(tabId, false);
+    setExternalDiskReview((current) => current?.tabId === tabId ? null : current);
+    setRecentFiles((current) => rememberRecentFile(current, opened.path, opened.name));
+    return true;
+  }
+
+  function reloadExternalDiskReview(review: ExternalDiskReviewState) {
+    if (applyDiskFileToDocumentTab(review.tabId, review.filePath, review.diskFile)) {
+      showToast(`Reloaded ${review.diskFile.name}`);
+    }
+  }
+
+  function compareExternalDiskReview(review: ExternalDiskReviewState) {
+    const session = currentTabSessionForRecovery();
+    const liveTab = session.tabs.find((candidate) => candidate.id === review.tabId);
+    if (
+      session.activeTabId !== review.tabId
+      || !liveTab?.document.filePath
+      || !sameLocalPath(liveTab.document.filePath, review.filePath)
+    ) {
+      showToast("Comparison canceled because the active file changed");
+      return;
+    }
+    if (
+      new Blob([review.diskFile.markdown]).size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES
+      || new Blob([liveTab.document.markdown]).size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES
+    ) {
+      showToast("Version is too large for interactive comparison");
+      return;
+    }
+
+    setBackupComparison({
+      restore: () => reloadExternalDiskReview(review),
+      tabId: review.tabId,
+      versionMarkdown: review.diskFile.markdown,
+      currentMarkdown: liveTab.document.markdown,
+      currentName: displayMarkdownDocumentName(liveTab.document),
+      versionLabel: review.filePath,
+      versionTitle: "Disk version",
+      currentTitle: "Current editor",
+      actionLabel: "Reload from disk"
+    });
+  }
+
+  async function compareDiskVersionWithEditor() {
+    const tab = currentActiveDocumentTabForCommand();
+    const document = tab.document;
+    if (!document.filePath) {
+      showToast("No saved file open");
+      return;
+    }
+
+    try {
+      const diskFile = await readMarkdownPath(document.filePath);
+      const session = currentTabSessionForRecovery();
+      const liveTab = session.tabs.find((candidate) => candidate.id === tab.id);
+      if (
+        session.activeTabId !== tab.id
+        || !liveTab?.document.filePath
+        || !sameLocalPath(liveTab.document.filePath, document.filePath)
+      ) {
+        showToast("Comparison canceled because the active file changed");
+        return;
+      }
+
+      if (
+        liveTab.document.fileStats
+        && diskFile.fileStats
+        && diskChangeKind(liveTab.document.fileStats, diskFile.fileStats, liveTab.document.lastSavedMarkdown, diskFile.markdown) !== "content"
+      ) {
+        updateDocumentTab(tab.id, (current) => ({
+          ...current,
+          fileStats: diskFile.fileStats
+        }));
+        setDocumentTabExternalChange(tab.id, false);
+        showToast("Disk version is already current");
+        return;
+      }
+
+      setDocumentTabExternalChange(tab.id, true);
+      compareExternalDiskReview({
+        tabId: tab.id,
+        filePath: document.filePath,
+        diskFile
+      });
+    } catch (error) {
+      console.warn(error);
+      showToast("Disk version could not be opened for comparison");
+    }
+  }
+
   async function reloadDocumentFromDisk() {
     const tab = currentActiveDocumentTabForCommand();
     const document = tab.document;
@@ -3574,24 +3728,10 @@ export function App() {
       cancelLabel: "Keep editing",
       tone: "danger"
     })) return;
-    preserveDirtyDraftSnapshotBeforeReplace(document);
 
     try {
       const opened = await readMarkdownPath(document.filePath);
-      richDocumentHistoriesRef.current.delete(tab.id);
-      updateDocumentTab(tab.id, {
-        fileName: opened.name,
-        filePath: opened.path,
-        markdown: opened.markdown,
-        lastSavedMarkdown: opened.markdown,
-        lineEnding: opened.lineEnding,
-        lastBackupPath: null,
-        fileStats: opened.fileStats ?? null
-      });
-      clearManualPreviewSnapshot();
-      setDocumentTabExternalChange(activeTab.id, false);
-      setRecentFiles((current) => rememberRecentFile(current, opened.path, opened.name));
-      showToast(`Reloaded ${opened.name}`);
+      if (applyDiskFileToDocumentTab(tab.id, document.filePath, opened)) showToast(`Reloaded ${opened.name}`);
     } catch (error) {
       console.warn(error);
       showToast("File could not be reloaded");
@@ -6727,8 +6867,8 @@ export function App() {
                 <button
                   className="conflict-pill"
                   type="button"
-                  title={t("The file changed on disk or could not be verified. Open the disk version in a separate tab before deciding whether to reload or save.")}
-                  onClick={openDiskVersionInNewTab}
+                  title={t("The file changed on disk or could not be verified. Compare the disk version with the editor before deciding whether to reload or save.")}
+                  onClick={() => void compareDiskVersionWithEditor()}
                 >
                   <AlertTriangle size={13} />
                   {t("Review disk")}
@@ -7102,6 +7242,63 @@ export function App() {
         <span>{t(markdownRender.error ? "Preview error" : previewPaused ? "Preview paused" : manualPreviewStale ? "Preview stale" : previewPending ? "Preview updating" : "Preview ready")}</span>
         <span>{translateUiText(locale, sessionEditStatusLabel)}</span>
       </footer>
+
+      {externalDiskReview && externalDiskReview.tabId === activeTab.id && !confirmation && !backupComparison && (
+        <div className="confirm-overlay" role="presentation">
+          <section
+            className="confirm-dialog danger"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="external-disk-review-title"
+            aria-describedby="external-disk-review-message"
+          >
+            <div className="confirm-icon" aria-hidden="true">
+              <AlertTriangle />
+            </div>
+            <div className="confirm-copy">
+              <h2 id="external-disk-review-title">{t("File changed on disk")}</h2>
+              <p id="external-disk-review-message">
+                {t("The disk version differs from the editor. Reloading replaces the editor content with the disk version after preserving any unsaved content as a local recovery snapshot.")}
+              </p>
+            </div>
+            <div className="confirm-actions">
+              <button
+                className="confirm-button secondary"
+                type="button"
+                autoFocus
+                onClick={() => {
+                  setExternalDiskReview(null);
+                  focusEditorSoon();
+                }}
+              >
+                {t("Keep editing")}
+              </button>
+              <button
+                className="confirm-button secondary"
+                type="button"
+                onClick={() => {
+                  const review = externalDiskReview;
+                  setExternalDiskReview(null);
+                  compareExternalDiskReview(review);
+                }}
+              >
+                {t("Compare versions")}
+              </button>
+              <button
+                className="confirm-button danger"
+                type="button"
+                onClick={() => {
+                  const review = externalDiskReview;
+                  setExternalDiskReview(null);
+                  reloadExternalDiskReview(review);
+                }}
+              >
+                {t("Reload from disk")}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {confirmation && (
         <div className="confirm-overlay" role="presentation">

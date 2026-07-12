@@ -17,6 +17,23 @@ export type DiskReviewTab = {
   };
 };
 
+export function diskReviewVersionKey(
+  tabId: string,
+  stats: MarkdownFileStats | null | undefined
+): string | null {
+  if (!stats) return null;
+  return `${tabId}\u0000${stats.modifiedMs}\u0000${stats.size}`;
+}
+
+export function shouldPromptForDiskReview(
+  previousVersionKey: string | undefined,
+  tabId: string,
+  stats: MarkdownFileStats | null | undefined
+): boolean {
+  const nextVersionKey = diskReviewVersionKey(tabId, stats);
+  return nextVersionKey !== null && nextVersionKey !== previousVersionKey;
+}
+
 export function inactiveDiskReviewCandidates(
   tabs: readonly DiskReviewTab[],
   activeTabId: string,
