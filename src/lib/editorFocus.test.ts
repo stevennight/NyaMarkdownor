@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { shouldFocusEditorView, shouldFocusPendingMountedEditor } from "./editorFocus";
+import {
+  shouldFocusEditorView,
+  shouldFocusPendingMountedEditor,
+  shouldPreserveEditorSelectionOnToolbarMouseDown
+} from "./editorFocus";
 
 describe("editor focus ownership", () => {
   it("focuses only the editor owned by the active tab outside preview mode", () => {
@@ -17,5 +21,12 @@ describe("editor focus ownership", () => {
     expect(shouldFocusPendingMountedEditor("tab-a", "tab-b", "tab-b", "focus")).toBe(false);
     expect(shouldFocusPendingMountedEditor("tab-a", "tab-a", "tab-b", "focus")).toBe(false);
     expect(shouldFocusPendingMountedEditor(null, "tab-a", "tab-a", "focus")).toBe(false);
+  });
+
+  it("keeps a rich editor selection visible while clicking toolbar controls", () => {
+    expect(shouldPreserveEditorSelectionOnToolbarMouseDown("wysiwyg", 0, true)).toBe(true);
+    expect(shouldPreserveEditorSelectionOnToolbarMouseDown("focus", 0, true)).toBe(false);
+    expect(shouldPreserveEditorSelectionOnToolbarMouseDown("wysiwyg", 2, true)).toBe(false);
+    expect(shouldPreserveEditorSelectionOnToolbarMouseDown("wysiwyg", 0, false)).toBe(false);
   });
 });

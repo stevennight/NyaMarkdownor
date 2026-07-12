@@ -71,7 +71,7 @@ export function CommandPalette({ open, commands, locale, placeholder = "Run comm
           <input
             ref={inputRef}
             value={query}
-            placeholder={placeholder}
+            placeholder={translateUiText(locale, placeholder)}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Escape") {

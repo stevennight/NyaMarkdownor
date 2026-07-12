@@ -57,7 +57,7 @@ export function LinkDialog({ open, initialHref, canUnlink, t, onClose, onApply, 
               type="text"
               value={href}
               onChange={(event) => setHref(event.target.value)}
-              placeholder="https://example.com or notes.md#heading"
+              placeholder={t("https://example.com or notes.md#heading")}
               spellCheck={false}
             />
           </label>

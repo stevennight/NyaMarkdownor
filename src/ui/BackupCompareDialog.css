@@ -84,6 +84,54 @@
   cursor: pointer;
 }
 
+.backup-compare-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.backup-compare-layout-switch {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  overflow: hidden;
+}
+
+.backup-compare-layout-switch button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 32px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.backup-compare-layout-switch button + button {
+  border-left: 1px solid var(--line);
+}
+
+.backup-compare-layout-switch button:hover,
+.backup-compare-layout-switch button.active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.backup-compare-layout-switch button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.backup-compare-layout-switch svg {
+  width: 16px;
+  height: 16px;
+}
+
 .backup-compare-icon-button:hover {
   background: var(--accent-soft);
   color: var(--accent-strong);
@@ -187,6 +235,10 @@
   height: 100%;
 }
 
+.backup-compare-diff > .cm-editor {
+  height: 100%;
+}
+
 .backup-compare-diff .cm-scroller {
   overscroll-behavior: contain;
 }
@@ -207,6 +259,16 @@
 }
 
 .backup-compare-diff .cm-editor.cm-merge-a .cm-changedText {
+  background: color-mix(in srgb, var(--danger), transparent 78%) !important;
+  text-decoration: none;
+}
+
+.backup-compare-diff > .cm-editor .cm-deletedChunk {
+  background: color-mix(in srgb, var(--danger), transparent 91%) !important;
+  border-block: 1px solid color-mix(in srgb, var(--danger), transparent 82%);
+}
+
+.backup-compare-diff > .cm-editor .cm-deletedChunk .cm-deletedText {
   background: color-mix(in srgb, var(--danger), transparent 78%) !important;
   text-decoration: none;
 }
@@ -304,6 +366,10 @@
 @media (max-width: 430px) {
   .backup-compare-heading h2 {
     font-size: 14px;
+  }
+
+  .backup-compare-layout-switch button {
+    width: 32px;
   }
 
   .backup-compare-version small {

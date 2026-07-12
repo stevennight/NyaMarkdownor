@@ -27,6 +27,7 @@ import { richTableStructureTransaction, type RichTableStructureCommand } from ".
 import { createRichMarkdownExtensions } from "../lib/richMarkdownExtensions";
 import { withoutGeneratedTrailingParagraph } from "../lib/richMarkdownDocument";
 import { shouldOpenRichLinkOnClick } from "../lib/richLinks";
+import type { Translator } from "../lib/i18n";
 
 type RichTableCommand = Extract<
   TableDocumentCommand,
@@ -75,6 +76,7 @@ export type RichTableClipboardContent = RichTableClipboardFormats & {
 type RichMarkdownEditorProps = {
   documentFilePath: string | null;
   markdown: string;
+  t: Translator;
   smartCopy: boolean;
   onChange: (markdown: string, source: RichMarkdownSyncSource) => void;
   onHistoryAction: (action: RichDocumentHistoryAction) => boolean;
@@ -91,7 +93,7 @@ type RichMarkdownEditorProps = {
 };
 
 export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, RichMarkdownEditorProps>(function RichMarkdownEditor(
-  { documentFilePath, markdown, smartCopy, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onActiveHeadingIndexChange, onOpenLink, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText },
+  { documentFilePath, markdown, t, smartCopy, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onActiveHeadingIndexChange, onOpenLink, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText },
   forwardedRef
 ) {
   const onChangeRef = useRef(onChange);
@@ -132,21 +134,20 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
         frontMatterRef.current = promotion.frontMatter;
         lastEditSurfaceRef.current = "body";
         const currentEditor = editorRef.current;
-        const editorWasFocused = Boolean(
-          currentEditor
-          && !currentEditor.isDestroyed
-          && document.activeElement === currentEditor.view.dom
-        );
         if (currentEditor && !currentEditor.isDestroyed) {
+          const preservedSelection = richSelectionRange(currentEditor);
+          const scrollHost = scrollHostRef.current;
+          const preservedScrollTop = scrollHost?.scrollTop;
           currentEditor.commands.setContent(promotion.body, { contentType: "markdown", emitUpdate: false });
+          restoreRichSelection(currentEditor, preservedSelection);
           reportTableContext(currentEditor, tableActiveRef, onTableContextChangeRef);
           reportTableSelection(currentEditor, tableSelectionRef, onTableSelectionChangeRef);
           headingPositionsRef.current = richHeadingPositions(currentEditor);
           reportActiveRichHeading(currentEditor, headingPositionsRef, activeHeadingIndexRef, onActiveHeadingIndexChangeRef);
 
-          if (editorWasFocused) {
+          if (typeof preservedScrollTop === "number") {
             window.requestAnimationFrame(() => {
-              if (!currentEditor.isDestroyed) currentEditor.commands.focus("end");
+              if (scrollHost && scrollHostRef.current === scrollHost) scrollHost.scrollTop = preservedScrollTop;
             });
           }
         }
@@ -435,15 +436,15 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
         <section
           className="wysiwyg-front-matter"
           data-format={frontMatterEditor.format.toLowerCase()}
-          aria-label={`Document properties (${frontMatterEditor.format})`}
+          aria-label={t("Document properties ({format})", { format: frontMatterEditor.format })}
         >
           <div className="wysiwyg-front-matter-header">
             <label htmlFor="wysiwyg-front-matter-content">{frontMatterEditor.format}</label>
             <button
               className="wysiwyg-front-matter-delete"
               type="button"
-              aria-label="Delete document properties"
-              title="Delete document properties"
+              aria-label={t("Delete document properties")}
+              title={t("Delete document properties")}
               onClick={removeFrontMatter}
             >
               <Trash2 size={14} />
@@ -453,7 +454,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
             id="wysiwyg-front-matter-content"
             className="wysiwyg-front-matter-content"
             value={frontMatterEditor.content}
-            aria-label={`${frontMatterEditor.format} document properties`}
+            aria-label={t("{format} document properties", { format: frontMatterEditor.format })}
             onChange={updateFrontMatter}
             onKeyDown={handleFrontMatterKeyDown}
             rows={Math.max(1, frontMatterEditor.content.split(/\r?\n/).length)}
@@ -776,7 +777,7 @@ function richSelectionRange(editor: Editor | null): TextRange | null {
   return { from, to };
 }
 
-function restoreRichSelection(editor: Editor, selection: TextRange | undefined): void {
+function restoreRichSelection(editor: Editor, selection: TextRange | null | undefined): void {
   if (!selection) return;
   const maxPosition = editor.state.doc.content.size;
   const from = Math.max(0, Math.min(selection.from, maxPosition));

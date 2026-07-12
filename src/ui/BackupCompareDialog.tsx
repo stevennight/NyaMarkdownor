@@ -1,10 +1,10 @@
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { EditorState } from "@codemirror/state";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { EditorView, lineNumbers } from "@codemirror/view";
-import { MergeView } from "@codemirror/merge";
-import { ArrowRight, FileText, GitCompareArrows, RotateCcw, X } from "lucide-react";
+import { MergeView, unifiedMergeView } from "@codemirror/merge";
+import { ArrowRight, Columns2, FileText, GitCompareArrows, PanelTop, RotateCcw, X } from "lucide-react";
 import type { Translator } from "../lib/i18n";
 import "./BackupCompareDialog.css";
 
@@ -24,6 +24,8 @@ export type BackupCompareDialogProps = {
   onClose: () => void;
   onRestore: () => void;
 };
+
+type ComparisonLayout = "unified" | "split";
 
 export function BackupCompareDialog({
   open,
@@ -46,10 +48,15 @@ export function BackupCompareDialog({
   const diffHostRef = useRef<HTMLDivElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const onCloseRef = useRef(onClose);
+  const [layout, setLayout] = useState<ComparisonLayout>("split");
 
   useEffect(() => {
     onCloseRef.current = onClose;
   }, [onClose]);
+
+  useEffect(() => {
+    if (open) setLayout("split");
+  }, [open]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -127,6 +134,29 @@ export function BackupCompareDialog({
       })
     ];
 
+    if (layout === "unified") {
+      const view = new EditorView({
+        parent: host,
+        doc: currentMarkdown,
+        extensions: [
+          ...readOnlyExtensions,
+          unifiedMergeView({
+            original: backupMarkdown,
+            highlightChanges: true,
+            gutter: true,
+            syntaxHighlightDeletions: true,
+            allowInlineDiffs: true,
+            mergeControls: false,
+            collapseUnchanged: {
+              margin: 3,
+              minSize: 8
+            }
+          })
+        ]
+      });
+      return () => view.destroy();
+    }
+
     const view = new MergeView({
       parent: host,
       a: { doc: backupMarkdown, extensions: readOnlyExtensions },
@@ -140,7 +170,7 @@ export function BackupCompareDialog({
     });
 
     return () => view.destroy();
-  }, [backupMarkdown, currentMarkdown, open]);
+  }, [backupMarkdown, currentMarkdown, layout, open]);
 
   if (!open) return null;
 
@@ -162,16 +192,40 @@ export function BackupCompareDialog({
               <p title={fileName}>{fileName}</p>
             </div>
           </div>
-          <button
-            ref={closeButtonRef}
-            className="backup-compare-icon-button"
-            type="button"
-            aria-label={t("Close comparison")}
-            title={t("Close comparison")}
-            onClick={onClose}
-          >
-            <X />
-          </button>
+          <div className="backup-compare-header-actions">
+            <div className="backup-compare-layout-switch" role="group" aria-label={t("Comparison layout")}>
+              <button
+                className={layout === "unified" ? "active" : ""}
+                type="button"
+                aria-label={t("Unified comparison")}
+                aria-pressed={layout === "unified"}
+                title={t("Unified comparison")}
+                onClick={() => setLayout("unified")}
+              >
+                <PanelTop />
+              </button>
+              <button
+                className={layout === "split" ? "active" : ""}
+                type="button"
+                aria-label={t("Side-by-side comparison")}
+                aria-pressed={layout === "split"}
+                title={t("Side-by-side comparison")}
+                onClick={() => setLayout("split")}
+              >
+                <Columns2 />
+              </button>
+            </div>
+            <button
+              ref={closeButtonRef}
+              className="backup-compare-icon-button"
+              type="button"
+              aria-label={t("Close comparison")}
+              title={t("Close comparison")}
+              onClick={onClose}
+            >
+              <X />
+            </button>
+          </div>
         </header>
 
         <div className="backup-compare-legend" aria-label={t("Comparison direction")}>

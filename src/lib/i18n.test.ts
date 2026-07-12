@@ -35,5 +35,17 @@ describe("i18n", () => {
     expect(translateUiText("zh-CN", "Switch to Notes.md")).toBe("切换到 Notes.md");
     expect(translateUiText("zh-CN", "Table range selected: 2x3 cells")).toBe("已选择 2 x 3 个表格单元格");
     expect(translateUiText("zh-CN", "2 unsaved tabs")).toBe("2 个标签页未保存");
+    expect(createTranslator("zh-CN")("Copy Table as CSV")).toBe("将表格复制为 CSV");
+    expect(createTranslator("zh-CN")("Document properties ({format})", { format: "YAML" })).toBe("文档属性（YAML）");
+    expect(translateUiText("zh-CN", "Close Notes.md?")).toBe("关闭 Notes.md 吗？");
+    expect(translateUiText("zh-CN", "Opened Notes.md - first 12 files")).toBe("已打开文件夹 Notes.md，仅显示前 12 个文件");
+    expect(translateUiText("zh-CN", "Opened 2 dropped files - 1 skipped")).toBe("已打开 2 个拖入文件 - 已跳过 1 个");
+    expect(translateUiText("zh-CN", "1 file could not be opened")).toBe("有 1 个文件无法打开");
+    expect(translateUiText("zh-CN", "Saved 2 tabs; save all stopped")).toBe("已保存 2 个标签页；全部保存已停止");
+    expect(translateUiText("zh-CN", "Saved 2 tabs")).toBe("已保存 2 个标签页");
+    expect(translateUiText("zh-CN", "Saved Notes.md")).toBe("已保存 Notes.md");
+    expect(translateUiText("zh-CN", "Imported Notes.md as draft")).toBe("已将 Notes.md 导入为草稿");
+    expect(translateUiText("zh-CN", "Inserted 3 image references - 1 skipped")).toBe("已插入 3 个图片引用 - 已跳过 1 个");
+    expect(translateUiText("zh-CN", "Filled table from HTML table")).toBe("已从 HTML 表格 填充表格");
   });
 });

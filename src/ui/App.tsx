@@ -211,7 +211,11 @@ import { activeOutlineHeadingKey, outlineHeadingKey } from "../lib/outlineNaviga
 import { previewSelectionToClipboardPayload } from "../lib/previewClipboard";
 import { clipboardRowsForTablePaste, type ClipboardTableSource } from "../lib/clipboardTableRows";
 import { activeOwnedEditorView } from "../lib/editorViewOwnership";
-import { shouldFocusEditorView, shouldFocusPendingMountedEditor } from "../lib/editorFocus";
+import {
+  shouldFocusEditorView,
+  shouldFocusPendingMountedEditor,
+  shouldPreserveEditorSelectionOnToolbarMouseDown
+} from "../lib/editorFocus";
 import {
   EMPTY_RICH_DOCUMENT_HISTORY,
   applyRichDocumentHistoryAction,
@@ -669,7 +673,7 @@ export function App() {
         : previewPending
           ? "Updating..."
           : `${headings.length} headings`;
-  const rawPreviewHtml = markdownRender.error ? "<p>Preview render failed.</p>" : markdownRender.previewHtml || "<p></p>";
+  const rawPreviewHtml = markdownRender.error ? `<p>${t("Preview render failed.")}</p>` : markdownRender.previewHtml || "<p></p>";
   const previewHtml = useMemo(
     () => rewritePreviewImageSources(rawPreviewHtml, documentState.filePath),
     [documentState.filePath, rawPreviewHtml]
@@ -2686,6 +2690,34 @@ export function App() {
 
     paneLayoutRef.current = nextLayout;
     setPaneLayoutState(nextLayout);
+  }
+
+  function preserveRichEditorSelectionOnToolbarMouseDown(event: ReactMouseEvent<HTMLDivElement>) {
+    const target = event.target;
+    const targetIsControl = target instanceof Element && Boolean(target.closest("button, summary"));
+    if (shouldPreserveEditorSelectionOnToolbarMouseDown(viewMode, event.button, targetIsControl)) {
+      event.preventDefault();
+    }
+  }
+
+  // Toolbar summaries stay unfocused to keep the editor selection painted, so
+  // close an open menu explicitly when the pointer starts outside that menu.
+  function closeOpenToolbarMenus(except?: Element): boolean {
+    let closed = false;
+    appShellRef.current
+      ?.querySelectorAll<HTMLElement>(".toolbar-action-menu-wrap[open], .table-action-menu-wrap[open]")
+      .forEach((menu) => {
+        if (except && menu.contains(except)) return;
+        menu.removeAttribute("open");
+        closed = true;
+      });
+    return closed;
+  }
+
+  function closeToolbarMenusOnOutsideMouseDown(event: ReactMouseEvent<HTMLDivElement>) {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    closeOpenToolbarMenus(target);
   }
 
   function runTextCommand(command: MarkdownTextCommand) {
@@ -5448,7 +5480,7 @@ export function App() {
     replaceActiveTableModel(nextTable, nextPosition);
     focusTableInspectorSourcePosition(nextPosition);
     event.preventDefault();
-    showToast(`Filled table from ${clipboardTableSourceLabel(tablePaste.source)}`);
+    showToast(t("Filled table from {source}", { source: t(clipboardTableSourceLabel(tablePaste.source)) }));
   }
 
   function alignTableColumn(col: number, alignment: TableAlignment) {
@@ -5560,6 +5592,17 @@ export function App() {
         setViewMenuOpen(false);
         window.requestAnimationFrame(() => viewMenuTriggerRef.current?.focus());
         return;
+      }
+
+      if (event.key === "Escape") {
+        const focusedToolbarMenu = document.activeElement instanceof Element
+          ? document.activeElement.closest<HTMLDetailsElement>(".toolbar-action-menu-wrap, .table-action-menu-wrap")
+          : null;
+        if (closeOpenToolbarMenus()) {
+          event.preventDefault();
+          focusedToolbarMenu?.querySelector<HTMLElement>("summary")?.focus();
+          return;
+        }
       }
 
       if (event.key === "F3") {
@@ -5883,6 +5926,7 @@ export function App() {
       data-sidebar={sidebarVisible ? "visible" : "hidden"}
       data-table={activeTable ? "active" : "inactive"}
       style={appStyle}
+      onMouseDown={closeToolbarMenusOnOutsideMouseDown}
       onDragEnter={handleShellDragEnter}
       onDragOver={handleShellDragOver}
       onDragLeave={handleShellDragLeave}
@@ -5898,7 +5942,7 @@ export function App() {
         </div>
       )}
       <header className="topbar">
-        <div className="topbar-tools">
+        <div className="topbar-tools" onMouseDown={preserveRichEditorSelectionOnToolbarMouseDown}>
           <div className="brand-block">
           <div className="brand-mark">N</div>
           <div>
@@ -6191,21 +6235,36 @@ export function App() {
                 const active = tab.id === activeTab.id;
                 const dirty = isDocumentDirty(tab.document);
                 return (
-                  <button
+                  <div
                     key={tab.id}
-                    className={active ? "tab-list-option active" : "tab-list-option"}
-                    type="button"
-                    role="menuitem"
-                    title={tab.document.filePath ?? tabDisplayName}
-                    onClick={() => {
-                      setTabListOpen(false);
-                      switchDocumentTab(tab.id);
-                    }}
+                    className={active ? "tab-list-option-row active" : "tab-list-option-row"}
+                    role="none"
                   >
-                    <FileText size={14} />
-                    <span>{tabDisplayName}</span>
-                    {dirty && <i aria-label={t("Unsaved changes")} />}
-                  </button>
+                    <button
+                      className="tab-list-option"
+                      type="button"
+                      role="menuitem"
+                      title={tab.document.filePath ?? tabDisplayName}
+                      onClick={() => {
+                        setTabListOpen(false);
+                        switchDocumentTab(tab.id);
+                      }}
+                    >
+                      <FileText size={14} />
+                      <span>{tabDisplayName}</span>
+                      {dirty && <i aria-label={t("Unsaved changes")} />}
+                    </button>
+                    <button
+                      className="tab-list-option-close"
+                      type="button"
+                      role="menuitem"
+                      aria-label={t("Close {name}", { name: tabDisplayName })}
+                      title={t("Close {name}", { name: tabDisplayName })}
+                      onClick={() => void closeDocumentTab(tab.id)}
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -6372,8 +6431,8 @@ export function App() {
                     className="recent-delete"
                     type="button"
                     onClick={() => removeRecentDocument(file.path)}
-                    title={`Forget ${file.name} from recent files`}
-                    aria-label={`Forget ${file.name} from recent files`}
+                    title={t("Forget {name} from recent files", { name: file.name })}
+                    aria-label={t("Forget {name} from recent files", { name: file.name })}
                   >
                     <Trash2 size={13} />
                   </button>
@@ -6468,7 +6527,7 @@ export function App() {
                       <button
                         className="backup-delete"
                         type="button"
-                        aria-label={`${t("Delete orphaned history")} - ${history.fileName}`}
+                        aria-label={t("Delete orphaned history for {name}", { name: history.fileName })}
                         title={t("Delete orphaned history")}
                         onClick={() => void deleteOrphanedBackupHistory(history)}
                       >
@@ -6524,7 +6583,7 @@ export function App() {
                       <button
                         className="backup-delete"
                         type="button"
-                        aria-label={`Delete ${snapshotDisplayName} snapshot`}
+                        aria-label={t("Delete {name} snapshot", { name: snapshotDisplayName })}
                         title={t("Delete local snapshot")}
                         onClick={() => deleteDraftSnapshot(snapshot)}
                       >
@@ -6568,7 +6627,7 @@ export function App() {
                         <button
                           className="backup-delete"
                           type="button"
-                          aria-label={`Delete ${snapshotDisplayName} snapshot`}
+                          aria-label={t("Delete {name} snapshot", { name: snapshotDisplayName })}
                           title={t("Delete local snapshot")}
                           onClick={() => deleteDraftSnapshot(snapshot)}
                         >
@@ -6678,6 +6737,7 @@ export function App() {
                 ref={richEditorRef}
                 documentFilePath={documentState.filePath}
                 markdown={documentState.markdown}
+                t={t}
                 smartCopy={smartCopy}
                 onChange={(markdown, source) => updateRichMarkdown(activeTab.id, markdown, source)}
                 onHistoryAction={(action) => applyRichHistoryAction(activeTab.id, action)}
@@ -6718,7 +6778,7 @@ export function App() {
             />
           )}
           {viewMode === "wysiwyg" && richTableActive ? (
-            <div className="table-floatbar" role="toolbar" aria-label={t("Visual table quick actions")}>
+            <div className="table-floatbar" role="toolbar" aria-label={t("Visual table quick actions")} onMouseDown={preserveRichEditorSelectionOnToolbarMouseDown}>
               {richTableSelection && (
                 <span
                   className="table-selection-count"
@@ -6761,7 +6821,7 @@ export function App() {
               </TableActionMenu>
             </div>
           ) : activeTable && (
-            <div className="table-floatbar" role="toolbar" aria-label={t("Table quick actions")}>
+            <div className="table-floatbar" role="toolbar" aria-label={t("Table quick actions")} onMouseDown={preserveRichEditorSelectionOnToolbarMouseDown}>
               <IconButton label={t("Select cell")} icon={<TextSelect />} onClick={selectTableCell} />
               <IconButton label={t("Select table")} icon={<SquareMousePointer />} onClick={selectActiveTable} />
               <IconButton label={t("Copy cell content")} icon={<ClipboardCopy />} onClick={() => void copyActiveTableCell()} />
@@ -7777,9 +7837,10 @@ function InspectorIconButton({ label, icon, disabled, onClick }: IconButtonProps
 
 type CopyRichToolButtonProps = {
   onCopy: () => void | Promise<void>;
+  label: string;
 };
 
-function CopyRichToolButton({ onCopy }: CopyRichToolButtonProps) {
+function CopyRichToolButton({ onCopy, label }: CopyRichToolButtonProps) {
   function run(event: ReactMouseEvent<HTMLButtonElement> | ReactKeyboardEvent<HTMLButtonElement>) {
     event.preventDefault();
     void onCopy();
@@ -7789,15 +7850,15 @@ function CopyRichToolButton({ onCopy }: CopyRichToolButtonProps) {
     <button
       className="tool-button"
       type="button"
-      title="Copy Rich Text"
-      aria-label="Copy Rich Text"
+      title={label}
+      aria-label={label}
       onMouseDown={run}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") run(event);
       }}
     >
       <ClipboardCopy />
-      <span>Copy Rich Text</span>
+      <span>{label}</span>
     </button>
   );
 }

@@ -283,7 +283,8 @@ input:focus-visible {
 
 .tab-scroll-control:focus-visible,
 .tab-list-trigger:focus-visible,
-.tab-list-option:focus-visible {
+.tab-list-option:focus-visible,
+.tab-list-option-close:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
@@ -308,22 +309,35 @@ input:focus-visible {
   padding: 5px;
 }
 
+.tab-list-option-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 2px;
+  min-height: 34px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  padding: 2px;
+}
+
 .tab-list-option {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  min-height: 34px;
-  border-radius: 6px;
+  min-width: 0;
+  min-height: 30px;
+  border-radius: 5px;
   background: transparent;
-  color: var(--muted);
+  color: inherit;
   cursor: pointer;
   padding: 6px 8px;
   text-align: left;
 }
 
 .tab-list-option:hover,
-.tab-list-option.active {
+.tab-list-option-row.active .tab-list-option {
   background: var(--accent-soft);
   color: var(--text);
 }
@@ -339,6 +353,22 @@ input:focus-visible {
   height: 6px;
   border-radius: 999px;
   background: var(--accent-warm);
+}
+
+.tab-list-option-close {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--subtle);
+  cursor: pointer;
+}
+
+.tab-list-option-close:hover {
+  background: color-mix(in srgb, var(--danger), transparent 88%);
+  color: var(--danger);
 }
 
 .document-tab {
