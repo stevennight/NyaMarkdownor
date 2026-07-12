@@ -1,8 +1,13 @@
 import type { MarkdownLineEnding } from "../types";
+import { migrateLegacyTableCellBreaks } from "./legacyTableCellBreaks";
 
 export type NormalizedMarkdownText = {
   markdown: string;
   lineEnding: MarkdownLineEnding;
+};
+
+export type NormalizeMarkdownTextOptions = {
+  migrateLegacyTableCellBreaks?: boolean;
 };
 
 export function isMarkdownLineEnding(value: unknown): value is MarkdownLineEnding {
@@ -42,9 +47,13 @@ export function normalizeMarkdownLineEndings(markdown: string): string {
   return markdown.includes("\r") ? markdown.replace(/\r\n?/g, "\n") : markdown;
 }
 
-export function normalizeMarkdownText(markdown: string): NormalizedMarkdownText {
+export function normalizeMarkdownText(
+  markdown: string,
+  options: NormalizeMarkdownTextOptions = {}
+): NormalizedMarkdownText {
+  const normalized = normalizeMarkdownLineEndings(markdown);
   return {
-    markdown: normalizeMarkdownLineEndings(markdown),
+    markdown: options.migrateLegacyTableCellBreaks ? migrateLegacyTableCellBreaks(normalized) : normalized,
     lineEnding: detectMarkdownLineEnding(markdown)
   };
 }

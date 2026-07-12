@@ -116,14 +116,32 @@ describe("Markdown rendering and clean copy", () => {
       "| Note |",
       "| --- |",
       "| line<br>break |",
+      "| upper<BR>break |",
       "",
       "`code<br>sample`"
     ].join("\n"));
 
     expect(rendered.html).toContain("line<br>break");
+    expect(rendered.html).toContain("upper<br>break");
     expect(rendered.html).toContain("code&lt;br&gt;sample");
     expect(renderMarkdown("plain<br>text").html).toContain("plain&lt;br&gt;text");
     expect(renderMarkdown("<iframe src=\"x\"></iframe>").html).toContain("&lt;iframe");
+  });
+
+  it("keeps escaped and entity break markup literal next to real table breaks", () => {
+    const escaped = renderMarkdown([
+      "| Note |",
+      "| --- |",
+      "| escaped \\<br> then raw <br>next |"
+    ].join("\n")).html;
+    const entity = renderMarkdown([
+      "| Note |",
+      "| --- |",
+      "| entity &lt;br&gt; then raw <br>next |"
+    ].join("\n")).html;
+
+    expect(escaped).toContain("escaped &lt;br&gt; then raw <br>next");
+    expect(entity).toContain("entity &lt;br&gt; then raw <br>next");
   });
 
   it("converts selected Markdown to clean plain text", () => {
@@ -582,6 +600,23 @@ describe("Markdown rendering and clean copy", () => {
       fullCellRange(markdown, "tail")
     ])).toBe("\"line\nbreak\",tail");
     expect(markdownToPlain(markdown)).toBe("Note\tOther\nline break\ttail");
+  });
+
+  it("keeps literal table-cell break markup inside inline code when copying", () => {
+    const markdown = [
+      "| Note |",
+      "| --- |",
+      "| `line<br>break` |"
+    ].join("\n");
+    const payload = markdownRangesToClipboardPayload(markdown, [
+      fullCellRange(markdown, "`line<br>break`")
+    ]);
+
+    expect(payload.plainText).toBe("line<br>break");
+    expect(payload.html).toContain("<code>line&lt;br&gt;break</code>");
+    expect(markdownRangesToTableCsv(markdown, [
+      fullCellRange(markdown, "`line<br>break`")
+    ])).toBe("line<br>break");
   });
 
   it("copies multiple table cell selections as one structured table column", () => {

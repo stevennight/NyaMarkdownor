@@ -105,6 +105,51 @@ describe("draft document storage", () => {
     });
   });
 
+  it("migrates legacy table cell separators in recovered Markdown", () => {
+    const markdown = [
+      "| Name | Note |",
+      "| --- | --- |",
+      "| Alice | first\u001fsecond |"
+    ].join("\n");
+    const record = parseDraftDocumentRecord(JSON.stringify({
+      fileName: "Recovered.md",
+      filePath: "D:/notes/Recovered.md",
+      markdown,
+      lastSavedMarkdown: markdown
+    }));
+
+    expect(record?.document).toMatchObject({
+      markdown: [
+        "| Name | Note |",
+        "| --- | --- |",
+        "| Alice | first<br>second |"
+      ].join("\n"),
+      lastSavedMarkdown: [
+        "| Name | Note |",
+        "| --- | --- |",
+        "| Alice | first<br>second |"
+      ].join("\n")
+    });
+  });
+
+  it("preserves table control characters in marker-bearing draft records", () => {
+    const markdown = [
+      "| Name | Note |",
+      "| --- | --- |",
+      "| Alice | first\u001fsecond |"
+    ].join("\n");
+    const record = createDraftDocumentRecord({
+      ...documentState,
+      markdown,
+      lastSavedMarkdown: markdown
+    });
+
+    expect(parseDraftDocumentRecord(JSON.stringify(record))?.document).toMatchObject({
+      markdown,
+      lastSavedMarkdown: markdown
+    });
+  });
+
   it("drops legacy browser file bindings from persisted drafts", () => {
     const record = parseDraftDocumentRecord(JSON.stringify(createDraftDocumentRecord({
       ...documentState,

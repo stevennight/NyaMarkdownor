@@ -45,6 +45,8 @@ export type StripInlineMarkdownOptions = {
   referenceLabels?: ReadonlySet<string>;
 };
 
+const TABLE_CELL_LINE_BREAK_PLACEHOLDER = "\uE000NMD_TABLE_CELL_BREAK\uE001";
+
 export function stripInlineMarkdown(text: string, options: StripInlineMarkdownOptions = {}): string {
   const code = protectInlineCode(text);
   const stripped = replaceShortcutReferenceLinksWithLabels(replaceMarkdownAutolinksWithLabels(replaceInlineMarkdownLinksWithLabels(code.text)), options.referenceLabels)
@@ -59,7 +61,45 @@ export function stripInlineMarkdown(text: string, options: StripInlineMarkdownOp
 }
 
 export function stripTableCellMarkdown(text: string, lineBreakMode: "space" | "newline" = "space", options: StripInlineMarkdownOptions = {}): string {
-  return stripInlineMarkdown(text, options).replace(/<br\s*\/?>/gi, lineBreakMode === "newline" ? "\n" : " ");
+  return restoreTableCellLineBreaks(
+    stripInlineMarkdown(protectTableCellLineBreaks(text), options),
+    lineBreakMode === "newline" ? "\n" : " "
+  );
+}
+
+export function protectTableCellLineBreaks(text: string): string {
+  let result = "";
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    if (text[cursor] === "`") {
+      const delimiterLength = consecutiveCharacterLength(text, cursor, "`");
+      const closing = matchingCodeSpanDelimiter(text, cursor + delimiterLength, delimiterLength);
+      if (closing !== -1) {
+        result += text.slice(cursor, closing + delimiterLength);
+        cursor = closing + delimiterLength;
+        continue;
+      }
+    }
+
+    const lineBreak = !isEscapedByOddBackslashes(text, cursor)
+      ? text.slice(cursor).match(/^<br[ \t]*\/?>/i)
+      : null;
+    if (lineBreak) {
+      result += TABLE_CELL_LINE_BREAK_PLACEHOLDER;
+      cursor += lineBreak[0].length;
+      continue;
+    }
+
+    result += text[cursor];
+    cursor += 1;
+  }
+
+  return result;
+}
+
+export function restoreTableCellLineBreaks(text: string, replacement: string): string {
+  return text.replaceAll(TABLE_CELL_LINE_BREAK_PLACEHOLDER, replacement);
 }
 
 function protectInlineCode(text: string): { text: string; values: string[] } {
@@ -80,6 +120,34 @@ function restoreInlineCode(text: string, values: string[]): string {
 function normalizeInlineCodeText(text: string): string {
   const normalized = text.replace(/\r\n?|\n/g, " ");
   return /^ .*\S.* $/.test(normalized) ? normalized.slice(1, -1) : normalized;
+}
+
+function matchingCodeSpanDelimiter(text: string, from: number, delimiterLength: number): number {
+  let cursor = from;
+  while (cursor < text.length) {
+    if (text[cursor] !== "`") {
+      cursor += 1;
+      continue;
+    }
+    const candidateLength = consecutiveCharacterLength(text, cursor, "`");
+    if (candidateLength === delimiterLength) return cursor;
+    cursor += candidateLength;
+  }
+  return -1;
+}
+
+function consecutiveCharacterLength(text: string, from: number, character: string): number {
+  let length = 0;
+  while (text[from + length] === character) length += 1;
+  return length;
+}
+
+function isEscapedByOddBackslashes(text: string, index: number): boolean {
+  let count = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor -= 1) {
+    count += 1;
+  }
+  return count % 2 === 1;
 }
 
 type GraphemeSegmenter = {

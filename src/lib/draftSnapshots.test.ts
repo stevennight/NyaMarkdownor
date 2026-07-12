@@ -176,6 +176,7 @@ describe("draft snapshots", () => {
 
     expect(loadDraftSnapshotsRecord()).toEqual({
       version: 1,
+      tableCellBreakFormat: "html",
       savedAt: 0,
       snapshots: [snapshot]
     });
@@ -201,6 +202,27 @@ describe("draft snapshots", () => {
     });
   });
 
+  it("migrates table separators only from markerless snapshot records", () => {
+    const markdown = [
+      "| Name | Note |",
+      "| --- | --- |",
+      "| Alice | first\u001fsecond |"
+    ].join("\n");
+    const snapshot = createDraftSnapshot({
+      ...baseDocument,
+      markdown,
+      lastSavedMarkdown: markdown
+    }, 100, "preserved");
+
+    expect(parseDraftSnapshotsRecord(JSON.stringify([snapshot]))?.snapshots[0]).toMatchObject({
+      markdown: markdown.replace("\u001f", "<br>"),
+      lastSavedMarkdown: markdown.replace("\u001f", "<br>")
+    });
+    expect(parseDraftSnapshotsRecord(JSON.stringify(createDraftSnapshotsRecord([snapshot])))?.snapshots[0]).toMatchObject({
+      markdown,
+      lastSavedMarkdown: markdown
+    });
+  });
   it("does not throw when local snapshot persistence is unavailable", () => {
     vi.stubGlobal("localStorage", createStorageMock({ setThrows: true }));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

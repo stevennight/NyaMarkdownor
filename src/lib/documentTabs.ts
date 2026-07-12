@@ -18,6 +18,7 @@ export type DocumentTabState = {
 
 export type DocumentTabsRecord = {
   version: 1;
+  tableCellBreakFormat: "html";
   savedAt: number;
   activeTabId: string;
   tabs: DocumentTabState[];
@@ -82,15 +83,20 @@ export async function loadDesktopDocumentTabsRecord(): Promise<DocumentTabsRecor
 export function createDocumentTabsRecord(
   tabs: DocumentTabState[],
   activeTabId: string,
-  savedAt = Date.now()
+  savedAt = Date.now(),
+  migrateLegacyTableCellBreaks = false
 ): DocumentTabsRecord {
-  const normalizedTabs = normalizeDocumentTabs(tabsForPersistence(tabs, activeTabId));
+  const normalizedTabs = normalizeDocumentTabs(
+    tabsForPersistence(tabs, activeTabId),
+    migrateLegacyTableCellBreaks
+  );
   const active = normalizedTabs.some((tab) => tab.id === activeTabId)
     ? activeTabId
     : normalizedTabs[0]?.id ?? "";
 
   return {
     version: 1,
+    tableCellBreakFormat: "html",
     savedAt,
     activeTabId: active,
     tabs: normalizedTabs
@@ -167,15 +173,20 @@ function normalizeDocumentTabsRecord(value: unknown): DocumentTabsRecord | null 
   if (record.version !== 1 || typeof record.savedAt !== "number" || !Number.isFinite(record.savedAt)) return null;
   if (typeof record.activeTabId !== "string" || !Array.isArray(record.tabs)) return null;
 
-  return createDocumentTabsRecord(record.tabs, record.activeTabId, record.savedAt);
+  return createDocumentTabsRecord(
+    record.tabs,
+    record.activeTabId,
+    record.savedAt,
+    record.tableCellBreakFormat !== "html"
+  );
 }
 
-function normalizeDocumentTabs(value: unknown[]): DocumentTabState[] {
+function normalizeDocumentTabs(value: unknown[], migrateLegacyTableCellBreaks = false): DocumentTabState[] {
   const usedIds = new Set<string>();
   const tabs: DocumentTabState[] = [];
 
   for (const [index, item] of value.entries()) {
-    const tab = normalizeDocumentTab(item, index, usedIds);
+    const tab = normalizeDocumentTab(item, index, usedIds, migrateLegacyTableCellBreaks);
     if (!tab) continue;
     usedIds.add(tab.id);
     tabs.push(tab);
@@ -185,10 +196,15 @@ function normalizeDocumentTabs(value: unknown[]): DocumentTabState[] {
   return tabs;
 }
 
-function normalizeDocumentTab(value: unknown, index: number, usedIds: Set<string>): DocumentTabState | null {
+function normalizeDocumentTab(
+  value: unknown,
+  index: number,
+  usedIds: Set<string>,
+  migrateLegacyTableCellBreaks = false
+): DocumentTabState | null {
   if (!value || typeof value !== "object") return null;
   const tab = value as Partial<DocumentTabState>;
-  const document = normalizeDraftDocument(tab.document);
+  const document = normalizeDraftDocument(tab.document, migrateLegacyTableCellBreaks);
   if (!document) return null;
   const editorStateSnapshot = normalizeStoredEditorStateSnapshot(tab.editorStateSnapshot, document.markdown);
   const richScrollProgress = normalizeRichScrollProgress(tab.richScrollProgress);

@@ -1,6 +1,6 @@
 import MarkdownIt from "markdown-it";
 import type { Heading, MarkdownTable, RenderedMarkdown, TableBlock } from "../types";
-import { stripInlineMarkdown, stripTableCellMarkdown } from "./text";
+import { protectTableCellLineBreaks, restoreTableCellLineBreaks, stripInlineMarkdown, stripTableCellMarkdown } from "./text";
 import { buildMarkdownTable, parseMarkdownTable } from "./tables";
 import { slugifyHeadingText } from "./headingIds";
 import { normalizeReferenceLabel } from "./inlineMarkdown";
@@ -69,7 +69,7 @@ markdownIt.core.ruler.after("inline", "nya_task_lists", (state) => {
   });
 });
 
-markdownIt.core.ruler.after("inline", "nya_table_cell_breaks", (state) => {
+markdownIt.core.ruler.before("inline", "nya_table_cell_breaks", (state) => {
   let inTableCell = false;
 
   state.tokens.forEach((token) => {
@@ -84,11 +84,7 @@ markdownIt.core.ruler.after("inline", "nya_table_cell_breaks", (state) => {
     }
 
     if (!inTableCell || token.type !== "inline") return;
-
-    token.children?.forEach((child) => {
-      if (child.type !== "text" || !child.content.includes("<br")) return;
-      child.meta = { ...(child.meta ?? {}), nyaTableCellBreaks: true };
-    });
+    token.content = protectTableCellLineBreaks(token.content);
   });
 });
 
@@ -126,7 +122,7 @@ markdownIt.renderer.rules.heading_open = (tokens, index, options, env: MarkdownR
 
 markdownIt.renderer.rules.text = (tokens, index) => {
   const escaped = escapeHtmlText(tokens[index].content);
-  return hasTableCellBreaks(tokens[index]) ? escaped.replace(/&lt;br\s*\/?&gt;/gi, "<br>") : escaped;
+  return restoreTableCellLineBreaks(escaped, "<br>");
 };
 
 markdownIt.renderer.rules.image = (tokens, index, options, env, self) => {
@@ -632,7 +628,7 @@ function renderHtmlTableRow(
 }
 
 function renderTableCellInline(markdown: string): string {
-  return markdownIt.renderInline(markdown).replace(/&lt;br\s*\/?&gt;/gi, "<br>");
+  return restoreTableCellLineBreaks(markdownIt.renderInline(protectTableCellLineBreaks(markdown)), "<br>");
 }
 
 function selectedTableCellValue(row: SelectedTableRow, col: number, selectedCellKeys?: Set<string>): string {
@@ -642,11 +638,6 @@ function selectedTableCellValue(row: SelectedTableRow, col: number, selectedCell
 
 function tableCellKey(rowPosition: number, col: number): string {
   return `${rowPosition}:${col}`;
-}
-
-function hasTableCellBreaks(token: { meta?: unknown }): boolean {
-  const meta = token.meta;
-  return Boolean(meta && typeof meta === "object" && "nyaTableCellBreaks" in meta && meta.nyaTableCellBreaks);
 }
 
 function htmlAlignmentAttribute(alignment: MarkdownTable["aligns"][number]): string {

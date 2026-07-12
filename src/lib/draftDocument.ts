@@ -1,11 +1,12 @@
 import type { MarkdownDocument, MarkdownFileStats } from "../types";
 import { queueDesktopStoreTextWrite, readDesktopStoreText } from "./desktopStore";
-import { isMarkdownLineEnding, normalizeMarkdownLineEndings, normalizeMarkdownText } from "./lineEndings";
+import { isMarkdownLineEnding, normalizeMarkdownText } from "./lineEndings";
 
 const DRAFT_DOCUMENT_STORAGE_KEY = "nya-markdownor-draft-v2";
 
 export type DraftDocumentRecord = {
   version: 1;
+  tableCellBreakFormat: "html";
   savedAt: number;
   document: MarkdownDocument;
 };
@@ -64,6 +65,7 @@ export function createDraftDocumentRecord(document: MarkdownDocument, savedAt = 
 
   return {
     version: 1,
+    tableCellBreakFormat: "html",
     savedAt,
     document: normalizedDocument
   };
@@ -75,7 +77,7 @@ export function parseDraftDocumentRecord(raw: string): DraftDocumentRecord | nul
     const record = normalizeDraftDocumentRecord(parsed);
     if (record) return record;
 
-    const legacyDocument = normalizeDraftDocument(parsed);
+    const legacyDocument = normalizeDraftDocument(parsed, true);
     return legacyDocument ? createDraftDocumentRecord(legacyDocument, 0) : null;
   } catch (error) {
     console.warn(error);
@@ -88,17 +90,22 @@ function normalizeDraftDocumentRecord(value: unknown): DraftDocumentRecord | nul
   const record = value as Partial<DraftDocumentRecord>;
   if (record.version !== 1 || typeof record.savedAt !== "number" || !Number.isFinite(record.savedAt)) return null;
 
-  const document = normalizeDraftDocument(record.document);
-  return document ? { version: 1, savedAt: record.savedAt, document } : null;
+  const document = normalizeDraftDocument(record.document, record.tableCellBreakFormat !== "html");
+  return document ? {
+    version: 1,
+    tableCellBreakFormat: "html",
+    savedAt: record.savedAt,
+    document
+  } : null;
 }
 
-export function normalizeDraftDocument(value: unknown): MarkdownDocument | null {
+export function normalizeDraftDocument(value: unknown, migrateLegacyTableCellBreaks = false): MarkdownDocument | null {
   if (!value || typeof value !== "object") return null;
   const document = value as Partial<MarkdownDocument>;
   if (typeof document.markdown !== "string") return null;
-  const normalized = normalizeMarkdownText(document.markdown);
+  const normalized = normalizeMarkdownText(document.markdown, { migrateLegacyTableCellBreaks });
   const lastSavedMarkdown = typeof document.lastSavedMarkdown === "string"
-    ? normalizeMarkdownLineEndings(document.lastSavedMarkdown)
+    ? normalizeMarkdownText(document.lastSavedMarkdown, { migrateLegacyTableCellBreaks }).markdown
     : normalized.markdown;
 
   return {

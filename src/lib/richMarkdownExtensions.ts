@@ -1,4 +1,4 @@
-import { Extension, mergeAttributes, Node, type AnyExtension, type JSONContent, type MarkdownToken } from "@tiptap/core";
+import { Extension, findParentNode, mergeAttributes, Node, type AnyExtension, type JSONContent, type MarkdownToken } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import Bold from "@tiptap/extension-bold";
 import Code from "@tiptap/extension-code";
@@ -6,7 +6,7 @@ import CodeBlock from "@tiptap/extension-code-block";
 import HardBreak from "@tiptap/extension-hard-break";
 import Heading from "@tiptap/extension-heading";
 import HorizontalRule from "@tiptap/extension-horizontal-rule";
-import { Table, TableKit } from "@tiptap/extension-table";
+import { renderTableToMarkdown, Table, TableKit } from "@tiptap/extension-table";
 import Image from "@tiptap/extension-image";
 import Italic from "@tiptap/extension-italic";
 import Link from "@tiptap/extension-link";
@@ -79,6 +79,7 @@ const BLOCK_HTML_TAGS = new Set([
 
 const VOID_HTML_TAGS = new Set(["base", "basefont", "col", "frame", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
 const MAX_PRESERVED_TABLE_SOURCE_LENGTH = 256 * 1024;
+const TABLE_CELL_LINE_SEPARATOR = "<br>";
 const richCodeHighlightPluginKey = new PluginKey<DecorationSet>("richCodeHighlight");
 
 const RichCodeHighlight = Extension.create({
@@ -453,6 +454,7 @@ const RichTable = Table.extend({
     const parsed = Table.config.parseMarkdown?.(token, helpers);
     if (!parsed || Array.isArray(parsed) || "mark" in parsed) return parsed ?? [];
 
+    replaceProtectedTableCellBreaks(parsed);
     const raw = stripTrailingLineBreaks(token.raw ?? "");
     if (!raw || raw.length > MAX_PRESERVED_TABLE_SOURCE_LENGTH) return parsed;
     return {
@@ -465,11 +467,13 @@ const RichTable = Table.extend({
     };
   },
 
-  renderMarkdown: (node, helpers, context) => {
+  renderMarkdown: (node, helpers) => {
     const raw = stringAttribute(node.attrs?.markdownRaw);
     const fingerprint = stringAttribute(node.attrs?.markdownFingerprint);
     if (raw && fingerprint && fingerprint === tableMarkdownFingerprint(node)) return raw;
-    return Table.config.renderMarkdown?.(node, helpers, context) ?? "";
+    return renderTableToMarkdown(tableWithMarkdownCellBreaks(node), helpers, {
+      cellLineSeparator: TABLE_CELL_LINE_SEPARATOR
+    });
   }
 });
 
@@ -1035,8 +1039,44 @@ export function createRichMarkdownExtensions(documentFilePath: string | null): A
       resizable: true,
       allowTableNodeSelection: true
     }),
+    Extension.create({
+      name: "richTableCellLineBreak",
+      priority: 1100,
+
+      addKeyboardShortcuts() {
+        return {
+          Enter: () => (
+            Boolean(findParentNode((node) => node.type.spec.tableRole === "cell" || node.type.spec.tableRole === "header_cell")(this.editor.state.selection))
+            && this.editor.commands.setHardBreak()
+          )
+        };
+      }
+    }),
     Markdown
   ];
+}
+
+function replaceProtectedTableCellBreaks(node: JSONContent): void {
+  if (node.type === "protectedMarkdownInline" && /^<br\s*\/?>$/i.test(stringAttribute(node.attrs?.raw))) {
+    node.type = "hardBreak";
+    node.attrs = { markdownMarker: TABLE_CELL_LINE_SEPARATOR };
+    return;
+  }
+  node.content?.forEach(replaceProtectedTableCellBreaks);
+}
+
+function tableWithMarkdownCellBreaks(table: JSONContent): JSONContent {
+  const normalized = structuredClone(table);
+  const normalize = (node: JSONContent): void => {
+    if (node.type === "hardBreak") {
+      node.type = "protectedMarkdownInline";
+      node.attrs = { raw: TABLE_CELL_LINE_SEPARATOR, kind: "html", label: "" };
+      return;
+    }
+    node.content?.forEach(normalize);
+  };
+  normalize(normalized);
+  return normalized;
 }
 
 export function protectedMarkdownBlockAtStart(src: string): ProtectedMatch | null {

@@ -508,6 +508,94 @@ describe("rich Markdown extensions", () => {
     expect(editedOutput).not.toContain(tableSource);
   });
 
+  it("round-trips table cell line breaks through hard-break nodes", () => {
+    const source = [
+      "| Name | Note |",
+      "| --- | --- |",
+      "| Alice | first<br>second |"
+    ].join("\n");
+    const parsed = markdown.parse(source);
+    const table = protectedNodes(parsed, "table")[0];
+    const hardBreak = protectedNodes(table, "hardBreak")[0];
+
+    expect(hardBreak).toEqual(expect.objectContaining({
+      attrs: expect.objectContaining({ markdownMarker: "<br>" })
+    }));
+    expect(protectedNodes(table, "protectedMarkdownInline")).toHaveLength(0);
+    replaceFirstText(parsed, "first", "edited");
+    const output = markdown.serialize(parsed);
+    expect(output).toContain("edited<br>second");
+    expect(output).not.toContain("\u001f");
+  });
+
+  it("serializes multiple table cell blocks with Markdown cell breaks", () => {
+    const parsed = markdown.parse([
+      "| Name | Note |",
+      "| --- | --- |",
+      "| Alice | first |"
+    ].join("\n"));
+    const cell = protectedNodes(parsed, "tableCell")[1];
+    cell.content = [
+      { type: "paragraph", content: [{ type: "text", text: "first" }] },
+      { type: "paragraph", content: [{ type: "text", text: "second" }] }
+    ];
+
+    const output = markdown.serialize(parsed);
+    expect(output).toContain("first<br>second");
+    expect(output).not.toContain("\u001f");
+  });
+
+  it("serializes rich table hard breaks as Markdown table cell breaks", () => {
+    const parsed = markdown.parse([
+      "| Name | Note |",
+      "| --- | --- |",
+      "| Alice | first |"
+    ].join("\n"));
+    const cell = protectedNodes(parsed, "tableCell")[1];
+    cell.content = [{
+      type: "paragraph",
+      content: [
+        { type: "text", text: "first" },
+        { type: "hardBreak", attrs: { markdownMarker: "  " } },
+        { type: "text", text: "second" }
+      ]
+    }];
+
+    const output = markdown.serialize(parsed);
+    expect(output).toContain("first<br>second");
+    expect(output).not.toContain("\u001f");
+  });
+
+  it("serializes table-break nodes moved outside a table as normal Markdown hard breaks", () => {
+    const parsed = markdown.parse([
+      "| Name | Note |",
+      "| --- | --- |",
+      "| Alice | first<br>second |"
+    ].join("\n"));
+    const tableBreak = structuredClone(protectedNodes(parsed, "hardBreak")[0]);
+    const output = markdown.serialize({
+      type: "doc",
+      content: [{
+        type: "paragraph",
+        content: [
+          { type: "text", text: "first" },
+          tableBreak,
+          { type: "text", text: "second" }
+        ]
+      }]
+    });
+
+    expect(output).toContain("first  \nsecond");
+    expect(output).not.toContain("first<br>second");
+  });
+
+  it("does not interpret table cell break HTML outside tables", () => {
+    const parsed = markdown.parse("plain<br>text");
+    expect(protectedNodes(parsed, "hardBreak")).toHaveLength(0);
+    expect(protectedNodes(parsed, "protectedMarkdownInline")).toHaveLength(1);
+    expect(markdown.serialize(parsed)).toBe("plain<br>text");
+  });
+
   it("does not protect escaped footnotes, autolinks, comparisons, or fenced code contents", () => {
     const source = [
       String.raw`Escaped \[^skip] and real [^keep].`,

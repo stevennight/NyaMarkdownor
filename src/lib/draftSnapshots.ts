@@ -23,6 +23,7 @@ export type DraftSnapshot = {
 
 export type DraftSnapshotsRecord = {
   version: 1;
+  tableCellBreakFormat: "html";
   savedAt: number;
   snapshots: DraftSnapshot[];
 };
@@ -164,6 +165,7 @@ export async function loadDesktopDraftSnapshotsRecord(): Promise<DraftSnapshotsR
 export function createDraftSnapshotsRecord(snapshots: DraftSnapshot[], savedAt = Date.now()): DraftSnapshotsRecord {
   return {
     version: 1,
+    tableCellBreakFormat: "html",
     savedAt,
     snapshots: normalizeDraftSnapshots(snapshots)
   };
@@ -178,8 +180,9 @@ export function parseDraftSnapshotsRecord(raw: string): DraftSnapshotsRecord | n
     if (Array.isArray(parsed)) {
       return {
         version: 1,
+        tableCellBreakFormat: "html",
         savedAt: 0,
-        snapshots: normalizeDraftSnapshots(parsed)
+        snapshots: normalizeDraftSnapshots(parsed, true)
       };
     }
     return null;
@@ -201,19 +204,20 @@ function normalizeDraftSnapshotsRecord(value: unknown): DraftSnapshotsRecord | n
 
   return {
     version: 1,
+    tableCellBreakFormat: "html",
     savedAt: record.savedAt,
-    snapshots: normalizeDraftSnapshots(record.snapshots)
+    snapshots: normalizeDraftSnapshots(record.snapshots, record.tableCellBreakFormat !== "html")
   };
 }
 
-function normalizeDraftSnapshots(value: unknown[]): DraftSnapshot[] {
+function normalizeDraftSnapshots(value: unknown[], migrateLegacyTableCellBreaks = false): DraftSnapshot[] {
   return value
-    .map(normalizeDraftSnapshot)
+    .map((snapshot) => normalizeDraftSnapshot(snapshot, migrateLegacyTableCellBreaks))
     .filter((snapshot): snapshot is DraftSnapshot => snapshot !== null)
     .sort((left, right) => right.createdAt - left.createdAt);
 }
 
-function normalizeDraftSnapshot(value: unknown): DraftSnapshot | null {
+function normalizeDraftSnapshot(value: unknown, migrateLegacyTableCellBreaks = false): DraftSnapshot | null {
   if (!value || typeof value !== "object") return null;
   const snapshot = value as Partial<DraftSnapshot>;
   if (
@@ -229,13 +233,13 @@ function normalizeDraftSnapshot(value: unknown): DraftSnapshot | null {
     !Number.isFinite(snapshot.size)
   ) return null;
 
-  const normalized = normalizeMarkdownText(snapshot.markdown);
+  const normalized = normalizeMarkdownText(snapshot.markdown, { migrateLegacyTableCellBreaks });
   return {
     id: snapshot.id,
     fileName: snapshot.fileName,
     filePath: snapshot.filePath,
     markdown: normalized.markdown,
-    lastSavedMarkdown: normalizeMarkdownLineEndings(snapshot.lastSavedMarkdown),
+    lastSavedMarkdown: normalizeMarkdownText(snapshot.lastSavedMarkdown, { migrateLegacyTableCellBreaks }).markdown,
     lineEnding: isMarkdownLineEnding(snapshot.lineEnding) ? snapshot.lineEnding : normalized.lineEnding,
     fileStats: snapshot.fileStats,
     createdAt: snapshot.createdAt,

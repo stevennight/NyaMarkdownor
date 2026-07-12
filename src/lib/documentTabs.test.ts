@@ -83,6 +83,7 @@ describe("document tab session storage", () => {
 
     expect(record).toEqual({
       version: 1,
+      tableCellBreakFormat: "html",
       savedAt: 123,
       activeTabId: "tab-a",
       tabs: [firstTab, secondTab]
@@ -133,6 +134,7 @@ describe("document tab session storage", () => {
 
     expect(parseDocumentTabsRecord(raw)).toEqual({
       version: 1,
+      tableCellBreakFormat: "html",
       savedAt: 321,
       activeTabId: "restored-tab-3",
       tabs: [{
@@ -148,6 +150,35 @@ describe("document tab session storage", () => {
           fileStats: null
         }
       }]
+    });
+  });
+
+  it("migrates table separators only in markerless restored tab records", () => {
+    const markdown = [
+      "| Name | Note |",
+      "| --- | --- |",
+      "| Alice | first\u001fsecond |"
+    ].join("\n");
+    const legacy = {
+      version: 1,
+      savedAt: 321,
+      activeTabId: "tab-a",
+      tabs: [{
+        ...firstTab,
+        document: { ...firstTab.document, markdown, lastSavedMarkdown: markdown }
+      }]
+    };
+
+    expect(parseDocumentTabsRecord(JSON.stringify(legacy))?.tabs[0].document).toMatchObject({
+      markdown: markdown.replace("\u001f", "<br>"),
+      lastSavedMarkdown: markdown.replace("\u001f", "<br>")
+    });
+    expect(parseDocumentTabsRecord(JSON.stringify({
+      ...legacy,
+      tableCellBreakFormat: "html"
+    }))?.tabs[0].document).toMatchObject({
+      markdown,
+      lastSavedMarkdown: markdown
     });
   });
 
