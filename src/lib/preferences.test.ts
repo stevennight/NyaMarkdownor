@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPreferencesRecord, defaultPreferences, loadPreferences, loadPreferencesRecord, normalizePreferences, parsePreferencesRecord, savePreferences } from "./preferences";
+import { createPreferencesRecord, defaultBackupPreferences, defaultPreferences, loadPreferences, loadPreferencesRecord, normalizePreferences, parsePreferencesRecord, savePreferences } from "./preferences";
 
 function createStorageMock(options: { setThrows?: boolean } = {}): Storage {
   const store = new Map<string, string>();
@@ -34,6 +34,75 @@ describe("preferences", () => {
     });
   });
 
+  it("migrates old preference records with default backup settings", () => {
+    const record = parsePreferencesRecord(JSON.stringify({
+      version: 1,
+      savedAt: 123,
+      preferences: { theme: "dark" }
+    }));
+
+    expect(record?.preferences.backup).toEqual(defaultBackupPreferences);
+  });
+
+  it("normalizes backup directories, history, and numeric limits", () => {
+    const normalized = normalizePreferences({
+      backup: {
+        directory: 42,
+        previousDirectories: ["", "  D:/one  ", "D:/one", "D:/two", null, "D:/three", "D:/four", "D:/five", "D:/six", "D:/seven", "D:/eight", "D:/nine"],
+        checkpointIntervalMinutes: 0,
+        automaticVersionsPerFile: 999,
+        manualVersionsPerFile: -1,
+        maxTotalFiles: 24,
+        maxTotalSizeMb: 99999,
+        maxBackupFileSizeMb: 1,
+        automaticRetentionDays: 99999
+      } as never
+    });
+
+    expect(normalized.backup).toEqual({
+      directory: null,
+      previousDirectories: ["D:/one", "D:/two", "D:/three", "D:/four", "D:/five", "D:/six", "D:/seven", "D:/eight"],
+      checkpointIntervalMinutes: 1,
+      automaticVersionsPerFile: 256,
+      manualVersionsPerFile: 1,
+      maxTotalFiles: 128,
+      maxTotalSizeMb: 32768,
+      maxBackupFileSizeMb: 16,
+      automaticRetentionDays: 3650
+    });
+  });
+
+  it("keeps valid custom backup preferences and rounds numeric values", () => {
+    expect(normalizePreferences({
+      backup: {
+        ...defaultBackupPreferences,
+        directory: "D:/Nya Backups",
+        previousDirectories: ["D:/Old Backups"],
+        checkpointIntervalMinutes: 14.6,
+        maxTotalFiles: 4096
+      }
+    }).backup).toEqual({
+      ...defaultBackupPreferences,
+      directory: "D:/Nya Backups",
+      previousDirectories: ["D:/Old Backups"],
+      checkpointIntervalMinutes: 15,
+      maxTotalFiles: 4096
+    });
+  });
+
+  it("keeps the effective per-file backup limit within the total storage budget", () => {
+    expect(normalizePreferences({
+      backup: {
+        ...defaultBackupPreferences,
+        maxTotalSizeMb: 256,
+        maxBackupFileSizeMb: 4096
+      }
+    }).backup).toMatchObject({
+      maxTotalSizeMb: 256,
+      maxBackupFileSizeMb: 256
+    });
+  });
+
   it("keeps the visual editor as a persisted default view", () => {
     const record = createPreferencesRecord({ viewMode: "wysiwyg" }, 123);
 
@@ -65,6 +134,8 @@ describe("preferences", () => {
       editorFontSize: 99,
       editorLineWidth: 200,
       editorDensity: "spacious",
+      tableHeightMode: "scroll",
+      tableMaxHeightVh: 99,
       paneLayout: { editorRatio: 0.9, tableWidth: 100 }
     });
 
@@ -72,7 +143,23 @@ describe("preferences", () => {
     expect(normalized.editorLineWidth).toBe(680);
     expect(normalized.sidebarVisible).toBe(false);
     expect(normalized.editorDensity).toBe("spacious");
+    expect(normalized.tableHeightMode).toBe("scroll");
+    expect(normalized.tableMaxHeightVh).toBe(80);
     expect(normalized.paneLayout).toEqual({ editorRatio: 0.68, tableWidth: 240 });
+  });
+
+  it("normalizes global long-table display preferences without changing documents", () => {
+    expect(normalizePreferences({ tableHeightMode: "scroll", tableMaxHeightVh: 45 })).toMatchObject({
+      tableHeightMode: "scroll",
+      tableMaxHeightVh: 45
+    });
+    expect(normalizePreferences({
+      tableHeightMode: "unsupported" as "scroll",
+      tableMaxHeightVh: 10
+    })).toMatchObject({
+      tableHeightMode: "full",
+      tableMaxHeightVh: 30
+    });
   });
 
   it("does not throw when preference persistence is unavailable", () => {

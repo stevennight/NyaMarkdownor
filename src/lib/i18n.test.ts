@@ -16,6 +16,15 @@ describe("i18n", () => {
 
   it("translates static, interpolated, and common dynamic UI text", () => {
     expect(createTranslator("zh-CN")("Settings")).toBe("设置");
+    expect(createTranslator("zh-CN")("General")).toBe("常规");
+    expect(createTranslator("zh-CN")("Settings categories")).toBe("设置分类");
+    expect(createTranslator("zh-CN")("Version history")).toBe("版本历史");
+    expect(createTranslator("zh-CN")("Scroll long tables")).toBe("长表格内部滚动");
+    expect(createTranslator("zh-CN")("Backup location")).toBe("备份位置");
+    expect(createTranslator("zh-CN")("System local data")).toBe("系统本地数据目录");
+    expect(createTranslator("zh-CN")("Automatic versions per file")).toBe("每个文件的自动版本数");
+    expect(createTranslator("en")("Use system location")).toBe("Use system location");
+    expect(createTranslator("zh-CN")("Show {count} older versions", { count: 18 })).toBe("显示其余 18 个版本");
     expect(translate("zh-CN", "{count} files", { count: 3 })).toBe("3 files");
     expect(translateUiText("zh-CN", "42 lines")).toBe("42 行");
     expect(translateUiText("zh-CN", "Switch to Notes.md")).toBe("切换到 Notes.md");

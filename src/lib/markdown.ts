@@ -8,6 +8,7 @@ import type { TextRange } from "./editorCommands";
 import { tableCellBoundaryRange, unescapedPipeIndexes } from "./tableSourceRanges";
 import { normalizeTextRanges } from "./textRanges";
 import { clampSelectionRangesToTableBlock, tableBlockForSelectionRanges } from "./tableSelectionRanges";
+import { splitMarkdownFrontMatter } from "./markdownFrontMatter";
 
 const markdownIt = new MarkdownIt({
   html: false,
@@ -36,9 +37,14 @@ type SelectedTableRow = {
 
 type MarkdownRenderEnv = {
   headingIds?: Map<string, number>;
+  sourceLineOffset?: number;
 };
 
 markdownIt.core.ruler.after("inline", "nya_task_lists", (state) => {
+  const sourceLineOffset = Number.isInteger(state.env.sourceLineOffset)
+    ? Number(state.env.sourceLineOffset)
+    : 0;
+
   state.tokens.forEach((token, index) => {
     if (token.type !== "list_item_open") return;
 
@@ -49,8 +55,9 @@ markdownIt.core.ruler.after("inline", "nya_task_lists", (state) => {
     if (!match) return;
 
     const checked = match[1].toLowerCase() === "x";
+    const taskLine = token.map?.[0];
     token.attrJoin("class", "task-list-item");
-    token.attrSet("data-task-line", String(token.map?.[0] ?? ""));
+    token.attrSet("data-task-line", taskLine === undefined ? "" : String(taskLine + sourceLineOffset));
     token.attrSet("data-task-checked", checked ? "true" : "false");
     inlineToken.content = inlineToken.content.slice(match[0].length);
 
@@ -141,11 +148,19 @@ export function renderMarkdown(markdown: string): RenderedMarkdown {
 }
 
 export function renderMarkdownHtml(markdown: string): string {
-  return markdownIt.render(markdown, { headingIds: new Map<string, number>() });
+  const { frontMatter, body } = splitMarkdownFrontMatter(markdown);
+  return renderMarkdownFragment(body, frontMatterLineCount(frontMatter));
 }
 
 export function markdownToHtmlFragment(markdown: string): string {
-  return renderMarkdownHtml(markdown).trim();
+  return renderMarkdownFragment(markdown, 0).trim();
+}
+
+function renderMarkdownFragment(markdown: string, sourceLineOffset: number): string {
+  return markdownIt.render(markdown, {
+    headingIds: new Map<string, number>(),
+    sourceLineOffset
+  });
 }
 
 export function markdownRangeToClipboardPayload(markdown: string, selection: TextRange): { plainText: string; markdown: string; html: string } {
@@ -627,7 +642,9 @@ export function extractHeadings(markdown: string): Heading[] {
   const used = new Map<string, number>();
   const headings: Heading[] = [];
   let fence: CodeFence | null = null;
-  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const { frontMatter, body } = splitMarkdownFrontMatter(markdown);
+  const bodyLineOffset = frontMatterLineCount(frontMatter);
+  const lines = body.replace(/\r\n?/g, "\n").split("\n");
 
   for (let lineNumber = 0; lineNumber < lines.length; lineNumber += 1) {
     const line = lines[lineNumber];
@@ -645,18 +662,22 @@ export function extractHeadings(markdown: string): Heading[] {
 
     const atxMatch = line.match(/^ {0,3}(#{1,6})(?:[ \t]+|$)(.*?)\s*(?:[ \t]+#+[ \t]*)?$/);
     if (atxMatch) {
-      pushHeading(headings, used, atxMatch[1].length, stripInlineMarkdown(atxMatch[2]), lineNumber);
+      pushHeading(headings, used, atxMatch[1].length, stripInlineMarkdown(atxMatch[2]), lineNumber + bodyLineOffset);
       continue;
     }
 
     const setextLevel = setextHeadingLevel(line);
     const previousLine = lines[lineNumber - 1];
     if (setextLevel && previousLine !== undefined && isSetextHeadingTextLine(previousLine)) {
-      pushHeading(headings, used, setextLevel, stripInlineMarkdown(previousLine).trim(), lineNumber - 1);
+      pushHeading(headings, used, setextLevel, stripInlineMarkdown(previousLine).trim(), lineNumber - 1 + bodyLineOffset);
     }
   }
 
   return headings;
+}
+
+function frontMatterLineCount(frontMatter: string): number {
+  return frontMatter.match(/\n/g)?.length ?? 0;
 }
 
 function pushHeading(headings: Heading[], used: Map<string, number>, level: number, text: string, line: number): void {

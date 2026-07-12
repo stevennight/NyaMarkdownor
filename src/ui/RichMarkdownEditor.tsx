@@ -25,6 +25,7 @@ import { shouldHandleSmartCopy } from "../lib/selectionCopy";
 import { richTableStructureTransaction, type RichTableStructureCommand } from "../lib/richTableStructure";
 import { createRichMarkdownExtensions } from "../lib/richMarkdownExtensions";
 import { withoutGeneratedTrailingParagraph } from "../lib/richMarkdownDocument";
+import { shouldOpenRichLinkOnClick } from "../lib/richLinks";
 
 type RichTableCommand = Extract<
   TableDocumentCommand,
@@ -80,6 +81,7 @@ type RichMarkdownEditorProps = {
   onTableSelectionChange: (summary: RichTableSelectionSummary | null) => void;
   onSelectionChange: (selection: TextRange) => void;
   onActiveHeadingIndexChange: (index: number | null) => void;
+  onOpenLink: (href: string) => void;
   onToast: (message: string) => void;
   scrollProgress?: number;
   onScrollProgress?: (progress: number) => void;
@@ -88,7 +90,7 @@ type RichMarkdownEditorProps = {
 };
 
 export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, RichMarkdownEditorProps>(function RichMarkdownEditor(
-  { documentFilePath, markdown, smartCopy, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onActiveHeadingIndexChange, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText },
+  { documentFilePath, markdown, smartCopy, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onActiveHeadingIndexChange, onOpenLink, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText },
   forwardedRef
 ) {
   const onChangeRef = useRef(onChange);
@@ -97,6 +99,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   const onTableSelectionChangeRef = useRef(onTableSelectionChange);
   const onSelectionChangeRef = useRef(onSelectionChange);
   const onActiveHeadingIndexChangeRef = useRef(onActiveHeadingIndexChange);
+  const onOpenLinkRef = useRef(onOpenLink);
   const onToastRef = useRef(onToast);
   const smartCopyRef = useRef(smartCopy);
   const onScrollProgressRef = useRef(onScrollProgress);
@@ -116,6 +119,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   onTableSelectionChangeRef.current = onTableSelectionChange;
   onSelectionChangeRef.current = onSelectionChange;
   onActiveHeadingIndexChangeRef.current = onActiveHeadingIndexChange;
+  onOpenLinkRef.current = onOpenLink;
   onToastRef.current = onToast;
   smartCopyRef.current = smartCopy;
   onScrollProgressRef.current = onScrollProgress;
@@ -149,6 +153,21 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
         );
       },
       handleDOMEvents: {
+        click: (view, event) => {
+          if (!shouldOpenRichLinkOnClick(event)) return false;
+
+          const target = event.target;
+          if (!(target instanceof Element)) return false;
+          const link = target.closest<HTMLAnchorElement>("a[href]");
+          if (!link || !view.dom.contains(link)) return false;
+
+          const href = link.getAttribute("href")?.trim();
+          if (!href) return false;
+
+          event.preventDefault();
+          onOpenLinkRef.current(href);
+          return true;
+        },
         copy: (_view, event) => {
           const currentEditor = editorRef.current;
           if (!currentEditor || !shouldHandleSmartCopy(smartCopyRef.current, !currentEditor.state.selection.empty)) return false;

@@ -1,5 +1,6 @@
 import { isLocalMarkdownLinkHref } from "./localMarkdownLinks";
 import { anchorIdCandidatesFromHref, anchorIdFromHref } from "./markdownAnchors";
+import { normalizeExternalLinkHref } from "./externalLinks";
 
 export type PreviewLinkKind = "empty" | "anchor" | "local-markdown" | "external" | "local-other" | "blocked-protocol";
 
@@ -31,7 +32,7 @@ export function previewAnchorIdCandidatesFromHref(href: string): string[] {
 }
 
 function isOpenableExternalPreviewLink(href: string): boolean {
-  return /^(https?:|mailto:)/i.test(href) || href.startsWith("//");
+  return normalizeExternalLinkHref(href) !== null;
 }
 
 function hasProtocolOrProtocolRelativePrefix(href: string): boolean {

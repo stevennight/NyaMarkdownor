@@ -44,6 +44,7 @@ import {
   FileText,
   FilePlus2,
   FolderOpen,
+  GitCompareArrows,
   Heading1,
   Heading2,
   Heading3,
@@ -86,7 +87,7 @@ import { EditorView } from "@codemirror/view";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import type { Heading, LanguagePreference, MarkdownDocument, MarkdownFileStats, MarkdownTable, PaneLayout, SidebarPage, TableAlignment, TableBlock, ThemeMode, ViewMode, WorkspaceFile, WorkspaceListing } from "../types";
+import type { BackupPreferences, Heading, LanguagePreference, MarkdownDocument, MarkdownFileStats, MarkdownTable, PaneLayout, SidebarPage, TableAlignment, TableBlock, TableHeightMode, ThemeMode, ViewMode, WorkspaceFile, WorkspaceListing } from "../types";
 import { MarkdownEditor } from "./MarkdownEditor";
 import type { RichMarkdownEditorHandle } from "./RichMarkdownEditor";
 import { extractHeadings, markdownRangesToClipboardPayload, markdownRangesToTableCsv, markdownRangesToTableMarkdown, markdownRangesToTableTsv, markdownTableSliceToClipboardPayload, markdownTableSliceToCsv, markdownTableSliceToMarkdown, markdownTableSliceToTsv, referenceLabelsFromMarkdown } from "../lib/markdown";
@@ -110,13 +111,14 @@ import {
 } from "../lib/tables";
 import {
   listMarkdownBackups,
+  listMarkdownBackupHistories,
   listMarkdownWorkspace,
-  createMarkdownFile,
   initialMarkdownFilePaths,
   importMarkdownFilesAsDrafts,
   openMarkdownFiles,
   openMarkdownWorkspace,
   openLocalImageFiles,
+  pickMarkdownBackupDirectory,
   isTauriRuntime,
   readMarkdownBackup,
   readMarkdownFileStats,
@@ -131,6 +133,7 @@ import {
   type FileAssociationScope,
   supportsBrowserFileAccess,
   type MarkdownBackup,
+  type MarkdownBackupHistory,
   type OpenedFile,
   type OpenMarkdownFilesResult,
   type SavedExport
@@ -192,9 +195,10 @@ import { createEditorStateSnapshot, type EditorStateSnapshot } from "../lib/edit
 import { rewritePreviewImageSources } from "../lib/previewAssets";
 import { resolveLocalMarkdownLinkTarget } from "../lib/localMarkdownLinks";
 import { classifyPreviewLinkHref, previewAnchorIdCandidatesFromHref, shouldOpenPreviewLinkWithModifier } from "../lib/previewLinks";
+import { openExternalLink } from "../lib/externalLinks";
 import { droppedDraftImportToast, droppedOpenToast, isSupportedMarkdownDropName, openedFilesFromBrowserDrop, uniqueDroppedPaths } from "../lib/dropOpen";
 import { createDroppedImageTextEdit, droppedImageMarkdown, droppedImageToast, isSupportedImageDropName } from "../lib/localImageDrop";
-import { filterWorkspaceFiles, limitWorkspaceFilesForSidebar, sortWorkspaceFiles, sortWorkspaceFilesByModified, suggestedWorkspaceNewMarkdownPath } from "../lib/workspaceFiles";
+import { filterWorkspaceFiles, limitWorkspaceFilesForSidebar, sortWorkspaceFiles, sortWorkspaceFilesByModified } from "../lib/workspaceFiles";
 import { recentFileCommands } from "../lib/recentFileCommands";
 import { dirtyDocuments, isDocumentDirty } from "../lib/documentDirtyState";
 import { applySavedFileToDocument, diskStatusLabel, documentEditStatusLabel, saveAllStoppedLabel, saveSafetyStatusLabel, savedTabsLabel, tabSessionEditStatusLabel } from "../lib/documentSaveState";
@@ -253,11 +257,12 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useMarkdownWorker } from "../hooks/useMarkdownWorker";
 import { CommandPalette } from "./CommandPalette";
 import { SettingsDialog } from "./SettingsDialog";
+import { BackupCompareDialog } from "./BackupCompareDialog";
 import { FindReplacePanel } from "./FindReplacePanel";
 import { InsertTableDialog, type TableSizeDraft } from "./InsertTableDialog";
 import { LinkDialog } from "./LinkDialog";
 import { type CommandItem } from "../lib/commands";
-import { loadDesktopPreferencesRecord, loadPreferences, loadPreferencesRecord, savePreferences } from "../lib/preferences";
+import { loadDesktopPreferencesRecord, loadPreferences, loadPreferencesRecord, normalizeBackupPreferences, savePreferences } from "../lib/preferences";
 import { normalizeRichLinkHref } from "../lib/richLinks";
 import { viewMenuFocusIndex, type ViewMenuFocusDirection } from "../lib/viewMenuNavigation";
 import { closeWindowAfterRecovery, shouldBlockBrowserUnload } from "../lib/windowClose";
@@ -306,6 +311,8 @@ A local-first Markdown editor aiming for a polished desktop writing experience.
 
 const DRAFT_SNAPSHOT_IDLE_MS = 20000;
 const AUTO_SAVE_IDLE_MS = 1600;
+const BACKUP_HISTORY_REFRESH_MS = 30000;
+const MAX_INTERACTIVE_BACKUP_COMPARE_BYTES = 16 * 1024 * 1024;
 const TAB_DRAG_MIME = "application/x-nya-markdownor-tab";
 const DEFERRED_METRICS_THRESHOLD = 80_000;
 
@@ -354,6 +361,15 @@ type LocalImageInsertResult = {
   blockedByUnsaved: boolean;
 };
 
+type BackupComparisonState = {
+  backup: MarkdownBackup;
+  tabId: string;
+  sourcePath: string;
+  backupMarkdown: string;
+  currentMarkdown: string;
+  currentName: string;
+};
+
 type EditorSelectionState = TextRange & {
   ranges: TextRange[];
   cursorPosition?: DocumentCursorPosition;
@@ -382,11 +398,14 @@ export function App() {
   const [sidebarVisible, setSidebarVisibleState] = useState(initialPreferences.sidebarVisible);
   const [sidebarPage, setSidebarPage] = useState<SidebarPage>(initialPreferences.sidebarPage);
   const [autoSave, setAutoSaveState] = useState(initialPreferences.autoSave);
+  const [backupPreferences, setBackupPreferencesState] = useState<BackupPreferences>(initialPreferences.backup);
   const [smartCopy, setSmartCopyState] = useState(initialPreferences.smartCopy);
   const [softSyntax, setSoftSyntaxState] = useState(initialPreferences.softSyntax);
   const [editorFontSize, setEditorFontSizeState] = useState(initialPreferences.editorFontSize);
   const [editorLineWidth, setEditorLineWidthState] = useState(initialPreferences.editorLineWidth);
   const [editorDensity, setEditorDensityState] = useState(initialPreferences.editorDensity);
+  const [tableHeightMode, setTableHeightModeState] = useState<TableHeightMode>(initialPreferences.tableHeightMode);
+  const [tableMaxHeightVh, setTableMaxHeightVhState] = useState(initialPreferences.tableMaxHeightVh);
   const [paneLayout, setPaneLayoutState] = useState(initialPreferences.paneLayout);
   const locale = resolveAppLocale(language, browserLanguages());
   const t = useMemo(() => createTranslator(locale), [locale]);
@@ -398,6 +417,9 @@ export function App() {
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [workspaceSortMode, setWorkspaceSortMode] = useState<WorkspaceSortMode>("path");
   const [backups, setBackups] = useState<MarkdownBackup[]>([]);
+  const [showAllBackups, setShowAllBackups] = useState(false);
+  const [backupHistories, setBackupHistories] = useState<MarkdownBackupHistory[]>([]);
+  const [backupComparison, setBackupComparison] = useState<BackupComparisonState | null>(null);
   const [draftSnapshots, setDraftSnapshots] = useState(loadDraftSnapshots);
   const [desktopProfileReady, setDesktopProfileReady] = useState(!isTauriRuntime());
   const [desktopRecoveryReady, setDesktopRecoveryReady] = useState(!isTauriRuntime());
@@ -453,6 +475,7 @@ export function App() {
   const pendingEditorFocusTabIdRef = useRef<string | null>(null);
   const autoSaveInFlightTabIdsRef = useRef(new Set<string>());
   const autoSaveAttemptedMarkdownRef = useRef(new Map<string, string>());
+  const autoSaveBackupWarningTabIdsRef = useRef(new Set<string>());
   const documentSaveQueueRef = useRef(new Map<string, Promise<void>>());
   const editorStateSnapshotsRef = useRef(new Map<string, EditorStateSnapshot>());
   const sourceScrollProgressRef = useRef(new Map<string, number>());
@@ -569,6 +592,12 @@ export function App() {
     [documentState.markdown, selection.from, viewMode]
   );
   const activeTable = sourceActiveTable;
+  const visibleBackups = showAllBackups ? backups : backups.slice(0, 6);
+  const hiddenBackupCount = backups.length - visibleBackups.length;
+  const orphanedBackupHistories = useMemo(
+    () => backupHistories.filter((history) => !history.sourceExists),
+    [backupHistories]
+  );
   const visibleDraftSnapshots = useMemo(
     () => prioritizeDraftSnapshots(draftSnapshots, documentState).slice(0, 6),
     [draftSnapshots, documentState.fileName, documentState.filePath]
@@ -583,6 +612,13 @@ export function App() {
     [workspace, workspaceQuery, workspaceSortMode]
   );
   const dirty = isDocumentDirty(documentState);
+  const hasRecoveryContent = Boolean(
+    documentState.filePath
+    || backups.length > 0
+    || orphanedBackupHistories.length > 0
+    || draftSnapshots.length > 0
+    || dirty
+  );
   const dirtyTabsCount = useMemo(() => dirtyDocuments(tabs).length, [tabs]);
   const hasDirtyTabs = dirtyTabsCount > 0;
   const windowTitle = useMemo(
@@ -661,11 +697,14 @@ export function App() {
           setSidebarVisibleState(preferences.sidebarVisible);
           setSidebarPage(preferences.sidebarPage);
           setAutoSaveState(preferences.autoSave);
+          setBackupPreferencesState(preferences.backup);
           setSmartCopyState(preferences.smartCopy);
           setSoftSyntaxState(preferences.softSyntax);
           setEditorFontSizeState(preferences.editorFontSize);
           setEditorLineWidthState(preferences.editorLineWidth);
           setEditorDensityState(preferences.editorDensity);
+          setTableHeightModeState(preferences.tableHeightMode);
+          setTableMaxHeightVhState(preferences.tableMaxHeightVh);
           setPaneLayoutState(preferences.paneLayout);
           savePreferences(preferences);
         }
@@ -749,9 +788,9 @@ export function App() {
   useEffect(() => {
     if (!desktopProfileReady) return;
 
-    const nextPreferences = { viewMode, theme, language, sidebarVisible, sidebarPage, autoSave, smartCopy, softSyntax, editorFontSize, editorLineWidth, editorDensity, paneLayout };
+    const nextPreferences = { viewMode, theme, language, sidebarVisible, sidebarPage, autoSave, backup: backupPreferences, smartCopy, softSyntax, editorFontSize, editorLineWidth, editorDensity, tableHeightMode, tableMaxHeightVh, paneLayout };
     savePreferences(nextPreferences);
-  }, [desktopProfileReady, viewMode, theme, language, sidebarVisible, sidebarPage, autoSave, smartCopy, softSyntax, editorFontSize, editorLineWidth, editorDensity, paneLayout]);
+  }, [desktopProfileReady, viewMode, theme, language, sidebarVisible, sidebarPage, autoSave, backupPreferences, smartCopy, softSyntax, editorFontSize, editorLineWidth, editorDensity, tableHeightMode, tableMaxHeightVh, paneLayout]);
 
   useEffect(() => {
     paneLayoutRef.current = paneLayout;
@@ -1012,7 +1051,11 @@ export function App() {
     }, AUTO_SAVE_IDLE_MS);
 
     return () => window.clearTimeout(timer);
-  }, [activeTab.id, autoSave, desktopProfileReady, desktopRuntime, documentState, externalChange]);
+  }, [activeTab.id, autoSave, backupPreferences, desktopProfileReady, desktopRuntime, documentState, externalChange]);
+
+  useEffect(() => {
+    setShowAllBackups(false);
+  }, [documentState.filePath]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1020,8 +1063,8 @@ export function App() {
     async function loadBackups() {
       setBackupLoading(Boolean(documentState.filePath));
       try {
-        const next = await listMarkdownBackups(documentState.filePath);
-        if (!cancelled) setBackups(next.slice(0, 6));
+        const next = await listMarkdownBackups(documentState.filePath, backupPreferences);
+        if (!cancelled) setBackups(next);
       } catch (error) {
         console.warn(error);
         if (!cancelled) setBackups([]);
@@ -1034,7 +1077,31 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [documentState.filePath, documentState.lastBackupPath]);
+  }, [backupPreferences, documentState.filePath, documentState.lastBackupPath]);
+
+  useEffect(() => {
+    if (!desktopRuntime || sidebarPage !== "recovery") return undefined;
+    let cancelled = false;
+
+    function loadHistories() {
+      void listMarkdownBackupHistories(backupPreferences)
+        .then((histories) => {
+          if (!cancelled) setBackupHistories(histories);
+        })
+        .catch((error) => {
+          console.warn(error);
+          if (!cancelled) setBackupHistories([]);
+        });
+    }
+
+    loadHistories();
+    const refreshTimer = window.setInterval(loadHistories, BACKUP_HISTORY_REFRESH_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(refreshTimer);
+    };
+  }, [backupPreferences, desktopRuntime, documentState.lastBackupPath, externalChange, sidebarPage]);
 
   useEffect(() => {
     const path = documentState.filePath;
@@ -1285,7 +1352,14 @@ export function App() {
     if (/destination folder does not exist/i.test(message)) return "Destination folder does not exist";
     if (/destination parent is not a folder/i.test(message)) return "Destination parent is not a folder";
     if (/permission denied|access is denied/i.test(message)) return "Permission denied while writing file";
+    if (/exceeding the configured maximum backup file size/i.test(message)) return "File exceeds the backup size limit; adjust Backup settings";
+    if (/backup storage limits cannot accommodate/i.test(message)) return "Backup storage limit reached; adjust Backup settings";
+    if (/failed to prepare active backup folder|active backup path is not a folder/i.test(message)) return "Backup folder is unavailable; choose another location";
     return fallback;
+  }
+
+  function isPersistentBackupFailure(error: unknown): boolean {
+    return /exceeding the configured maximum backup file size|backup storage limits cannot accommodate|failed to prepare active backup folder|active backup path is not a folder/i.test(messageFromError(error));
   }
 
   function fileOpenFailureLabel(error: unknown, fallback: string): string {
@@ -1839,7 +1913,7 @@ export function App() {
         return;
       }
 
-      openExternalPreviewLink(href);
+      void openExternalDocumentLink(href);
       return;
     }
 
@@ -1876,9 +1950,56 @@ export function App() {
     target.scrollIntoView({ block: "start", behavior: "smooth" });
   }
 
-  function openExternalPreviewLink(href: string) {
-    const opened = window.open(href, "_blank", "noopener,noreferrer");
-    showToast(opened ? "Opened external link" : "External link blocked by the browser");
+  async function openExternalDocumentLink(href: string) {
+    try {
+      const result = await openExternalLink(href);
+      if (result === "opened") {
+        showToast("Opened external link");
+      } else if (result === "blocked") {
+        showToast("External link blocked by the browser");
+      } else {
+        showToast("Preview link protocol blocked");
+      }
+    } catch (error) {
+      console.warn(error);
+      showToast("External link could not be opened");
+    }
+  }
+
+  function handleRichLinkOpen(href: string) {
+    const linkKind = classifyPreviewLinkHref(href);
+
+    if (linkKind === "anchor") {
+      const ids = previewAnchorIdCandidatesFromHref(href);
+      const headingIndex = headings.findIndex((heading) => ids.includes(heading.id));
+      if (headingIndex < 0 || !richEditorRef.current?.scrollToHeading(headingIndex)) showToast("Heading not found");
+      return;
+    }
+
+    if (linkKind === "external") {
+      void openExternalDocumentLink(href);
+      return;
+    }
+
+    if (linkKind === "blocked-protocol") {
+      showToast("Preview link protocol blocked");
+      return;
+    }
+
+    if (linkKind === "local-other") {
+      showToast("Only Markdown and text links open inside NyaMarkdownor");
+      return;
+    }
+
+    if (linkKind === "empty") return;
+
+    const linkedTarget = resolveLocalMarkdownLinkTarget(href, documentState.filePath);
+    if (!linkedTarget) {
+      showToast("Save this document before opening relative links");
+      return;
+    }
+
+    void openLinkedMarkdownDocument(linkedTarget.path, linkedTarget.anchorIds);
   }
 
   async function openLinkedMarkdownDocument(path: string, anchorIds: string[] = []) {
@@ -2375,8 +2496,26 @@ export function App() {
   }
 
   function setAutoSave(value: boolean) {
-    if (value) autoSaveAttemptedMarkdownRef.current.clear();
+    if (value) {
+      autoSaveAttemptedMarkdownRef.current.clear();
+      autoSaveBackupWarningTabIdsRef.current.clear();
+    }
     setAutoSaveState(value);
+  }
+
+  async function chooseBackupDirectory() {
+    try {
+      const directory = await pickMarkdownBackupDirectory();
+      if (!directory) return;
+      setBackupPreferencesState((current) => backupPreferencesWithDirectory(current, directory));
+    } catch (error) {
+      console.warn(error);
+      showToast("Backup location could not be changed");
+    }
+  }
+
+  function resetBackupDirectory() {
+    setBackupPreferencesState((current) => backupPreferencesWithDirectory(current, null));
   }
 
   function setSmartCopy(value: boolean) {
@@ -2397,6 +2536,14 @@ export function App() {
 
   function setEditorDensity(value: typeof editorDensity) {
     setEditorDensityState(value);
+  }
+
+  function setTableHeightMode(value: TableHeightMode) {
+    setTableHeightModeState(value);
+  }
+
+  function setTableMaxHeightVh(value: number) {
+    setTableMaxHeightVhState(value);
   }
 
   function resetPaneLayout() {
@@ -2883,40 +3030,7 @@ export function App() {
   }
 
   function newPrimaryDocument() {
-    if (!desktopLocalFilesAvailable) {
-      newDraftDocument();
-      return;
-    }
-
-    void newDocument();
-  }
-
-  async function newDocument() {
-    if (!desktopLocalFilesAvailable) {
-      showToast("Real file creation needs the desktop app");
-      return;
-    }
-
-    try {
-      const suggestedName = desktopRuntime && workspace
-        ? suggestedWorkspaceNewMarkdownPath(
-            workspace.rootPath,
-            workspace.files,
-            currentTabsForImmediateDocumentOpen().map((tab) => tab.document.fileName)
-          )
-        : "Untitled.md";
-      const saved = await createMarkdownFile("", suggestedName);
-      if (!saved) return;
-
-      const result = openFileInTab(saved);
-      setRecentFiles((current) => rememberRecentFile(current, saved.path, saved.name));
-      if (workspace && saved.path) void loadWorkspace(workspace.rootPath, { quiet: true });
-      showToast(result.action === "opened-disk-version" ? `Created ${saved.name}; dirty tab kept` : `Created ${saved.name}`);
-    } catch (error) {
-      console.warn(error);
-      const message = messageFromError(error);
-      showToast(message.includes("already exists") ? "File already exists; choose another name" : fileWriteFailureLabel(error, "New file could not be created"));
-    }
+    newDraftDocument();
   }
 
   function nextUntitledDraftName(): string {
@@ -3408,7 +3522,6 @@ export function App() {
       showToast("No saved file open");
       return;
     }
-
     try {
       const opened = await readMarkdownPath(document.filePath);
       openDiskVersionInDraftTab(opened);
@@ -3618,14 +3731,22 @@ export function App() {
         tab.document.markdown,
         suggestedTarget,
         saveDiskCheck,
-        tab.document.lineEnding
+        tab.document.lineEnding,
+        options.mode === "auto" ? "automatic" : "manual",
+        backupPreferences
       );
     } catch (error) {
       console.warn(error);
       if (/file changed on disk before save/i.test(messageFromError(error))) {
         setDocumentTabExternalChange(tab.id, true);
       }
-      if (options.announce) showToast(fileWriteFailureLabel(error, "File could not be saved"));
+      const failureLabel = fileWriteFailureLabel(error, "File could not be saved");
+      if (options.mode === "auto" && isPersistentBackupFailure(error)) {
+        if (!autoSaveBackupWarningTabIdsRef.current.has(tab.id)) showToast(failureLabel);
+        autoSaveBackupWarningTabIdsRef.current.add(tab.id);
+      } else if (options.announce) {
+        showToast(failureLabel);
+      }
       return "canceled";
     }
 
@@ -3638,6 +3759,7 @@ export function App() {
       return "downloaded";
     }
 
+    autoSaveBackupWarningTabIdsRef.current.delete(tab.id);
     const commit = commitSavedFileToTab(tab, saved);
     setDocumentTabExternalChange(tab.id, false);
     setRecentFiles((current) => rememberRecentFile(current, saved.path, saved.name));
@@ -3658,7 +3780,9 @@ export function App() {
         document.markdown,
         suggestedMarkdownCopyTarget(document),
         null,
-        document.lineEnding
+        document.lineEnding,
+        "manual",
+        backupPreferences
       );
     } catch (error) {
       console.warn(error);
@@ -4461,25 +4585,101 @@ export function App() {
     return markdownTable !== null ? copyText(markdownTable) : false;
   }
 
-  async function restoreBackup(backup: MarkdownBackup) {
+  async function compareBackup(backup: MarkdownBackup) {
     const tab = currentActiveDocumentTabForCommand();
     const document = tab.document;
     if (!document.filePath) {
       showToast("No saved file open");
       return;
     }
-
-    if (isDocumentDirty(document) && !await requestConfirmation({
-      title: "Restore this backup?",
-      message: "Restoring will replace the current unsaved editor content with this local backup after keeping a local recovery snapshot.",
-      confirmLabel: "Restore backup",
-      cancelLabel: "Keep editing",
-      tone: "danger"
-    })) return;
-    preserveDirtyDraftSnapshotBeforeReplace(document);
+    if (
+      backup.size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES
+      || new Blob([document.markdown]).size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES
+    ) {
+      showToast("Version is too large for interactive comparison");
+      return;
+    }
 
     try {
-      const restored = await readMarkdownBackup(document.filePath, backup.path);
+      const restored = await readMarkdownBackup(document.filePath, backup.path, backupPreferences);
+      const liveSession = currentTabSessionForRecovery();
+      const liveTab = liveSession.tabs.find((candidate) => candidate.id === tab.id);
+      if (
+        liveSession.activeTabId !== tab.id
+        || !liveTab?.document.filePath
+        || !sameLocalPath(liveTab.document.filePath, document.filePath)
+      ) {
+        showToast("Comparison canceled because the active file changed");
+        return;
+      }
+      if (new Blob([liveTab.document.markdown]).size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES) {
+        showToast("Version is too large for interactive comparison");
+        return;
+      }
+
+      setBackupComparison({
+        backup,
+        tabId: tab.id,
+        sourcePath: document.filePath,
+        backupMarkdown: restored.markdown,
+        currentMarkdown: liveTab.document.markdown,
+        currentName: displayMarkdownDocumentName(liveTab.document)
+      });
+    } catch (error) {
+      console.warn(error);
+      showToast("Backup could not be opened for comparison");
+    }
+  }
+
+  async function restoreBackup(backup: MarkdownBackup, expectedSourcePath?: string, expectedTabId?: string) {
+    const tab = currentActiveDocumentTabForCommand();
+    const document = tab.document;
+    if (!document.filePath) {
+      showToast("No saved file open");
+      return;
+    }
+    if (expectedSourcePath && !sameLocalPath(document.filePath, expectedSourcePath)) {
+      showToast("The comparison belongs to another file");
+      return;
+    }
+    if (expectedTabId && tab.id !== expectedTabId) {
+      showToast("The comparison belongs to another tab");
+      return;
+    }
+
+    try {
+      const restored = await readMarkdownBackup(document.filePath, backup.path, backupPreferences);
+      const loadedSession = currentTabSessionForRecovery();
+      const loadedTab = loadedSession.tabs.find((candidate) => candidate.id === tab.id);
+      if (
+        loadedSession.activeTabId !== tab.id
+        || !loadedTab?.document.filePath
+        || !sameLocalPath(loadedTab.document.filePath, document.filePath)
+      ) {
+        showToast("Restore canceled because the active file changed");
+        return;
+      }
+
+      if (isDocumentDirty(loadedTab.document) && !await requestConfirmation({
+        title: "Restore this backup?",
+        message: "Restoring will replace the current unsaved editor content with this local backup after keeping a local recovery snapshot.",
+        confirmLabel: "Restore backup",
+        cancelLabel: "Keep editing",
+        tone: "danger"
+      })) return;
+
+      const finalSession = currentTabSessionForRecovery();
+      const finalTab = finalSession.tabs.find((candidate) => candidate.id === tab.id);
+      if (
+        finalSession.activeTabId !== tab.id
+        || !finalTab?.document.filePath
+        || !sameLocalPath(finalTab.document.filePath, document.filePath)
+      ) {
+        showToast("Restore canceled because the active file changed");
+        return;
+      }
+
+      preserveDirtyDraftSnapshotBeforeReplace(finalTab.document);
       richDocumentHistoriesRef.current.delete(tab.id);
       updateDocumentTab(tab.id, (current) => ({
         ...current,
@@ -4490,12 +4690,36 @@ export function App() {
         lastBackupPath: backup.path,
         fileStats: restored.fileStats ?? current.fileStats ?? null
       }));
-      clearManualPreviewSnapshot();
-      setDocumentTabExternalChange(activeTab.id, false);
+      clearManualPreviewSnapshot(tab.id);
+      setDocumentTabExternalChange(tab.id, false);
       showToast("Backup restored into editor");
     } catch (error) {
       console.warn(error);
       showToast("Backup could not be restored");
+    }
+  }
+
+  async function openOrphanedBackupHistory(history: MarkdownBackupHistory) {
+    if (!history.latestBackupPath) {
+      showToast("No readable backup found");
+      return;
+    }
+
+    try {
+      const restored = await readMarkdownBackup(history.sourcePath, history.latestBackupPath, backupPreferences);
+      addDocumentTab({
+        fileName: history.fileName,
+        filePath: null,
+        markdown: restored.markdown,
+        lastSavedMarkdown: restored.markdown,
+        lineEnding: restored.lineEnding,
+        lastBackupPath: null,
+        fileStats: null
+      });
+      showToast("Opened latest backup as draft");
+    } catch (error) {
+      console.warn(error);
+      showToast("Backup could not be opened");
     }
   }
 
@@ -5179,6 +5403,8 @@ export function App() {
         return;
       }
 
+      if (backupComparison) return;
+
       if (tableSizeDialogOpen) {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -5332,7 +5558,6 @@ export function App() {
 
     return [
     { id: "new", title: desktopLocalFilesAvailable ? "New File" : "New Draft Tab", group: desktopLocalFilesAvailable ? "File" : "Tabs", shortcut: "Ctrl+N", run: newPrimaryDocument },
-    ...(desktopLocalFilesAvailable ? [{ id: "new-draft", title: "New Draft Tab", group: "Tabs", run: newDraftDocument }] : []),
     { id: "close-tab", title: "Close Tab", group: "File", shortcut: "Ctrl+W", run: () => closeDocumentTab(activeTab.id) },
     { id: "close-other-tabs", title: "Close Other Tabs", group: "Tabs", disabled: tabs.length <= 1, run: closeOtherDocumentTabs },
     { id: "close-tabs-to-right", title: "Close Tabs to the Right", group: "Tabs", disabled: documentTabIdsAfter(tabs.map((tab) => tab.id), activeTab.id).length === 0, run: closeDocumentTabsToRight },
@@ -5487,6 +5712,7 @@ export function App() {
   const appStyle = {
     "--editor-font-size": `${editorFontSize}px`,
     "--editor-content-width": `${editorLineWidth}px`,
+    "--table-max-height": `${tableMaxHeightVh}vh`,
     "--outline-empty-label": JSON.stringify(t("No headings")),
     "--editor-placeholder": JSON.stringify(t("Start writing")),
     ...paneLayoutVariables
@@ -5513,6 +5739,7 @@ export function App() {
       data-view={viewMode}
       data-markup={softSyntax ? "soft" : "source"}
       data-density={editorDensity}
+      data-table-height={tableHeightMode}
       data-sidebar={sidebarVisible ? "visible" : "hidden"}
       data-table={activeTable ? "active" : "inactive"}
       style={appStyle}
@@ -5969,8 +6196,76 @@ export function App() {
           {sidebarPage === "recovery" && (
             <>
               <div className="pane-kicker"><History size={16} /> {t("Recovery")}</div>
-          {(documentState.filePath || backups.length > 0 || draftSnapshots.length > 0 || dirty) && (
+          {hasRecoveryContent && (
             <section className="backup-section">
+              {(documentState.filePath || backupLoading || backups.length > 0) && (
+                <>
+                  <div className="section-label recovery-section-label">{t("Saved file history")}</div>
+                  {backupLoading ? (
+                    <div className="backup-empty">{t("Loading backups")}</div>
+                  ) : visibleBackups.map((backup) => (
+                    <div key={backup.path} className="backup-row">
+                      <button className="backup-item snapshot-restore" type="button" onClick={() => restoreBackup(backup)} title={backup.path}>
+                        <RotateCcw size={14} />
+                        <span>
+                          <strong>{formatBackupTime(backup.modifiedMs)}</strong>
+                          <small>{t(backupKindMessage(backup.kind))} - {formatBytes(backup.size)}</small>
+                        </span>
+                      </button>
+                      <button
+                        className="backup-compare"
+                        type="button"
+                        aria-label={t("Compare with current editor")}
+                        title={t("Compare with current editor")}
+                        onClick={() => void compareBackup(backup)}
+                      >
+                        <GitCompareArrows size={14} />
+                      </button>
+                    </div>
+                  ))}
+                  {!backupLoading && documentState.filePath && backups.length === 0 && (
+                    <div className="backup-empty">{t("No saved versions yet")}</div>
+                  )}
+                  {backups.length > 6 && (
+                    <button
+                      className={`backup-more${showAllBackups ? " expanded" : ""}`}
+                      type="button"
+                      aria-expanded={showAllBackups}
+                      onClick={() => setShowAllBackups((current) => !current)}
+                    >
+                      <ChevronDown size={14} />
+                      <span>
+                        {showAllBackups
+                          ? t("Show recent versions")
+                          : t("Show {count} older versions", { count: hiddenBackupCount })}
+                      </span>
+                    </button>
+                  )}
+                </>
+              )}
+              {orphanedBackupHistories.length > 0 && (
+                <>
+                  <div className="section-label recovery-section-label detached-history-label">{t("Detached file history")}</div>
+                  {orphanedBackupHistories.map((history) => (
+                    <button
+                      key={history.sourcePath}
+                      className="backup-item"
+                      type="button"
+                      onClick={() => void openOrphanedBackupHistory(history)}
+                      title={`${t("Open latest version as draft")} - ${history.sourcePath}`}
+                    >
+                      <FileText size={14} />
+                      <span>
+                        <strong>{history.fileName}</strong>
+                        <small>
+                          {t("{count} retained versions", { count: history.backupCount })} - {formatBackupTime(history.latestMs)} - {formatBytes(history.totalSize)}
+                        </small>
+                      </span>
+                    </button>
+                  ))}
+                </>
+              )}
+              <div className="section-label recovery-section-label local-snapshot-label">{t("Local recovery snapshots")}</div>
               <button
                 className="backup-item"
                 type="button"
@@ -5984,17 +6279,6 @@ export function App() {
                   <small>{t("Manual recovery point")}</small>
                 </span>
               </button>
-              {backupLoading ? (
-                <div className="backup-empty">{t("Loading backups")}</div>
-              ) : backups.map((backup) => (
-                <button key={backup.path} className="backup-item" type="button" onClick={() => restoreBackup(backup)} title={backup.path}>
-                  <RotateCcw size={14} />
-                  <span>
-                    <strong>{formatBackupTime(backup.modifiedMs)}</strong>
-                    <small>{formatBytes(backup.size)}</small>
-                  </span>
-                </button>
-              ))}
               {visibleDraftSnapshots.map((snapshot) => {
                 const snapshotDisplayName = displayMarkdownDocumentName(snapshot);
                 return (
@@ -6028,7 +6312,7 @@ export function App() {
               )}
             </section>
           )}
-          {!(documentState.filePath || backups.length > 0 || draftSnapshots.length > 0 || dirty) && (
+          {!hasRecoveryContent && (
             <div className="sidebar-empty">
               <History size={18} />
               <span>{t("No recovery points yet")}</span>
@@ -6129,6 +6413,7 @@ export function App() {
                 onTableSelectionChange={setRichTableSelection}
                 onSelectionChange={(range) => rememberRichSelection(activeTab.id, range)}
                 onActiveHeadingIndexChange={rememberRichActiveHeadingIndex}
+                onOpenLink={handleRichLinkOpen}
                 onToast={showToast}
                 scrollProgress={richScrollProgressRef.current.get(activeTab.id) ?? activeTab.richScrollProgress ?? 0}
                 onScrollProgress={(progress) => rememberRichScrollProgress(activeTab.id, progress)}
@@ -6550,6 +6835,22 @@ export function App() {
         onApply={applyRichLink}
         onUnlink={removeRichLink}
       />
+      <BackupCompareDialog
+        open={backupComparison !== null}
+        fileName={backupComparison?.currentName ?? ""}
+        backupMarkdown={backupComparison?.backupMarkdown ?? ""}
+        currentMarkdown={backupComparison?.currentMarkdown ?? ""}
+        backupLabel={backupComparison ? `${formatBackupTime(backupComparison.backup.modifiedMs)} - ${t(backupKindMessage(backupComparison.backup.kind))}` : undefined}
+        currentLabel={backupComparison?.currentName}
+        t={t}
+        onClose={() => setBackupComparison(null)}
+        onRestore={() => {
+          const comparison = backupComparison;
+          if (!comparison) return;
+          setBackupComparison(null);
+          void restoreBackup(comparison.backup, comparison.sourcePath, comparison.tabId);
+        }}
+      />
       <SettingsDialog
         open={settingsOpen}
         viewMode={viewMode}
@@ -6564,6 +6865,10 @@ export function App() {
         editorFontSize={editorFontSize}
         editorLineWidth={editorLineWidth}
         editorDensity={editorDensity}
+        tableHeightMode={tableHeightMode}
+        tableMaxHeightVh={tableMaxHeightVh}
+        backupPreferences={backupPreferences}
+        backupDirectoryAvailable={desktopRuntime}
         t={t}
         onClose={() => setSettingsOpen(false)}
         onViewModeChange={setViewMode}
@@ -6577,9 +6882,27 @@ export function App() {
         onEditorFontSizeChange={setEditorFontSize}
         onEditorLineWidthChange={setEditorLineWidth}
         onEditorDensityChange={setEditorDensity}
+        onTableHeightModeChange={setTableHeightMode}
+        onTableMaxHeightVhChange={setTableMaxHeightVh}
+        onChooseBackupDirectory={() => void chooseBackupDirectory()}
+        onResetBackupDirectory={resetBackupDirectory}
+        onBackupPreferencesChange={(value) => setBackupPreferencesState(normalizeBackupPreferences(value))}
       />
     </div>
   );
+}
+
+function backupPreferencesWithDirectory(current: BackupPreferences, directory: string | null): BackupPreferences {
+  const previousDirectories = Array.from(new Set([
+    current.directory,
+    ...current.previousDirectories
+  ].filter((candidate): candidate is string => Boolean(candidate) && candidate !== directory))).slice(0, 8);
+
+  return {
+    ...current,
+    directory,
+    previousDirectories
+  };
 }
 
 function textCommandLabel(command: MarkdownTextCommand): string {
@@ -6758,12 +7081,21 @@ function richTableSelectionStatusLabel(summary: RichTableSelectionSummary, t: Tr
 }
 
 function formatBackupTime(modifiedMs: number): string {
+  const date = new Date(modifiedMs);
   return new Intl.DateTimeFormat(undefined, {
+    ...(date.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }),
     month: "short",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit"
-  }).format(new Date(modifiedMs));
+  }).format(date);
+}
+
+function backupKindMessage(kind: MarkdownBackup["kind"]): string {
+  if (kind === "automatic") return "Before automatic save";
+  if (kind === "manual") return "Before manual save";
+  if (kind === "previous") return "Previous saved version";
+  return "Legacy backup";
 }
 
 function formatBytes(bytes: number): string {

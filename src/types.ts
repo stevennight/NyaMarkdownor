@@ -10,11 +10,25 @@ export type MarkdownLineEnding = "lf" | "crlf";
 
 export type EditorDensity = "compact" | "comfortable" | "spacious";
 
+export type TableHeightMode = "full" | "scroll";
+
 export type SidebarPage = "outline" | "files" | "recovery";
 
 export type PaneLayout = {
   editorRatio: number;
   tableWidth: number;
+};
+
+export type BackupPreferences = {
+  directory: string | null;
+  previousDirectories: string[];
+  checkpointIntervalMinutes: number;
+  automaticVersionsPerFile: number;
+  manualVersionsPerFile: number;
+  maxTotalFiles: number;
+  maxTotalSizeMb: number;
+  maxBackupFileSizeMb: number;
+  automaticRetentionDays: number;
 };
 
 export type AppPreferences = {
@@ -29,7 +43,10 @@ export type AppPreferences = {
   editorFontSize: number;
   editorLineWidth: number;
   editorDensity: EditorDensity;
+  tableHeightMode: TableHeightMode;
+  tableMaxHeightVh: number;
   paneLayout: PaneLayout;
+  backup: BackupPreferences;
 };
 
 export type MarkdownDocument = {

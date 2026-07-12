@@ -27,6 +27,7 @@ import type { TextRange } from "../lib/editorCommands";
 import { createEditorStateFromSnapshot, createEditorStateSnapshot, type EditorStateSnapshot } from "../lib/editorStateSnapshots";
 import type { DocumentCursorPosition } from "../lib/documentMetrics";
 import { uniqueSourceSelectionForText } from "../lib/sourceSelectionText";
+import { markdownFrontMatterMarks } from "./markdownFrontMatterPlugin";
 import { markdownSyntaxMarks } from "./markdownSyntaxPlugin";
 import { searchHighlightField, setSearchHighlights } from "./searchHighlightPlugin";
 
@@ -254,6 +255,7 @@ function createEditorExtensions({
       ...historyKeymap
     ]),
     markdown({ base: markdownLanguage }),
+    markdownFrontMatterMarks,
     markdownSyntaxMarks,
     searchHighlightField,
     placeholderCompartment.of(placeholder(placeholderText)),

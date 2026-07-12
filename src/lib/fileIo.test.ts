@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { createMarkdownFile, ensureHtmlName, ensureHtmlPath, ensureMarkdownName, ensureMarkdownPath, importMarkdownFilesAsDrafts, isTauriRuntime, manageFileAssociation, openedFileHasLocalBinding, openMarkdownFiles, openMarkdownFilesToast, openMarkdownFilesToastWithFailures, readMarkdownPath, revealMarkdownFile, saveMarkdownFile, supportsBrowserFileAccess, uniqueOpenPaths } from "./fileIo";
+import type { BackupPreferences } from "../types";
+import { createMarkdownFile, ensureHtmlName, ensureHtmlPath, ensureMarkdownName, ensureMarkdownPath, importMarkdownFilesAsDrafts, isTauriRuntime, listMarkdownBackupHistories, listMarkdownBackups, manageFileAssociation, openedFileHasLocalBinding, openMarkdownFiles, openMarkdownFilesToast, openMarkdownFilesToastWithFailures, pickMarkdownBackupDirectory, readMarkdownBackup, readMarkdownPath, revealMarkdownFile, saveMarkdownFile, supportsBrowserFileAccess, uniqueOpenPaths } from "./fileIo";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -8,6 +9,17 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const invokeMock = vi.mocked(invoke);
+const backupSettings: BackupPreferences = {
+  directory: "D:/Nya Backups",
+  previousDirectories: ["C:/Old Nya Backups"],
+  checkpointIntervalMinutes: 10,
+  automaticVersionsPerFile: 48,
+  manualVersionsPerFile: 32,
+  maxTotalFiles: 2048,
+  maxTotalSizeMb: 2048,
+  maxBackupFileSizeMb: 256,
+  automaticRetentionDays: 180
+};
 
 afterEach(() => {
   invokeMock.mockReset();
@@ -198,9 +210,10 @@ describe("file IO path helpers", () => {
           path: "D:/notes/Draft.md",
           content: "# Updated",
           expectedStats: { modifiedMs: 20, size: 7 },
-          expectedMissing: false
+          expectedMissing: false,
+          backupKind: "manual"
         });
-        return { backupPath: "D:/notes/.nyamarkdownor-backups/Draft.md.1.bak", stats: { modifiedMs: 30, size: 9 } };
+        return { backupPath: "C:/AppData/NyaMarkdownor/backups-v1/hash/Draft.md.1.manual.bak", stats: { modifiedMs: 30, size: 9 } };
       }
       throw new Error(`Unexpected command ${command}`);
     });
@@ -214,6 +227,130 @@ describe("file IO path helpers", () => {
     });
   });
 
+  it("marks automatic saves so native backup checkpoints can be throttled", async () => {
+    vi.stubGlobal("isTauri", true);
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "write_markdown_file") {
+        expect(args).toEqual({
+          path: "D:/notes/Draft.md",
+          content: "# Automatic",
+          expectedStats: { modifiedMs: 30, size: 9 },
+          expectedMissing: false,
+          backupKind: "automatic"
+        });
+        return { backupPath: "C:/AppData/NyaMarkdownor/backups-v1/hash/Draft.md.2.automatic.bak", stats: { modifiedMs: 40, size: 11 } };
+      }
+      throw new Error(`Unexpected command ${command}`);
+    });
+
+    await saveMarkdownFile(
+      "D:/notes/Draft.md",
+      "# Automatic",
+      "Draft.md",
+      { modifiedMs: 30, size: 9 },
+      "lf",
+      "automatic"
+    );
+  });
+
+  it("passes the complete backup settings into desktop saves", async () => {
+    vi.stubGlobal("isTauri", true);
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "write_markdown_file") {
+        expect(args).toEqual({
+          path: "D:/notes/Draft.md",
+          content: "# Configured",
+          expectedStats: { modifiedMs: 40, size: 11 },
+          expectedMissing: false,
+          backupKind: "automatic",
+          backupSettings
+        });
+        return { backupPath: "D:/Nya Backups/hash/Draft.md.3.automatic.bak", stats: { modifiedMs: 50, size: 12 } };
+      }
+      throw new Error(`Unexpected command ${command}`);
+    });
+
+    await saveMarkdownFile(
+      "D:/notes/Draft.md",
+      "# Configured",
+      "Draft.md",
+      { modifiedMs: 40, size: 11 },
+      "lf",
+      "automatic",
+      backupSettings
+    );
+  });
+
+  it("passes backup settings into backup and history listings", async () => {
+    vi.stubGlobal("isTauri", true);
+    invokeMock
+      .mockResolvedValueOnce([{
+        path: "D:/Nya Backups/hash/Draft.md.3.automatic.bak",
+        name: "Draft.md.3.automatic.bak",
+        modifiedMs: 30,
+        size: 12,
+        kind: "automatic"
+      }])
+      .mockResolvedValueOnce([{
+        sourcePath: "D:/notes/Draft.md",
+        fileName: "Draft.md",
+        latestMs: 30,
+        backupCount: 1,
+        totalSize: 12,
+        sourceExists: true,
+        latestBackupPath: "D:/Nya Backups/hash/Draft.md.3.automatic.bak"
+      }]);
+
+    await expect(listMarkdownBackups("D:/notes/Draft.md", backupSettings)).resolves.toHaveLength(1);
+    await expect(listMarkdownBackupHistories(backupSettings)).resolves.toHaveLength(1);
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "list_markdown_backups", {
+      path: "D:/notes/Draft.md",
+      backupSettings
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "list_markdown_backup_histories", {
+      backupSettings
+    });
+  });
+
+  it("reads an orphaned backup when the source stat fails", async () => {
+    vi.stubGlobal("isTauri", true);
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "read_markdown_backup") return "alpha\r\nbeta\r\n";
+      if (command === "stat_markdown_file") throw new Error("Source file no longer exists");
+      throw new Error(`Unexpected command ${command}`);
+    });
+
+    await expect(readMarkdownBackup(
+      "D:/missing/Orphan.md",
+      "D:/Nya Backups/hash/Orphan.md.1.manual.bak",
+      backupSettings
+    )).resolves.toEqual({
+      path: "D:/missing/Orphan.md",
+      name: "Orphan.md",
+      markdown: "alpha\nbeta\n",
+      lineEnding: "crlf",
+      backupPath: "D:/Nya Backups/hash/Orphan.md.1.manual.bak",
+      fileStats: null
+    });
+    expect(invokeMock).toHaveBeenCalledWith("read_markdown_backup", {
+      sourcePath: "D:/missing/Orphan.md",
+      backupPath: "D:/Nya Backups/hash/Orphan.md.1.manual.bak",
+      backupSettings
+    });
+    expect(invokeMock).toHaveBeenCalledWith("stat_markdown_file", {
+      path: "D:/missing/Orphan.md"
+    });
+  });
+
+  it("routes backup directory selection through the desktop command", async () => {
+    vi.stubGlobal("isTauri", true);
+    invokeMock.mockResolvedValue("E:/Nya Backups");
+
+    await expect(pickMarkdownBackupDirectory()).resolves.toBe("E:/Nya Backups");
+    expect(invokeMock).toHaveBeenCalledWith("pick_markdown_backup_directory");
+  });
+
   it("restores CRLF only for the disk write and keeps returned editor text normalized", async () => {
     vi.stubGlobal("isTauri", true);
     invokeMock.mockImplementation(async (command, args) => {
@@ -222,7 +359,8 @@ describe("file IO path helpers", () => {
           path: "D:/notes/Windows.md",
           content: "alpha\r\nbeta\r\n",
           expectedStats: { modifiedMs: 20, size: 13 },
-          expectedMissing: false
+          expectedMissing: false,
+          backupKind: "manual"
         });
         return { backupPath: null, stats: { modifiedMs: 30, size: 13 } };
       }
@@ -257,7 +395,8 @@ describe("file IO path helpers", () => {
           path: "D:/notes/Archive.md",
           content: "# Archive",
           expectedStats: null,
-          expectedMissing: true
+          expectedMissing: true,
+          backupKind: "manual"
         });
         return { backupPath: null, stats: { modifiedMs: 40, size: 9 } };
       }
@@ -286,9 +425,10 @@ describe("file IO path helpers", () => {
           path: "D:/notes/Archive.md",
           content: "# Updated archive",
           expectedStats: { modifiedMs: 45, size: 13 },
-          expectedMissing: false
+          expectedMissing: false,
+          backupKind: "manual"
         });
-        return { backupPath: "D:/notes/.nyamarkdownor-backups/Archive.md.1.bak", stats: { modifiedMs: 50, size: 17 } };
+        return { backupPath: "C:/AppData/NyaMarkdownor/backups-v1/hash/Archive.md.1.manual.bak", stats: { modifiedMs: 50, size: 17 } };
       }
       throw new Error(`Unexpected command ${command}`);
     });
@@ -297,7 +437,7 @@ describe("file IO path helpers", () => {
 
     expect(saved).toMatchObject({
       path: "D:/notes/Archive.md",
-      backupPath: "D:/notes/.nyamarkdownor-backups/Archive.md.1.bak",
+      backupPath: "C:/AppData/NyaMarkdownor/backups-v1/hash/Archive.md.1.manual.bak",
       fileStats: { modifiedMs: 50, size: 17 }
     });
   });

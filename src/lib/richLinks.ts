@@ -8,3 +8,14 @@ export function normalizeRichLinkHref(value: string): string | null {
   if (href.startsWith("//") || OTHER_PROTOCOL.test(href)) return null;
   return href;
 }
+
+export function shouldOpenRichLinkOnClick(event: {
+  button?: number;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  defaultPrevented?: boolean;
+}): boolean {
+  return !event.defaultPrevented
+    && (event.button === undefined || event.button === 0)
+    && Boolean(event.ctrlKey || event.metaKey);
+}

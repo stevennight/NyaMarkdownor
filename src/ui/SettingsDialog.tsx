@@ -1,6 +1,15 @@
-import { useEffect } from "react";
-import { X } from "lucide-react";
-import type { EditorDensity, LanguagePreference, ThemeMode, ViewMode } from "../types";
+import { useEffect, useRef, useState } from "react";
+import {
+  FileText,
+  FolderOpen,
+  History,
+  PenLine,
+  RotateCcw,
+  SlidersHorizontal,
+  X,
+  type LucideIcon
+} from "lucide-react";
+import type { BackupPreferences, EditorDensity, LanguagePreference, TableHeightMode, ThemeMode, ViewMode } from "../types";
 import type { FileAssociationScope } from "../lib/fileIo";
 import type { Translator } from "../lib/i18n";
 
@@ -18,6 +27,10 @@ type SettingsDialogProps = {
   editorFontSize: number;
   editorLineWidth: number;
   editorDensity: EditorDensity;
+  tableHeightMode: TableHeightMode;
+  tableMaxHeightVh: number;
+  backupPreferences: BackupPreferences;
+  backupDirectoryAvailable: boolean;
   t: Translator;
   onClose: () => void;
   onViewModeChange: (value: ViewMode) => void;
@@ -31,6 +44,19 @@ type SettingsDialogProps = {
   onEditorFontSizeChange: (value: number) => void;
   onEditorLineWidthChange: (value: number) => void;
   onEditorDensityChange: (value: EditorDensity) => void;
+  onTableHeightModeChange: (value: TableHeightMode) => void;
+  onTableMaxHeightVhChange: (value: number) => void;
+  onChooseBackupDirectory: () => void;
+  onResetBackupDirectory: () => void;
+  onBackupPreferencesChange: (value: BackupPreferences) => void;
+};
+
+type SettingsCategoryId = "general" | "editor" | "files" | "backups";
+
+type SettingsCategory = {
+  id: SettingsCategoryId;
+  label: string;
+  icon: LucideIcon;
 };
 
 export function SettingsDialog({
@@ -47,6 +73,10 @@ export function SettingsDialog({
   editorFontSize,
   editorLineWidth,
   editorDensity,
+  tableHeightMode,
+  tableMaxHeightVh,
+  backupPreferences,
+  backupDirectoryAvailable,
   t,
   onClose,
   onViewModeChange,
@@ -59,8 +89,16 @@ export function SettingsDialog({
   onSoftSyntaxChange,
   onEditorFontSizeChange,
   onEditorLineWidthChange,
-  onEditorDensityChange
+  onEditorDensityChange,
+  onTableHeightModeChange,
+  onTableMaxHeightVhChange,
+  onChooseBackupDirectory,
+  onResetBackupDirectory,
+  onBackupPreferencesChange
 }: SettingsDialogProps) {
+  const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>("general");
+  const settingsContentRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     if (!open) return undefined;
 
@@ -74,13 +112,37 @@ export function SettingsDialog({
 
   if (!open) return null;
 
+  const categories: SettingsCategory[] = [
+    { id: "general", label: t("General"), icon: SlidersHorizontal },
+    { id: "editor", label: t("Editor"), icon: PenLine },
+    ...(autoSaveAvailable || fileAssociationsAvailable
+      ? [{ id: "files" as const, label: t("Files"), icon: FileText }]
+      : []),
+    ...(backupDirectoryAvailable
+      ? [{ id: "backups" as const, label: t("Backups"), icon: History }]
+      : [])
+  ];
+  const selectedCategory = categories.find((category) => category.id === activeCategory) ?? categories[0];
+
+  function selectCategory(category: SettingsCategoryId) {
+    setActiveCategory(category);
+    settingsContentRef.current?.scrollTo({ top: 0 });
+  }
+
+  function updateBackupPreference<Key extends keyof BackupPreferences>(key: Key, value: BackupPreferences[Key]) {
+    onBackupPreferencesChange({
+      ...backupPreferences,
+      [key]: value
+    });
+  }
+
   return (
     <div className="settings-overlay" role="presentation" onMouseDown={onClose}>
       <section className="settings-dialog" role="dialog" aria-modal="true" aria-label={t("Settings")} onMouseDown={(event) => event.stopPropagation()}>
         <header className="settings-header">
           <div>
             <div className="settings-title">{t("Settings")}</div>
-            <div className="settings-subtitle">{t("Editor")}</div>
+            <div className="settings-subtitle">{selectedCategory.label}</div>
           </div>
           <button className="icon-only" type="button" aria-label={t("Close settings")} title={t("Close settings")} onClick={onClose}>
             <X />
@@ -88,111 +150,251 @@ export function SettingsDialog({
         </header>
 
         <div className="settings-body">
-          <section className="settings-section">
-            <div className="settings-row">
-              <span>{t("Theme")}</span>
-              <SegmentedControl
-                value={theme}
-                options={[
-                  ["light", t("Light")],
-                  ["dark", t("Dark")]
-                ]}
-                onChange={(value) => onThemeChange(value as ThemeMode)}
-              />
-            </div>
-            <div className="settings-row">
-              <span id="settings-language-label">{t("Language")}</span>
-              <select
-                className="settings-select"
-                aria-labelledby="settings-language-label"
-                value={language}
-                onChange={(event) => onLanguageChange(event.target.value as LanguagePreference)}
-              >
-                <option value="system">{t("System")}</option>
-                <option value="zh-CN">{t("Simplified Chinese")}</option>
-                <option value="en">{t("English")}</option>
-              </select>
-            </div>
-            <div className="settings-row">
-              <span>{t("Default view")}</span>
-              <SegmentedControl
-                value={viewMode}
-                options={[
-                  ["focus", t("Focus")],
-                  ["split", t("Split")],
-                  ["preview", t("Preview")],
-                  ["wysiwyg", t("Visual")]
-                ]}
-                onChange={(value) => onViewModeChange(value as ViewMode)}
-              />
-            </div>
-            <ToggleRow label={t("Sidebar")} checked={sidebarVisible} onChange={onSidebarVisibleChange} />
-            {autoSaveAvailable && <ToggleRow label={t("Auto-save local files")} checked={autoSave} onChange={onAutoSaveChange} />}
-            {fileAssociationsAvailable && (
+          <nav className="settings-nav" aria-label={t("Settings categories")}>
+            {categories.map((category) => {
+              const CategoryIcon = category.icon;
+              const active = category.id === selectedCategory.id;
+              return (
+                <button
+                  key={category.id}
+                  className={`settings-nav-item${active ? " active" : ""}`}
+                  type="button"
+                  aria-current={active ? "page" : undefined}
+                  title={category.label}
+                  onClick={() => selectCategory(category.id)}
+                >
+                  <CategoryIcon size={17} />
+                  <span>{category.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className="settings-content" ref={settingsContentRef}>
+            {selectedCategory.id === "general" && (
+              <section className="settings-section">
+                <div className="settings-row">
+                  <span>{t("Theme")}</span>
+                  <SegmentedControl
+                    value={theme}
+                    options={[
+                      ["light", t("Light")],
+                      ["dark", t("Dark")]
+                    ]}
+                    onChange={(value) => onThemeChange(value as ThemeMode)}
+                  />
+                </div>
+                <div className="settings-row">
+                  <span id="settings-language-label">{t("Language")}</span>
+                  <select
+                    className="settings-select"
+                    aria-labelledby="settings-language-label"
+                    value={language}
+                    onChange={(event) => onLanguageChange(event.target.value as LanguagePreference)}
+                  >
+                    <option value="system">{t("System")}</option>
+                    <option value="zh-CN">{t("Simplified Chinese")}</option>
+                    <option value="en">{t("English")}</option>
+                  </select>
+                </div>
+                <div className="settings-row">
+                  <span>{t("Default view")}</span>
+                  <SegmentedControl
+                    value={viewMode}
+                    options={[
+                      ["focus", t("Focus")],
+                      ["split", t("Split")],
+                      ["preview", t("Preview")],
+                      ["wysiwyg", t("Visual")]
+                    ]}
+                    onChange={(value) => onViewModeChange(value as ViewMode)}
+                  />
+                </div>
+                <ToggleRow label={t("Sidebar")} checked={sidebarVisible} onChange={onSidebarVisibleChange} />
+              </section>
+            )}
+
+            {selectedCategory.id === "editor" && (
               <>
-                <div className="settings-row">
-                  <span>{t("Markdown files")}</span>
-                  <button
-                    className="settings-action"
-                    type="button"
-                    title={t("Choose NyaMarkdownor for Markdown file types in your system settings")}
-                    onClick={() => onManageFileAssociation("markdown")}
-                  >
-                    {t("Manage in system")}
-                  </button>
-                </div>
-                <div className="settings-row">
-                  <span>{t("Plain text files")}</span>
-                  <button
-                    className="settings-action"
-                    type="button"
-                    title={t("Choose NyaMarkdownor for plain text files in your system settings")}
-                    onClick={() => onManageFileAssociation("plain-text")}
-                  >
-                    {t("Manage in system")}
-                  </button>
-                </div>
+                <section className="settings-section">
+                  <div className="settings-section-title">{t("Display")}</div>
+                  <SliderRow
+                    label={t("Font size")}
+                    value={editorFontSize}
+                    min={13}
+                    max={20}
+                    step={1}
+                    suffix="px"
+                    onChange={onEditorFontSizeChange}
+                  />
+                  <SliderRow
+                    label={t("Line width")}
+                    value={editorLineWidth}
+                    min={680}
+                    max={1160}
+                    step={20}
+                    suffix="px"
+                    onChange={onEditorLineWidthChange}
+                  />
+                  <div className="settings-row">
+                    <span>{t("Density")}</span>
+                    <SegmentedControl
+                      value={editorDensity}
+                      options={[
+                        ["compact", t("Compact")],
+                        ["comfortable", t("Comfort")],
+                        ["spacious", t("Spacious")]
+                      ]}
+                      onChange={(value) => onEditorDensityChange(value as EditorDensity)}
+                    />
+                  </div>
+                  <ToggleRow
+                    label={t("Scroll long tables")}
+                    checked={tableHeightMode === "scroll"}
+                    onChange={(enabled) => onTableHeightModeChange(enabled ? "scroll" : "full")}
+                  />
+                  {tableHeightMode === "scroll" && (
+                    <SliderRow
+                      label={t("Maximum table height (window)")}
+                      value={tableMaxHeightVh}
+                      min={30}
+                      max={80}
+                      step={5}
+                      suffix="%"
+                      onChange={onTableMaxHeightVhChange}
+                    />
+                  )}
+                </section>
+                <section className="settings-section">
+                  <div className="settings-section-title">{t("Editing")}</div>
+                  <ToggleRow label={t("Smart copy")} checked={smartCopy} onChange={onSmartCopyChange} />
+                  <ToggleRow label={t("Soft syntax")} checked={softSyntax} onChange={onSoftSyntaxChange} />
+                </section>
               </>
             )}
-          </section>
 
-          <section className="settings-section">
-            <SliderRow
-              label={t("Font size")}
-              value={editorFontSize}
-              min={13}
-              max={20}
-              step={1}
-              suffix="px"
-              onChange={onEditorFontSizeChange}
-            />
-            <SliderRow
-              label={t("Line width")}
-              value={editorLineWidth}
-              min={680}
-              max={1160}
-              step={20}
-              suffix="px"
-              onChange={onEditorLineWidthChange}
-            />
-            <div className="settings-row">
-              <span>{t("Density")}</span>
-              <SegmentedControl
-                value={editorDensity}
-                options={[
-                  ["compact", t("Compact")],
-                  ["comfortable", t("Comfort")],
-                  ["spacious", t("Spacious")]
-                ]}
-                onChange={(value) => onEditorDensityChange(value as EditorDensity)}
-              />
-            </div>
-          </section>
+            {selectedCategory.id === "files" && (
+              <section className="settings-section">
+                {autoSaveAvailable && <ToggleRow label={t("Auto-save local files")} checked={autoSave} onChange={onAutoSaveChange} />}
+                {fileAssociationsAvailable && (
+                  <>
+                    <div className="settings-row">
+                      <span>{t("Markdown files")}</span>
+                      <button
+                        className="settings-action"
+                        type="button"
+                        title={t("Choose NyaMarkdownor for Markdown file types in your system settings")}
+                        onClick={() => onManageFileAssociation("markdown")}
+                      >
+                        {t("Manage in system")}
+                      </button>
+                    </div>
+                    <div className="settings-row">
+                      <span>{t("Plain text files")}</span>
+                      <button
+                        className="settings-action"
+                        type="button"
+                        title={t("Choose NyaMarkdownor for plain text files in your system settings")}
+                        onClick={() => onManageFileAssociation("plain-text")}
+                      >
+                        {t("Manage in system")}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </section>
+            )}
 
-          <section className="settings-section">
-            <ToggleRow label={t("Smart copy")} checked={smartCopy} onChange={onSmartCopyChange} />
-            <ToggleRow label={t("Soft syntax")} checked={softSyntax} onChange={onSoftSyntaxChange} />
-          </section>
+            {selectedCategory.id === "backups" && backupDirectoryAvailable && (
+              <>
+                <section className="settings-section">
+                  <div className="settings-section-title">{t("Storage")}</div>
+                  <div className="settings-row settings-location-row">
+                    <span>{t("Backup location")}</span>
+                    <div className="settings-location-control">
+                      <output
+                        className="settings-path"
+                        title={backupPreferences.directory ?? t("System local data")}
+                      >
+                        {backupPreferences.directory ?? t("System local data")}
+                      </output>
+                      <div className="settings-actions">
+                        <button className="settings-action" type="button" onClick={onChooseBackupDirectory}>
+                          <FolderOpen size={14} />
+                          {t("Choose folder")}
+                        </button>
+                        <button
+                          className="settings-action"
+                          type="button"
+                          disabled={backupPreferences.directory === null}
+                          onClick={onResetBackupDirectory}
+                        >
+                          <RotateCcw size={14} />
+                          {t("Use system location")}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <NumberSettingRow
+                    label={t("Maximum total backup files")}
+                    value={backupPreferences.maxTotalFiles}
+                    min={128}
+                    max={20000}
+                    onChange={(value) => updateBackupPreference("maxTotalFiles", value)}
+                  />
+                  <NumberSettingRow
+                    label={t("Maximum total backup size")}
+                    suffix="MB"
+                    value={backupPreferences.maxTotalSizeMb}
+                    min={256}
+                    max={32768}
+                    onChange={(value) => updateBackupPreference("maxTotalSizeMb", value)}
+                  />
+                  <NumberSettingRow
+                    label={t("Maximum backup file size")}
+                    suffix="MB"
+                    value={backupPreferences.maxBackupFileSizeMb}
+                    min={16}
+                    max={4096}
+                    onChange={(value) => updateBackupPreference("maxBackupFileSizeMb", value)}
+                  />
+                </section>
+                <section className="settings-section">
+                  <div className="settings-section-title">{t("Version history")}</div>
+                  <NumberSettingRow
+                    label={t("Checkpoint interval")}
+                    suffix={t("minutes")}
+                    value={backupPreferences.checkpointIntervalMinutes}
+                    min={1}
+                    max={120}
+                    onChange={(value) => updateBackupPreference("checkpointIntervalMinutes", value)}
+                  />
+                  <NumberSettingRow
+                    label={t("Automatic versions per file")}
+                    value={backupPreferences.automaticVersionsPerFile}
+                    min={1}
+                    max={256}
+                    onChange={(value) => updateBackupPreference("automaticVersionsPerFile", value)}
+                  />
+                  <NumberSettingRow
+                    label={t("Manual versions per file")}
+                    value={backupPreferences.manualVersionsPerFile}
+                    min={1}
+                    max={256}
+                    onChange={(value) => updateBackupPreference("manualVersionsPerFile", value)}
+                  />
+                  <NumberSettingRow
+                    label={t("Automatic retention")}
+                    suffix={t("days")}
+                    value={backupPreferences.automaticRetentionDays}
+                    min={7}
+                    max={3650}
+                    onChange={(value) => updateBackupPreference("automaticRetentionDays", value)}
+                  />
+                </section>
+              </>
+            )}
+          </div>
         </div>
       </section>
     </div>
@@ -245,6 +447,60 @@ function SliderRow({ label, value, min, max, step, suffix, onChange }: SliderRow
         onChange={(event) => onChange(Number(event.target.value))}
       />
       <strong>{value}{suffix}</strong>
+    </label>
+  );
+}
+
+type NumberSettingRowProps = {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  suffix?: string;
+  onChange: (value: number) => void;
+};
+
+function NumberSettingRow({ label, value, min, max, suffix, onChange }: NumberSettingRowProps) {
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  function commitDraft() {
+    const parsed = draft.trim() ? Number(draft) : Number.NaN;
+    if (!Number.isFinite(parsed)) {
+      setDraft(String(value));
+      return;
+    }
+
+    const next = Math.min(max, Math.max(min, Math.round(parsed)));
+    setDraft(String(next));
+    onChange(next);
+  }
+
+  return (
+    <label className="settings-row settings-number-row">
+      <span>{label}</span>
+      <span className="settings-number-control">
+        <input
+          type="number"
+          inputMode="numeric"
+          min={min}
+          max={max}
+          step={1}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commitDraft}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            commitDraft();
+            event.currentTarget.blur();
+          }}
+        />
+        {suffix && <span>{suffix}</span>}
+      </span>
     </label>
   );
 }

@@ -1,6 +1,7 @@
 import type { MarkdownDocument } from "../types";
 import { normalizeReferenceLabel } from "./inlineMarkdown";
 import { markdownFileExtensionSuffixForName, removeMarkdownFileExtension } from "./markdownFileTypes";
+import { splitMarkdownFrontMatter } from "./markdownFrontMatter";
 import { stripInlineMarkdown } from "./text";
 
 export function suggestedMarkdownCopyName(name: string): string {
@@ -75,7 +76,8 @@ function isUntitledMarkdownName(name: string): boolean {
 }
 
 function firstDocumentTitle(markdown: string): string | null {
-  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const { body } = splitMarkdownFrontMatter(markdown);
+  const lines = body.replace(/\r\n?/g, "\n").split("\n");
   const referenceLabels = referenceLabelsFromMarkdownLines(lines);
 
   for (const line of lines) {

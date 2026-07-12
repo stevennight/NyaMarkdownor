@@ -20,7 +20,34 @@ describe("Markdown front matter", () => {
     });
   });
 
+  it("supports an empty front matter block and a closing delimiter at EOF", () => {
+    expect(splitMarkdownFrontMatter("---\n---\n# Body")).toEqual({
+      frontMatter: "---\n---\n",
+      body: "# Body"
+    });
+    const frontMatterOnly = splitMarkdownFrontMatter("---\nname: workflow-skill\n---");
+    expect(frontMatterOnly).toEqual({
+      frontMatter: "---\nname: workflow-skill\n---",
+      body: ""
+    });
+    expect(withMarkdownFrontMatter(frontMatterOnly.frontMatter, "# Body")).toBe(
+      "---\nname: workflow-skill\n---\n# Body"
+    );
+  });
+
   it("does not mistake an unclosed thematic break for front matter", () => {
     expect(splitMarkdownFrontMatter("---\n# Body")).toEqual({ frontMatter: "", body: "---\n# Body" });
+  });
+
+  it("does not treat arbitrary long thematic breaks as front matter delimiters", () => {
+    const markdown = "--------\nname: workflow-skill\ndescription: xxx\n--------\n# Body";
+
+    expect(splitMarkdownFrontMatter(markdown)).toEqual({ frontMatter: "", body: markdown });
+  });
+
+  it("only recognizes front matter at the first line of the document", () => {
+    const markdown = "Intro\n---\nname: workflow-skill\n---\n";
+
+    expect(splitMarkdownFrontMatter(markdown)).toEqual({ frontMatter: "", body: markdown });
   });
 });

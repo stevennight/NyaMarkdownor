@@ -1,0 +1,315 @@
+.backup-compare-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgba(12, 18, 17, 0.34);
+  padding: 16px;
+  backdrop-filter: blur(8px);
+}
+
+.backup-compare-dialog {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  width: min(1120px, calc(100vw - 32px));
+  height: min(820px, calc(100dvh - 48px));
+  min-height: 360px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-solid);
+  box-shadow: var(--shadow);
+}
+
+.backup-compare-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 64px;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 12px 10px 18px;
+}
+
+.backup-compare-heading {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.backup-compare-heading > svg {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  color: var(--accent-strong);
+}
+
+.backup-compare-heading > div {
+  min-width: 0;
+}
+
+.backup-compare-heading h2,
+.backup-compare-heading p {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-compare-heading h2 {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 780;
+  line-height: 1.3;
+}
+
+.backup-compare-heading p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.backup-compare-icon-button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.backup-compare-icon-button:hover {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.backup-compare-icon-button:focus-visible,
+.backup-compare-button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.backup-compare-icon-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.backup-compare-legend {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+  padding: 8px 12px;
+}
+
+.backup-compare-version {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.backup-compare-version > span {
+  display: grid;
+  place-items: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.backup-compare-version-old > span {
+  background: color-mix(in srgb, var(--danger), transparent 86%);
+  color: var(--danger);
+}
+
+.backup-compare-version-current > span {
+  background: color-mix(in srgb, #2f8f5b, transparent 84%);
+  color: color-mix(in srgb, #2f8f5b, var(--text) 16%);
+}
+
+.backup-compare-version > div {
+  display: grid;
+  min-width: 0;
+}
+
+.backup-compare-version strong,
+.backup-compare-version small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-compare-version strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.backup-compare-version small {
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.backup-compare-direction {
+  display: grid;
+  place-items: center;
+  align-self: center;
+  color: var(--subtle);
+}
+
+.backup-compare-direction svg {
+  width: 15px;
+  height: 15px;
+}
+
+.backup-compare-diff {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--editor-bg);
+}
+
+.backup-compare-diff .cm-editor {
+  height: 100%;
+}
+
+.backup-compare-diff .cm-scroller {
+  overscroll-behavior: contain;
+}
+
+.backup-compare-diff .cm-editor.cm-merge-b .cm-changedLine,
+.backup-compare-diff .cm-editor .cm-inlineChangedLine {
+  background: color-mix(in srgb, #2f8f5b, transparent 90%) !important;
+}
+
+.backup-compare-diff .cm-editor .cm-deletedChunk {
+  background: color-mix(in srgb, var(--danger), transparent 91%) !important;
+  border-block: 1px solid color-mix(in srgb, var(--danger), transparent 82%);
+}
+
+.backup-compare-diff .cm-editor.cm-merge-b .cm-changedText {
+  background: color-mix(in srgb, #2f8f5b, transparent 76%) !important;
+  text-decoration: none;
+}
+
+.backup-compare-diff .cm-editor .cm-deletedChunk .cm-deletedText {
+  background: color-mix(in srgb, var(--danger), transparent 78%) !important;
+  text-decoration: none;
+}
+
+.backup-compare-diff .cm-collapsedLines {
+  background: var(--surface-raised);
+  color: var(--muted);
+}
+
+.backup-compare-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 58px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-raised);
+  padding: 11px 14px;
+}
+
+.backup-compare-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  border-radius: 8px;
+  cursor: pointer;
+  padding: 0 13px;
+  white-space: nowrap;
+}
+
+.backup-compare-button.secondary {
+  background: var(--surface-solid);
+  color: var(--muted);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.backup-compare-button.restore {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.backup-compare-button:hover:not(:disabled) {
+  filter: brightness(1.04);
+}
+
+.backup-compare-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.backup-compare-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+@media (max-width: 700px) {
+  .backup-compare-overlay {
+    padding: 8px;
+  }
+
+  .backup-compare-dialog {
+    width: calc(100vw - 16px);
+    height: calc(100dvh - 16px);
+    min-height: 0;
+  }
+
+  .backup-compare-header {
+    min-height: 58px;
+    padding-left: 13px;
+  }
+
+  .backup-compare-legend {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .backup-compare-direction {
+    display: none;
+  }
+
+  .backup-compare-diff .cm-content {
+    min-width: max-content;
+    padding-inline: 12px;
+  }
+
+  .backup-compare-actions {
+    min-height: 54px;
+    padding: 9px 10px;
+  }
+}
+
+@media (max-width: 430px) {
+  .backup-compare-heading h2 {
+    font-size: 14px;
+  }
+
+  .backup-compare-version small {
+    display: none;
+  }
+
+  .backup-compare-button.secondary {
+    display: none;
+  }
+
+  .backup-compare-button.restore {
+    width: 100%;
+  }
+}

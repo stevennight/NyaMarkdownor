@@ -34,6 +34,34 @@ describe("Markdown rendering and clean copy", () => {
     expect(rendered.headings.map((heading) => heading.id)).toEqual(["intro", "中文-标题", "intro-1"]);
   });
 
+  it("keeps standard front matter out of preview, outline, and clean text", () => {
+    const markdown = [
+      "---",
+      "name: workflow-skill",
+      "description: xxx",
+      "---",
+      "",
+      "# Workflow",
+      "",
+      "Body",
+      "",
+      "- [ ] Step"
+    ].join("\n");
+    const rendered = renderMarkdown(markdown);
+
+    expect(rendered.html).not.toContain("workflow-skill");
+    expect(rendered.html).not.toContain("description");
+    expect(rendered.html).toContain('<h1 id="workflow">Workflow</h1>');
+    expect(rendered.html).toContain('data-task-line="9"');
+    expect(rendered.headings).toEqual([{ level: 1, text: "Workflow", line: 5, id: "workflow" }]);
+  });
+
+  it("does not treat selected thematic-break fragments as document front matter", () => {
+    const fragment = "---\nSelected text\n---";
+
+    expect(markdownToHtmlFragment(fragment)).toContain("Selected text");
+  });
+
   it("extracts Setext headings for outline navigation", () => {
     const rendered = renderMarkdown([
       "Setext One",

@@ -67,6 +67,16 @@ describe("file name helpers", () => {
     expect(suggestedMarkdownNameFromContent("# 中文 标题")).toBe("中文 标题.md");
   });
 
+  it("derives draft names from the document body instead of front matter properties", () => {
+    expect(suggestedMarkdownNameFromContent([
+      "---",
+      "name: workflow-skill",
+      "description: xxx",
+      "---",
+      "# Workflow Guide"
+    ].join("\n"))).toBe("Workflow Guide.md");
+  });
+
   it("derives draft names from shortcut reference links in titles", () => {
     expect(suggestedMarkdownNameFromContent([
       "# [Project Plan]",

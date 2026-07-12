@@ -1,5 +1,5 @@
 import { invoke, isTauri as tauriRuntimeAvailable } from "@tauri-apps/api/core";
-import type { MarkdownFileStats, MarkdownLineEnding, WorkspaceListing } from "../types";
+import type { BackupPreferences, MarkdownFileStats, MarkdownLineEnding, WorkspaceListing } from "../types";
 import { localPathKey } from "./localPathKeys";
 import { markdownWithLineEnding, normalizeMarkdownLineEndings, normalizeMarkdownText } from "./lineEndings";
 import { sortWorkspaceFiles, workspaceFileDepth } from "./workspaceFiles";
@@ -14,11 +14,24 @@ export type OpenedFile = {
   fileStats?: MarkdownFileStats | null;
 };
 
+export type MarkdownBackupKind = "automatic" | "manual" | "previous";
+
 export type MarkdownBackup = {
   path: string;
   name: string;
   modifiedMs: number;
   size: number;
+  kind: MarkdownBackupKind | null;
+};
+
+export type MarkdownBackupHistory = {
+  sourcePath: string;
+  fileName: string;
+  latestMs: number;
+  backupCount: number;
+  totalSize: number;
+  sourceExists: boolean;
+  latestBackupPath: string | null;
 };
 
 export type SavedExport = {
@@ -176,19 +189,47 @@ export async function manageFileAssociation(scope: FileAssociationScope): Promis
   await invoke("manage_file_association", { scope });
 }
 
-export async function listMarkdownBackups(path: string | null): Promise<MarkdownBackup[]> {
+export async function listMarkdownBackups(
+  path: string | null,
+  backupSettings?: BackupPreferences
+): Promise<MarkdownBackup[]> {
   if (!path || !isTauriRuntime()) return [];
-  return invoke<MarkdownBackup[]>("list_markdown_backups", { path });
+  return invoke<MarkdownBackup[]>("list_markdown_backups", {
+    path,
+    ...(backupSettings ? { backupSettings } : {})
+  });
 }
 
-export async function readMarkdownBackup(sourcePath: string, backupPath: string): Promise<OpenedFile> {
+export async function listMarkdownBackupHistories(
+  backupSettings?: BackupPreferences
+): Promise<MarkdownBackupHistory[]> {
+  if (!isTauriRuntime()) return [];
+  return invoke<MarkdownBackupHistory[]>("list_markdown_backup_histories", {
+    ...(backupSettings ? { backupSettings } : {})
+  });
+}
+
+export async function pickMarkdownBackupDirectory(): Promise<string | null> {
+  if (!isTauriRuntime()) throw new Error("Choosing a backup folder requires the desktop app.");
+  return invoke<string | null>("pick_markdown_backup_directory");
+}
+
+export async function readMarkdownBackup(
+  sourcePath: string,
+  backupPath: string,
+  backupSettings?: BackupPreferences
+): Promise<OpenedFile> {
   if (!isTauriRuntime()) {
     throw new Error("Backups are only available in the desktop app.");
   }
 
   const [markdown, fileStats] = await Promise.all([
-    invoke<string>("read_markdown_backup", { sourcePath, backupPath }),
-    readMarkdownFileStats(sourcePath)
+    invoke<string>("read_markdown_backup", {
+      sourcePath,
+      backupPath,
+      ...(backupSettings ? { backupSettings } : {})
+    }),
+    readMarkdownFileStats(sourcePath).catch(() => null)
   ]);
   const normalized = normalizeMarkdownText(markdown);
   return {
@@ -205,7 +246,9 @@ export async function saveMarkdownFile(
   content: string,
   suggestedName: string,
   expectedStats: MarkdownFileStats | null = null,
-  lineEnding: MarkdownLineEnding = "lf"
+  lineEnding: MarkdownLineEnding = "lf",
+  backupKind: MarkdownBackupKind = "manual",
+  backupSettings?: BackupPreferences
 ): Promise<OpenedFile | null> {
   const markdown = normalizeMarkdownLineEndings(content);
   const diskContent = markdownWithLineEnding(markdown, lineEnding);
@@ -224,7 +267,9 @@ export async function saveMarkdownFile(
       path: target,
       content: diskContent,
       expectedStats: targetStats,
-      expectedMissing
+      expectedMissing,
+      backupKind,
+      ...(backupSettings ? { backupSettings } : {})
     });
     return {
       path: target,
