@@ -19,6 +19,7 @@ export type BackupCompareDialogProps = {
   currentTitle?: string;
   actionLabel?: string;
   actionIcon?: "restore" | "open";
+  showAction?: boolean;
   restoreDisabled?: boolean;
   t: Translator;
   onClose: () => void;
@@ -38,6 +39,7 @@ export function BackupCompareDialog({
   currentTitle,
   actionLabel,
   actionIcon = "restore",
+  showAction = true,
   restoreDisabled = false,
   t,
   onClose,
@@ -250,19 +252,21 @@ export function BackupCompareDialog({
 
         <div className="backup-compare-diff" ref={diffHostRef} aria-label={t("Version differences")} />
 
-        <footer className="backup-compare-actions">
+        <footer className={`backup-compare-actions${showAction ? "" : " compare-only"}`}>
           <button className="backup-compare-button secondary" type="button" onClick={onClose}>
-            {t("Cancel")}
+            {t(showAction ? "Cancel" : "Close comparison")}
           </button>
-          <button
-            className="backup-compare-button restore"
-            type="button"
-            disabled={restoreDisabled}
-            onClick={onRestore}
-          >
-            {actionIcon === "open" ? <FileText aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}
-            <span>{t(actionLabel ?? "Restore this version")}</span>
-          </button>
+          {showAction && (
+            <button
+              className="backup-compare-button restore"
+              type="button"
+              disabled={restoreDisabled}
+              onClick={onRestore}
+            >
+              {actionIcon === "open" ? <FileText aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}
+              <span>{t(actionLabel ?? "Restore this version")}</span>
+            </button>
+          )}
         </footer>
       </section>
     </div>

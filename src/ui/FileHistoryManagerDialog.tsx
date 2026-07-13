@@ -5,6 +5,7 @@ import {
   FileClock,
   FileText,
   FolderX,
+  GitCompareArrows,
   History,
   LoaderCircle,
   Trash2,
@@ -30,6 +31,7 @@ type FileHistoryManagerDialogProps = {
   onLoadDiskVersions: (document: FileHistoryDocument) => Promise<MarkdownBackup[]>;
   onOpenDiskVersion: (document: FileHistoryDocument, backup: MarkdownBackup) => void | Promise<void>;
   onOpenSnapshot: (snapshot: DraftSnapshot) => void;
+  onCompareVersions: (document: FileHistoryDocument, versions: FileHistoryVersion[]) => Promise<void>;
   onDeleteDocument: (document: FileHistoryDocument) => Promise<boolean>;
   onDeleteDocuments: (documents: FileHistoryDocument[]) => Promise<string[]>;
   onDeleteDiskVersion: (document: FileHistoryDocument, backup: MarkdownBackup) => Promise<boolean>;
@@ -56,6 +58,7 @@ export function FileHistoryManagerDialog({
   onLoadDiskVersions,
   onOpenDiskVersion,
   onOpenSnapshot,
+  onCompareVersions,
   onDeleteDocument,
   onDeleteDocuments,
   onDeleteDiskVersion,
@@ -70,6 +73,7 @@ export function FileHistoryManagerDialog({
   const [selectedDocumentKeys, setSelectedDocumentKeys] = useState<Set<string>>(() => new Set());
   const [selectedVersionKeys, setSelectedVersionKeys] = useState<Set<string>>(() => new Set());
   const [batchDeleting, setBatchDeleting] = useState(false);
+  const [comparing, setComparing] = useState(false);
   const groups = useMemo(() => partitionFileHistoryDocuments(documents), [documents]);
   const selectedDocument = selectedKey
     ? documents.find((document) => document.key === selectedKey) ?? null
@@ -99,6 +103,7 @@ export function FileHistoryManagerDialog({
       setSelectedDocumentKeys(new Set());
       setSelectedVersionKeys(new Set());
       setBatchDeleting(false);
+      setComparing(false);
     }
   }, [open]);
 
@@ -236,6 +241,16 @@ export function FileHistoryManagerDialog({
     }
   }
 
+  async function compareHistoryVersions(nextVersions: FileHistoryVersion[]) {
+    if (!selectedDocument || comparing || nextVersions.length < 1 || nextVersions.length > 2) return;
+    setComparing(true);
+    try {
+      await onCompareVersions(selectedDocument, nextVersions);
+    } finally {
+      setComparing(false);
+    }
+  }
+
   const categoryLabel = category === "documents" ? t("Document history") : t("Orphaned file history");
 
   return (
@@ -313,10 +328,19 @@ export function FileHistoryManagerDialog({
                   disabled={versionsLoading || versions.length === 0}
                   partiallySelected={selectedVersions.length > 0 && selectedVersions.length < versions.length}
                   selectedCount={selectedVersions.length}
+                  comparing={comparing}
+                  compareDisabled={selectedVersions.length < 1 || selectedVersions.length > 2}
+                  compareLabel={selectedVersions.length === 2 ? t("Compare versions") : t("Compare with current content")}
+                  compareTitle={selectedVersions.length > 2
+                    ? t("Select one or two versions to compare")
+                    : selectedVersions.length === 2
+                      ? t("Compare selected versions")
+                      : t("Compare selected version with current content")}
                   selectAllLabel={t("Select all versions")}
                   summary={t("{count} versions", { count: versions.length })}
                   t={t}
                   onDelete={() => void deleteSelectedVersions()}
+                  onCompare={() => void compareHistoryVersions(selectedVersions)}
                   onToggleAll={toggleAllVersions}
                 />
                 {versionsLoading ? (
@@ -339,8 +363,11 @@ export function FileHistoryManagerDialog({
                             selectLabel={t("Select version from {time}", { time: formatHistoryTime(version.timestamp) })}
                             openLabel={t("Open version as draft")}
                             deleteLabel={t("Delete this version")}
+                            compareLabel={t("Compare this version with current content")}
+                            compareDisabled={comparing}
                             onOpen={() => void onOpenDiskVersion(selectedDocument, backup)}
                             onDelete={() => void deleteDiskVersion(selectedDocument, backup)}
+                            onCompare={() => void compareHistoryVersions([version])}
                             onToggle={(checked) => toggleVersion(fileHistoryVersionKey(version), checked)}
                           />
                         );
@@ -356,8 +383,11 @@ export function FileHistoryManagerDialog({
                           selectLabel={t("Select version from {time}", { time: formatHistoryTime(version.timestamp) })}
                           openLabel={t("Open version as draft")}
                           deleteLabel={t("Delete this version")}
+                          compareLabel={t("Compare this version with current content")}
+                          compareDisabled={comparing}
                           onOpen={() => onOpenSnapshot(snapshot)}
                           onDelete={() => void deleteSnapshot(snapshot)}
+                          onCompare={() => void compareHistoryVersions([version])}
                           onToggle={(checked) => toggleVersion(fileHistoryVersionKey(version), checked)}
                         />
                       );
@@ -467,8 +497,11 @@ type HistoryVersionRowProps = {
   selectLabel: string;
   openLabel: string;
   deleteLabel: string;
+  compareLabel: string;
+  compareDisabled: boolean;
   onOpen: () => void;
   onDelete: () => void;
+  onCompare: () => void;
   onToggle: (checked: boolean) => void;
 };
 
@@ -479,8 +512,11 @@ function HistoryVersionRow({
   selectLabel,
   openLabel,
   deleteLabel,
+  compareLabel,
+  compareDisabled,
   onOpen,
   onDelete,
+  onCompare,
   onToggle
 }: HistoryVersionRowProps) {
   return (
@@ -495,6 +531,16 @@ function HistoryVersionRow({
           <small>{detail}</small>
         </span>
       </button>
+      <button
+        className="file-history-compare-button"
+        type="button"
+        aria-label={compareLabel}
+        title={compareLabel}
+        disabled={compareDisabled}
+        onClick={onCompare}
+      >
+        <GitCompareArrows size={15} />
+      </button>
       <button className="file-history-delete-button" type="button" aria-label={deleteLabel} title={deleteLabel} onClick={onDelete}>
         <Trash2 size={15} />
       </button>
@@ -508,10 +554,15 @@ type HistorySelectionBarProps = {
   disabled: boolean;
   partiallySelected: boolean;
   selectedCount: number;
+  comparing?: boolean;
+  compareDisabled?: boolean;
+  compareLabel?: string;
+  compareTitle?: string;
   selectAllLabel: string;
   summary: string;
   t: Translator;
   onDelete: () => void;
+  onCompare?: () => void;
   onToggleAll: (checked: boolean) => void;
 };
 
@@ -521,10 +572,15 @@ function HistorySelectionBar({
   disabled,
   partiallySelected,
   selectedCount,
+  comparing = false,
+  compareDisabled = true,
+  compareLabel,
+  compareTitle,
   selectAllLabel,
   summary,
   t,
   onDelete,
+  onCompare,
   onToggleAll
 }: HistorySelectionBarProps) {
   return (
@@ -539,16 +595,30 @@ function HistorySelectionBar({
         />
         <span>{selectedCount > 0 ? t("{count} selected", { count: selectedCount }) : summary}</span>
       </label>
-      <button
-        className="file-history-bulk-delete"
-        type="button"
-        disabled={selectedCount === 0 || deleting}
-        title={t("Delete selected")}
-        onClick={onDelete}
-      >
-        {deleting ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}
-        <span>{deleting ? t("Deleting") : t("Delete selected")}</span>
-      </button>
+      <div className="file-history-selection-actions">
+        {onCompare && compareLabel && (
+          <button
+            className="file-history-bulk-compare"
+            type="button"
+            disabled={compareDisabled || deleting || comparing}
+            title={compareTitle ?? compareLabel}
+            onClick={onCompare}
+          >
+            {comparing ? <LoaderCircle className="spin" size={15} /> : <GitCompareArrows size={15} />}
+            <span>{comparing ? t("Preparing comparison") : compareLabel}</span>
+          </button>
+        )}
+        <button
+          className="file-history-bulk-delete"
+          type="button"
+          disabled={selectedCount === 0 || deleting || comparing}
+          title={t("Delete selected")}
+          onClick={onDelete}
+        >
+          {deleting ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}
+          <span>{deleting ? t("Deleting") : t("Delete selected")}</span>
+        </button>
+      </div>
     </div>
   );
 }

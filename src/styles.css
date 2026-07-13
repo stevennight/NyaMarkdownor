@@ -3824,10 +3824,17 @@ kbd {
 .file-history-document-row,
 .file-history-version-row {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) 42px;
   align-items: stretch;
   min-width: 0;
   border-bottom: 1px solid color-mix(in srgb, var(--line), transparent 34%);
+}
+
+.file-history-document-row {
+  grid-template-columns: 40px minmax(0, 1fr) 42px;
+}
+
+.file-history-version-row {
+  grid-template-columns: 40px minmax(0, 1fr) 38px 42px;
 }
 
 .file-history-document-row.selected,
@@ -3878,7 +3885,9 @@ kbd {
 .file-history-document-open:focus-visible,
 .file-history-version-open:focus-visible,
 .file-history-back:focus-visible,
+.file-history-compare-button:focus-visible,
 .file-history-delete-button:focus-visible,
+.file-history-bulk-compare:focus-visible,
 .file-history-bulk-delete:focus-visible,
 .file-history-checkbox:focus-visible {
   outline: none;
@@ -3934,6 +3943,29 @@ kbd {
   background: transparent;
   color: var(--subtle);
   cursor: pointer;
+}
+
+.file-history-compare-button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  min-height: 32px;
+  align-self: center;
+  justify-self: center;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--subtle);
+  cursor: pointer;
+}
+
+.file-history-compare-button:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.file-history-compare-button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .file-history-delete-button:hover {
@@ -3999,6 +4031,14 @@ kbd {
   white-space: nowrap;
 }
 
+.file-history-selection-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+}
+
+.file-history-bulk-compare,
 .file-history-bulk-delete {
   display: inline-flex;
   align-items: center;
@@ -4016,10 +4056,20 @@ kbd {
   padding: 0 10px;
 }
 
+.file-history-bulk-compare {
+  border-color: color-mix(in srgb, var(--accent-strong), transparent 64%);
+  color: var(--accent-strong);
+}
+
+.file-history-bulk-compare:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
 .file-history-bulk-delete:hover:not(:disabled) {
   background: color-mix(in srgb, var(--danger), transparent 88%);
 }
 
+.file-history-bulk-compare:disabled,
 .file-history-bulk-delete:disabled {
   border-color: var(--line);
   color: var(--subtle);
@@ -4306,10 +4356,12 @@ kbd {
   }
 
   .file-history-back span,
+  .file-history-bulk-compare span,
   .file-history-bulk-delete span {
     display: none;
   }
 
+  .file-history-bulk-compare,
   .file-history-bulk-delete {
     width: 32px;
     padding: 0;

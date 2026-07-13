@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-NyaMarkdownor 是一款本地优先的跨平台 Markdown 桌面编辑器，支持 Windows、macOS 和 Linux。当前稳定版本为 `1.0.3`，提供源码、分屏、预览和所见即所得四种编辑视图，并覆盖多文档、本地文件安全、结构化表格编辑、Markdown 感知剪贴板、工作恢复和版本历史等日常写作流程。
+NyaMarkdownor 是一款本地优先的跨平台 Markdown 桌面编辑器，支持 Windows、macOS 和 Linux。当前稳定版本为 `1.0.4`，提供源码、分屏、预览和所见即所得四种编辑视图，并覆盖多文档、本地文件安全、结构化表格编辑、Markdown 感知剪贴板、工作恢复和版本历史等日常写作流程。
 
 应用不要求账号，不包含同步、遥测、远程渲染或隐藏的在线服务依赖。Markdown 源文档始终是规范数据，预览和所见即所得模式都是源文档的投影。
 
@@ -102,7 +102,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked
 
 ## 发布
 
-设置中的“关于”页面显示版本、提交、UTC 构建时间和发布仓库。普通本地构建使用 `package.json` 派生的开发版本，例如 `1.0.3-dev`。
+设置中的“关于”页面显示版本、提交、UTC 构建时间和发布仓库。普通本地构建使用 `package.json` 派生的开发版本，例如 `1.0.4-dev`。
 
 推送 `vMAJOR.MINOR.PATCH` tag 会触发 Release 工作流：
 

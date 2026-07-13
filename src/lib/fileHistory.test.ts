@@ -6,6 +6,7 @@ import {
   fileHistoryDocumentKey,
   fileHistoryVersionKey,
   mergeFileHistoryVersions,
+  orderFileHistoryVersionsOldestFirst,
   partitionFileHistoryDocuments,
   removeSnapshotsForDocument
 } from "./fileHistory";
@@ -232,6 +233,23 @@ describe("file history versions", () => {
     ));
     expect(keys(first)).toEqual(["disk:a", "disk:b", "local:c"]);
     expect(keys(second)).toEqual(keys(first));
+  });
+
+  it("orders selected comparison versions from oldest to newest", () => {
+    const selected = orderFileHistoryVersionsOldestFirst([
+      {
+        source: "local",
+        timestamp: 300,
+        snapshot: snapshot({ id: "newer", createdAt: 300 })
+      },
+      {
+        source: "disk",
+        timestamp: 100,
+        backup: backup({ path: "older", modifiedMs: 100 })
+      }
+    ]);
+
+    expect(selected.map(fileHistoryVersionKey)).toEqual(["disk:older", "local:newer"]);
   });
 });
 

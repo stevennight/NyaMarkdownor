@@ -250,6 +250,7 @@ import { localPathKey, sameLocalPath } from "../lib/localPathKeys";
 import {
   buildFileHistoryDocuments,
   fileHistoryDocumentKey,
+  orderFileHistoryVersionsOldestFirst,
   removeSnapshotsForDocument,
   type FileHistoryDocument,
   type FileHistorySourceStates,
@@ -407,11 +408,19 @@ type BackupComparisonState = {
   currentMarkdown: string;
   currentName: string;
   versionLabel: string;
+  currentLabel?: string;
   versionTitle?: string;
   currentTitle?: string;
   actionLabel?: string;
   actionIcon?: "restore" | "open";
+  showAction?: boolean;
   restoreDisabled?: boolean;
+};
+
+type HistoryComparisonContent = {
+  markdown: string;
+  label: string;
+  title: string;
 };
 
 type CurrentDocumentCheckpoint =
@@ -5427,6 +5436,193 @@ export function App() {
     return listMarkdownBackups(document.filePath, backupPreferences);
   }
 
+  async function readManagedHistoryVersion(
+    document: FileHistoryDocument,
+    version: FileHistoryVersion
+  ): Promise<HistoryComparisonContent> {
+    if (version.source === "local") {
+      return {
+        markdown: version.snapshot.markdown,
+        label: `${formatBackupTime(version.timestamp)} - ${t(draftSnapshotCheckpointMessage(version.snapshot))}`,
+        title: "Historical version"
+      };
+    }
+    if (!document.filePath) throw new Error("Disk history has no source path");
+
+    const restored = await readMarkdownBackup(document.filePath, version.backup.path, backupPreferences);
+    return {
+      markdown: restored.markdown,
+      label: `${formatBackupTime(version.timestamp)} - ${t(backupKindMessage(version.backup.kind))}`,
+      title: "Historical version"
+    };
+  }
+
+  function openManagedHistoryVersionAsDraft(document: FileHistoryDocument, version: FileHistoryVersion) {
+    if (version.source === "disk") {
+      void openManagedDiskVersionAsDraft(document, version.backup);
+      return;
+    }
+    openManagedSnapshotAsDraft(version.snapshot);
+  }
+
+  function openTabForManagedHistory(document: FileHistoryDocument): DocumentTab | null {
+    const session = currentTabSessionForRecovery();
+    return session.tabs.find((tab) => document.filePath
+      ? sameLocalPath(tab.document.filePath, document.filePath)
+      : fileHistoryDocumentKey({
+          ...tab.document,
+          documentId: tab.id
+        }) === document.key) ?? null;
+  }
+
+  function editorComparisonContent(tab: DocumentTab): HistoryComparisonContent {
+    return {
+      markdown: tab.document.markdown,
+      label: tab.document.filePath ?? displayMarkdownDocumentName(tab.document),
+      title: isDocumentDirty(tab.document) ? "Unsaved editor content" : "Saved editor content"
+    };
+  }
+
+  async function chooseManagedCurrentContent(
+    tab: DocumentTab,
+    diskFile: OpenedFile
+  ): Promise<HistoryComparisonContent | null> {
+    let editorSelected = false;
+    const diskSelected = await requestConfirmation({
+      title: "Choose current content for comparison",
+      message: "The open editor and disk file have different current content. Choose the comparison baseline. This choice does not overwrite either version.",
+      confirmLabel: "Use disk content",
+      cancelLabel: "Cancel comparison",
+      alternateLabel: "Use editor content",
+      onAlternate: () => {
+        editorSelected = true;
+      }
+    });
+    if (diskSelected) {
+      return {
+        markdown: diskFile.markdown,
+        label: diskFile.path ?? tab.document.filePath ?? diskFile.name,
+        title: "Current disk content"
+      };
+    }
+    return editorSelected ? editorComparisonContent(tab) : null;
+  }
+
+  async function currentContentForManagedHistory(
+    document: FileHistoryDocument
+  ): Promise<HistoryComparisonContent | null> {
+    const openTab = openTabForManagedHistory(document);
+    if (!openTab) {
+      if (!document.filePath || document.sourceState === "missing") {
+        showToast("Current content is unavailable; select two history versions instead");
+        return null;
+      }
+      const diskFile = await readMarkdownPath(document.filePath);
+      return {
+        markdown: diskFile.markdown,
+        label: document.filePath,
+        title: "Current disk content"
+      };
+    }
+
+    if (!openTab.document.filePath) return editorComparisonContent(openTab);
+
+    let diskFile: OpenedFile;
+    try {
+      diskFile = await readMarkdownPath(openTab.document.filePath);
+    } catch (error) {
+      if (externalChangeTabIds.has(openTab.id) || !openTab.document.fileStats) {
+        console.warn(error);
+        const useEditor = await requestConfirmation({
+          title: "Disk content is unavailable",
+          message: "The disk file could not be read, so its current content cannot be used for comparison. Continue with the open editor content?",
+          confirmLabel: "Use editor content",
+          cancelLabel: "Cancel comparison"
+        });
+        return useEditor ? editorComparisonContent(openTab) : null;
+      }
+      return editorComparisonContent(openTab);
+    }
+
+    const diskContentChanged = diskChangeKind(
+      openTab.document.fileStats,
+      diskFile.fileStats,
+      openTab.document.lastSavedMarkdown,
+      diskFile.markdown
+    ) === "content";
+    const currentContentDiffers = diskFile.markdown !== openTab.document.markdown;
+    if (currentContentDiffers && (diskContentChanged || externalChangeTabIds.has(openTab.id))) {
+      return chooseManagedCurrentContent(openTab, diskFile);
+    }
+    return editorComparisonContent(openTab);
+  }
+
+  async function compareManagedHistoryVersions(
+    document: FileHistoryDocument,
+    selectedVersions: FileHistoryVersion[]
+  ) {
+    if (selectedVersions.length < 1 || selectedVersions.length > 2) return;
+    if (selectedVersions.some((version) => (
+      version.source === "disk" ? version.backup.size : version.snapshot.size
+    ) > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES)) {
+      showToast("Version is too large for interactive comparison");
+      return;
+    }
+
+    try {
+      const orderedVersions = orderFileHistoryVersionsOldestFirst(selectedVersions);
+      const loadedVersions = await Promise.all(orderedVersions.map((version) => (
+        readManagedHistoryVersion(document, version)
+      )));
+      if (loadedVersions.some((version) => (
+        new Blob([version.markdown]).size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES
+      ))) {
+        showToast("Version is too large for interactive comparison");
+        return;
+      }
+
+      if (loadedVersions.length === 2) {
+        setBackupComparison({
+          restore: () => undefined,
+          tabId: document.key,
+          versionMarkdown: loadedVersions[0].markdown,
+          currentMarkdown: loadedVersions[1].markdown,
+          currentName: document.fileName,
+          versionLabel: loadedVersions[0].label,
+          currentLabel: loadedVersions[1].label,
+          versionTitle: "Earlier history version",
+          currentTitle: "Later history version",
+          showAction: false
+        });
+        return;
+      }
+
+      const current = await currentContentForManagedHistory(document);
+      if (!current) return;
+      if (new Blob([current.markdown]).size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES) {
+        showToast("Version is too large for interactive comparison");
+        return;
+      }
+      const selectedVersion = orderedVersions[0];
+      setBackupComparison({
+        restore: () => openManagedHistoryVersionAsDraft(document, selectedVersion),
+        tabId: document.key,
+        versionMarkdown: loadedVersions[0].markdown,
+        currentMarkdown: current.markdown,
+        currentName: document.fileName,
+        versionLabel: loadedVersions[0].label,
+        currentLabel: current.label,
+        versionTitle: loadedVersions[0].title,
+        currentTitle: current.title,
+        actionLabel: "Open version as draft",
+        actionIcon: "open"
+      });
+    } catch (error) {
+      console.warn(error);
+      showToast("History version could not be opened for comparison");
+    }
+  }
+
   async function openManagedDiskVersionAsDraft(document: FileHistoryDocument, backup: MarkdownBackup) {
     if (!document.filePath) return;
     try {
@@ -7904,11 +8100,12 @@ export function App() {
         backupMarkdown={backupComparison?.versionMarkdown ?? ""}
         currentMarkdown={backupComparison?.currentMarkdown ?? ""}
         backupLabel={backupComparison?.versionLabel}
-        currentLabel={backupComparison?.currentName}
+        currentLabel={backupComparison?.currentLabel ?? backupComparison?.currentName}
         versionTitle={backupComparison?.versionTitle}
         currentTitle={backupComparison?.currentTitle}
         actionLabel={backupComparison?.actionLabel}
         actionIcon={backupComparison?.actionIcon}
+        showAction={backupComparison?.showAction}
         restoreDisabled={backupComparison?.restoreDisabled}
         t={t}
         onClose={() => setBackupComparison(null)}
@@ -7928,6 +8125,7 @@ export function App() {
         onLoadDiskVersions={loadManagedFileHistoryVersions}
         onOpenDiskVersion={openManagedDiskVersionAsDraft}
         onOpenSnapshot={openManagedSnapshotAsDraft}
+        onCompareVersions={compareManagedHistoryVersions}
         onDeleteDocument={deleteManagedFileHistory}
         onDeleteDocuments={deleteManagedFileHistories}
         onDeleteDiskVersion={deleteManagedDiskVersion}

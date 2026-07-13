@@ -157,6 +157,12 @@ export function fileHistoryVersionKey(version: FileHistoryVersion): string {
     : `local:${version.snapshot.id}`;
 }
 
+export function orderFileHistoryVersionsOldestFirst(
+  versions: readonly FileHistoryVersion[]
+): FileHistoryVersion[] {
+  return [...versions].sort((left, right) => compareVersions(right, left));
+}
+
 export function removeSnapshotsForDocument(
   snapshots: readonly DraftSnapshot[],
   documentKey: string

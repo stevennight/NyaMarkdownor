@@ -380,6 +380,11 @@
     display: none;
   }
 
+  .backup-compare-actions.compare-only .backup-compare-button.secondary {
+    display: inline-flex;
+    width: 100%;
+  }
+
   .backup-compare-button.restore {
     width: 100%;
   }
