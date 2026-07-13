@@ -1,6 +1,6 @@
 [package]
 name = "nya-markdownor"
-version = "1.0.2"
+version = "1.0.3"
 description = "A local-first Markdown editor."
 authors = ["NyaMarkdownor Contributors"]
 edition = "2021"
@@ -21,6 +21,9 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["native-tls-no-alpn", "system-proxy"] }
+semver = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Globalization"] }
+winreg = "0.55"

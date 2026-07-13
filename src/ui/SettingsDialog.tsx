@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Download,
+  ExternalLink,
   FileText,
   FolderOpen,
   History,
   Info,
   PenLine,
+  RefreshCw,
   RotateCcw,
   SlidersHorizontal,
   X,
@@ -12,6 +15,7 @@ import {
 } from "lucide-react";
 import type { BackupPreferences, EditorDensity, LanguagePreference, TableHeightMode, ThemeMode, ViewMode } from "../types";
 import type { BuildInfo } from "../lib/buildInfo";
+import type { ApplicationUpdateState } from "../lib/appUpdates";
 import type { FileAssociationScope } from "../lib/fileIo";
 import type { Translator } from "../lib/i18n";
 
@@ -34,6 +38,7 @@ type SettingsDialogProps = {
   backupPreferences: BackupPreferences;
   backupDirectoryAvailable: boolean;
   buildInfo: BuildInfo;
+  applicationUpdate: ApplicationUpdateState;
   t: Translator;
   onClose: () => void;
   onViewModeChange: (value: ViewMode) => void;
@@ -52,6 +57,9 @@ type SettingsDialogProps = {
   onChooseBackupDirectory: () => void;
   onResetBackupDirectory: () => void;
   onBackupPreferencesChange: (value: BackupPreferences) => void;
+  onCheckForUpdates: () => void;
+  onInstallUpdate: (version: string) => void;
+  onOpenReleasePage: () => void;
 };
 
 type SettingsCategoryId = "general" | "editor" | "files" | "backups" | "about";
@@ -81,6 +89,7 @@ export function SettingsDialog({
   backupPreferences,
   backupDirectoryAvailable,
   buildInfo,
+  applicationUpdate,
   t,
   onClose,
   onViewModeChange,
@@ -98,7 +107,10 @@ export function SettingsDialog({
   onTableMaxHeightVhChange,
   onChooseBackupDirectory,
   onResetBackupDirectory,
-  onBackupPreferencesChange
+  onBackupPreferencesChange,
+  onCheckForUpdates,
+  onInstallUpdate,
+  onOpenReleasePage
 }: SettingsDialogProps) {
   const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>("general");
   const settingsContentRef = useRef<HTMLDivElement>(null);
@@ -450,6 +462,32 @@ export function SettingsDialog({
                 </section>
                 <section className="settings-section">
                   <div className="settings-row">
+                    <span>{t("Updates")}</span>
+                    <div className="settings-update-control">
+                      <output className="settings-build-value">{applicationUpdateLabel(applicationUpdate, t)}</output>
+                      {applicationUpdate.status === "available" ? (
+                        <button
+                          className="settings-action"
+                          type="button"
+                          onClick={() => onInstallUpdate(applicationUpdate.version)}
+                        >
+                          <Download size={14} />
+                          {t("Download and install")}
+                        </button>
+                      ) : applicationUpdate.status === "unsupported" ? (
+                        <button className="settings-action" type="button" onClick={onOpenReleasePage}>
+                          <ExternalLink size={14} />
+                          {t("View GitHub Releases")}
+                        </button>
+                      ) : applicationUpdate.status !== "checking" && applicationUpdate.status !== "installing" ? (
+                        <button className="settings-action" type="button" onClick={onCheckForUpdates}>
+                          <RefreshCw size={14} />
+                          {t("Check for updates")}
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="settings-row">
                     <span>{t("Release repository")}</span>
                     <output className="settings-build-value">{buildInfo.updateRepository}</output>
                   </div>
@@ -461,6 +499,18 @@ export function SettingsDialog({
       </section>
     </div>
   );
+}
+
+function applicationUpdateLabel(state: ApplicationUpdateState, t: Translator): string {
+  if (state.status === "idle") return t("Not checked");
+  if (state.status === "checking") return t("Checking for updates...");
+  if (state.status === "upToDate") return t("Up to date");
+  if (state.status === "available") return t("Version {version} is available", { version: state.version });
+  if (state.status === "installing") return t("Downloading version {version}...", { version: state.version });
+  if (state.status === "error") return t("Update check failed");
+  if (state.reason === "developmentBuild") return t("Unavailable in development builds");
+  if (state.reason === "notInstalled") return t("Unavailable for portable copies");
+  return t("Unavailable on this platform");
 }
 
 type SegmentedControlProps = {

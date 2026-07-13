@@ -10,6 +10,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+mod updater;
+
 const CENTRAL_BACKUP_DIR_NAME: &str = "backups-v1";
 const CUSTOM_BACKUP_CONTAINER_NAME: &str = "NyaMarkdownor Backups";
 const LEGACY_BACKUP_DIR_NAME: &str = ".nyamarkdownor-backups";
@@ -83,6 +85,19 @@ pub fn version_output() -> String {
 #[tauri::command]
 fn get_build_info() -> BuildInfo {
     build_info()
+}
+
+#[tauri::command]
+async fn check_for_updates() -> Result<updater::UpdateCheckResult, String> {
+    let info = build_info();
+    updater::check_for_updates(&info.version, &info.update_repository).await
+}
+
+#[tauri::command]
+async fn download_and_install_update(app: AppHandle, version: String) -> Result<(), String> {
+    let info = build_info();
+    updater::download_and_install_update(&app, &info.version, &info.update_repository, &version)
+        .await
 }
 
 #[derive(serde::Serialize)]
@@ -6796,6 +6811,8 @@ pub fn run() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            check_for_updates,
+            download_and_install_update,
             get_build_info,
             create_markdown_file,
             delete_markdown_backup,

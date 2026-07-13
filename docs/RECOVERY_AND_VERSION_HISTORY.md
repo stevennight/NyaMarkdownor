@@ -1,10 +1,14 @@
 # 工作恢复与版本历史设计规格
 
+[中文首页](../README.zh-CN.md) | [架构说明](ARCHITECTURE.zh-CN.md) | [Architecture](ARCHITECTURE.md)
+
 ## 文档状态
 
-本文定义并记录 NyaMarkdownor 当前实现遵循的工作恢复、版本历史、外部文件冲突和保留策略。
+本文适用于 NyaMarkdownor `1.0.3`，定义并记录当前实现遵循的工作恢复、版本历史、外部文件冲突和保留策略。
 
 本文中的“版本历史”只有一条用户可见的时间线。`automatic`、`safety` 和 `manual` 是同一条时间线中的保留类别，不是三个互相独立的功能入口。
+
+用户界面统一展示历史，但物理存储分为 Rust 管理的磁盘版本和前端管理、镜像到原生 app-data 的本地编辑器检查点。本文会明确区分概念类别与实际记录字段。
 
 ## 设计目标
 
@@ -89,7 +93,7 @@
 
 发生实际分叉时：
 
-- 选择“使用磁盘内容”：若恢复记录中的编辑内容与当前磁盘内容不同，先将被放弃的 `editorContent` 写入固定 `safety` 检查点，原因记为 `startup-discard-recovery`；随后在编辑器中加载 `diskContent`，状态为已保存。
+- 选择“使用磁盘内容”：若恢复记录中的编辑内容与当前磁盘内容不同，先将被放弃的 `editorContent` 写入固定 `safety` 检查点，原因记为 `recovery-discard`；随后在编辑器中加载 `diskContent`，状态为已保存。
 - 选择“恢复编辑内容”：在编辑器中加载 `editorContent`，不立即写入磁盘；是否未保存以 `editorContent != diskContent` 为准。
 - 选择“比较”：打开两份内容的差异视图，不解除冲突，也不启动自动保存。
 
@@ -97,19 +101,35 @@
 
 ## 历史检查点数据模型
 
-历史检查点至少包含：
+版本历史界面把两种物理记录合并为按文档排列的时间线，但两者不能混为同一种磁盘格式。
 
-- `checkpointId`
-- `sourceKey`：规范化文件路径；没有路径时使用稳定文档 ID
-- `contentHash`
-- `category`：`automatic | safety | manual`
-- `state`：`rolling | fixed`
-- `reasons`：一个或多个来源原因；每个原因应记录发生时间
-- `createdAt`
-- `startedAt`：滚动窗口开始时间
-- `updatedAt`：内容或原因最后更新时间
-- `fixedAt`：固定时间；滚动中为 `null`
-- 内容字节数和必要的文件来源元数据
+### 磁盘版本
+
+磁盘版本由 Rust 中央历史管理：
+
+- 以规范化源路径生成来源桶；桶内 `source.json` 记录源路径、文件名、最后确认时间和孤立时间。
+- 版本文件名编码来源前缀、`rolling | automatic | safety | manual` 类别和纳秒时间。
+- `rolling` 同时保存滚动窗口开始时间和最后更新时间；其他类别创建后固定。
+- 返回前端的记录包含路径、名称、开始时间、更新时间、大小和类别。
+- 磁盘版本不持久化编辑器原因数组；`safety` 的具体来源由触发保存流程决定，界面显示为安全检查点。
+
+### 本地编辑器检查点
+
+本地检查点的实际 `DraftSnapshot` 记录包含：
+
+- `id`
+- `documentId`；有文件路径的文档为 `null`，无路径草稿使用稳定标签 ID
+- `fileName`、`filePath`
+- `markdown`、`lastSavedMarkdown`、`lineEnding`、`fileStats`
+- `createdAt`、`size`、`contentHash`
+- `kind`：`safety | manual`
+- `reason` 和带发生时间的 `reasons`
+
+记录容器还包含格式版本、`tableCellBreakFormat: "html"` 和 `savedAt`，用于确保表格单元格换行以 `<br>` 语义恢复。
+
+### 统一概念类别
+
+界面和保留策略把 `rolling` 视为尚未固定的 `automatic`。固定类别的保留优先级为：
 
 类别的保留优先级为：
 
@@ -117,23 +137,23 @@
 manual > safety > automatic
 ```
 
-同一内容因后续操作获得更高保留级别时，提升现有记录的类别并追加原因，不创建重复记录，也不降低已有类别。
+同一来源的精确相同内容不创建重复可见记录。磁盘版本通过字节比较复用或提升已有固定版本；本地检查点通过 `contentHash` 和完整 Markdown 比较合并原因。后续事件只允许提升保留级别，不允许降低已有类别。
 
 ### 原因值
 
-建议使用以下稳定原因值；界面可显示本地化名称：
+本地编辑器检查点使用以下稳定原因值，界面显示本地化名称：
 
 | 类别 | 原因 | 含义 |
 | --- | --- | --- |
-| `automatic` | `autosave-before-write` | 自动保存写入前的磁盘内容 |
-| `automatic` | `manual-save-before-write` | `Ctrl+S` 或手动保存写入前的磁盘内容 |
-| `manual` | `user-created` | 用户主动创建检查点时的编辑器内容 |
-| `safety` | `startup-discard-recovery` | 启动时选择磁盘内容前被放弃的恢复内容 |
-| `safety` | `reload-before-replace` | 从磁盘重新加载前的未保存编辑内容 |
-| `safety` | `restore-before-replace` | 恢复历史版本前的未保存编辑内容 |
-| `safety` | `close-dirty-tab` | 关闭脏标签前的编辑内容 |
-| `safety` | `overwrite-save-as-target` | 另存为覆盖已有目标前的目标文件内容 |
-| `safety` | `overwrite-external-change` | 用户确认覆盖外部修改前的当前磁盘内容 |
+| `manual` | `manual` | 用户主动创建检查点时的编辑器内容 |
+| `safety` | `recovery-discard` | 选择磁盘内容前被放弃的恢复内容 |
+| `safety` | `reload` | 从磁盘重新加载前的未保存编辑内容 |
+| `safety` | `restore` | 恢复历史版本或检查点前的未保存编辑内容 |
+| `safety` | `close` | 关闭脏标签前的编辑内容 |
+| `safety` | `save-conflict` | 处理保存冲突前保留的编辑内容 |
+| `safety` | `save-as-overwrite` | 可识别的另存为覆盖前编辑内容原因；当前覆盖目标主要由磁盘 `safety` 版本保护 |
+
+`save-as-overwrite`、`window-close`、`legacy-idle` 和 `legacy-preserved` 保留为可识别记录值，但当前常规流程不会创建这些本地原因。正常关闭窗口只刷新工作恢复，不创建窗口关闭检查点；覆盖已有 Save As 目标时，目标原磁盘内容写为磁盘 `safety` 版本。普通保存产生的磁盘 `rolling/automatic` 版本没有本地 `reason` 字段。
 
 ## 普通保存与滚动版本
 
@@ -229,7 +249,7 @@ manual > safety > automatic
 - 自动保存立即暂停，不能静默覆盖。
 - 用户可以比较编辑器内容与磁盘内容。
 - 用户选择重新加载磁盘时，按“重新加载磁盘文件”规则保护未保存编辑内容。
-- 用户选择覆盖磁盘时，先保存固定的 `overwrite-external-change` 安全检查点，再执行写入。
+- 用户选择覆盖磁盘时，先把当前外部磁盘内容保存为固定的磁盘 `safety` 版本，再执行写入。
 - 用户可以改用另存为，原路径及其外部内容保持不变。
 - 冲突未解决前，工作恢复继续更新编辑器内容，但不能把冲突误标记为已保存。
 

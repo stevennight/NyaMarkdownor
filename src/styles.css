@@ -3282,6 +3282,18 @@ kbd {
   white-space: nowrap;
 }
 
+.settings-update-control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.settings-update-control .settings-build-value {
+  flex: 1 1 180px;
+}
+
 .settings-actions {
   display: flex;
   flex-wrap: wrap;

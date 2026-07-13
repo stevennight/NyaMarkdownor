@@ -148,6 +148,12 @@ import {
 import { copyRichContent, copyText, writeClipboardEventData } from "../lib/clipboard";
 import { bundledBuildInfo, resolveBuildInfo, type BuildInfo } from "../lib/buildInfo";
 import {
+  checkForApplicationUpdates,
+  downloadAndInstallApplicationUpdate,
+  type ApplicationUpdateState,
+  type UpdateCheckResult
+} from "../lib/appUpdates";
+import {
   applyMarkdownBlockCommand,
   applyMarkdownListIndentation,
   applyMarkdownTextCommand,
@@ -491,6 +497,7 @@ export function App() {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [buildInfo, setBuildInfo] = useState<BuildInfo>(bundledBuildInfo);
+  const [applicationUpdate, setApplicationUpdate] = useState<ApplicationUpdateState>({ status: "idle" });
   const [tableSizeDialogOpen, setTableSizeDialogOpen] = useState(false);
   const [tableSizeDraft, setTableSizeDraft] = useState<TableSizeDraft>({ columns: 3, bodyRows: 2 });
   const [richTableActive, setRichTableActive] = useState(false);
@@ -554,6 +561,9 @@ export function App() {
   const promptedExternalDiskVersionsRef = useRef(new Map<string, string>());
   const lastWorkRecoveryPersistedAtRef = useRef(0);
   const backupUsageWarningShownRef = useRef(false);
+  const automaticUpdateCheckStartedRef = useRef(false);
+  const updateInstallInFlightRef = useRef(false);
+  const promptedUpdateVersionRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -566,6 +576,26 @@ export function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!desktopRuntime || !desktopRecoveryReady || automaticUpdateCheckStartedRef.current) return undefined;
+    automaticUpdateCheckStartedRef.current = true;
+    const timer = window.setTimeout(() => {
+      void checkApplicationUpdates(false);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [desktopRecoveryReady, desktopRuntime]);
+
+  useEffect(() => {
+    if (applicationUpdate.status !== "available"
+      || promptedUpdateVersionRef.current === applicationUpdate.version
+      || confirmation
+      || externalDiskReview
+      || backupComparison) return;
+
+    promptedUpdateVersionRef.current = applicationUpdate.version;
+    void promptApplicationUpdate(applicationUpdate);
+  }, [applicationUpdate, backupComparison, confirmation, externalDiskReview]);
 
   const activeTab = useMemo<DocumentTab>(() => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? createDocumentTab(createDefaultDocument()), [activeTabId, tabs]);
   const documentState = activeTab.document;
@@ -1688,6 +1718,69 @@ export function App() {
     setToast(translateUiText(locale, message));
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => setToast(""), 1800);
+  }
+
+  async function checkApplicationUpdates(interactive: boolean) {
+    if (updateInstallInFlightRef.current) return;
+    setApplicationUpdate({ status: "checking" });
+    try {
+      const result = await checkForApplicationUpdates();
+      setApplicationUpdate(result);
+      if (!interactive) return;
+      if (result.status === "upToDate") {
+        showToast("NyaMarkdownor is up to date");
+      } else if (result.status === "unsupported") {
+        if (result.reason === "notInstalled") showToast("Automatic updates are unavailable for portable copies");
+        else if (result.reason === "developmentBuild") showToast("Automatic updates are unavailable in development builds");
+        else showToast("Automatic updates are unavailable on this platform");
+      }
+    } catch (error) {
+      console.warn("Could not check for application updates", error);
+      setApplicationUpdate({ status: "error", message: messageFromError(error) });
+      if (interactive) showToast("Update check failed");
+    }
+  }
+
+  async function promptApplicationUpdate(update: Extract<UpdateCheckResult, { status: "available" }>) {
+    const confirmed = await requestConfirmation({
+      title: t("NyaMarkdownor {version} is available", { version: update.version }),
+      message: t("The installer will be downloaded from GitHub Releases and verified. NyaMarkdownor will save the current workspace, start the installer, and close."),
+      confirmLabel: t("Download and install"),
+      cancelLabel: t("Later"),
+      tone: "default"
+    });
+    if (confirmed) await installApplicationUpdate(update.version);
+  }
+
+  async function installApplicationUpdate(version: string) {
+    if (updateInstallInFlightRef.current) return;
+    updateInstallInFlightRef.current = true;
+    setApplicationUpdate({ status: "installing", version });
+    try {
+      await persistWindowCloseRecovery();
+      await downloadAndInstallApplicationUpdate(version);
+    } catch (error) {
+      console.warn("Could not install application update", error);
+      setApplicationUpdate({ status: "error", message: messageFromError(error) });
+      showToast("Update could not be installed");
+    } finally {
+      updateInstallInFlightRef.current = false;
+    }
+  }
+
+  async function openApplicationReleasePage() {
+    const repository = buildInfo.updateRepository.trim();
+    if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repository)) {
+      showToast("Release page could not be opened");
+      return;
+    }
+    try {
+      const result = await openExternalLink(`https://github.com/${repository}/releases/latest`);
+      if (result !== "opened") showToast("Release page could not be opened");
+    } catch (error) {
+      console.warn("Could not open GitHub Releases", error);
+      showToast("Release page could not be opened");
+    }
   }
 
   function messageFromError(error: unknown): string {
@@ -7860,6 +7953,7 @@ export function App() {
         backupPreferences={backupPreferences}
         backupDirectoryAvailable={desktopRuntime}
         buildInfo={buildInfo}
+        applicationUpdate={applicationUpdate}
         t={t}
         onClose={() => setSettingsOpen(false)}
         onViewModeChange={setViewMode}
@@ -7878,6 +7972,9 @@ export function App() {
         onChooseBackupDirectory={() => void chooseBackupDirectory()}
         onResetBackupDirectory={resetBackupDirectory}
         onBackupPreferencesChange={(value) => setBackupPreferencesState(normalizeBackupPreferences(value))}
+        onCheckForUpdates={() => void checkApplicationUpdates(true)}
+        onInstallUpdate={(version) => void installApplicationUpdate(version)}
+        onOpenReleasePage={() => void openApplicationReleasePage()}
       />
     </div>
   );
