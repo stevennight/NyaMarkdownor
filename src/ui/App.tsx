@@ -246,7 +246,8 @@ import {
   fileHistoryDocumentKey,
   removeSnapshotsForDocument,
   type FileHistoryDocument,
-  type FileHistorySourceStates
+  type FileHistorySourceStates,
+  type FileHistoryVersion
 } from "../lib/fileHistory";
 import { queueKeyedTask } from "../lib/keyedTaskQueue";
 import {
@@ -282,7 +283,7 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useMarkdownWorker } from "../hooks/useMarkdownWorker";
 import { CommandPalette } from "./CommandPalette";
 import { SettingsDialog } from "./SettingsDialog";
-import { FileHistoryManagerDialog } from "./FileHistoryManagerDialog";
+import { FileHistoryManagerDialog, type FileHistoryVersionDeleteResult } from "./FileHistoryManagerDialog";
 import { BackupCompareDialog } from "./BackupCompareDialog";
 import { FindReplacePanel } from "./FindReplacePanel";
 import { InsertTableDialog, type TableSizeDraft } from "./InsertTableDialog";
@@ -5368,29 +5369,82 @@ export function App() {
       tone: "danger"
     })) return false;
 
-    try {
-      if (document.filePath && document.diskHistory) {
-        await deleteMarkdownBackupHistory(document.filePath, backupPreferences);
-      }
+    const result = await performDeleteManagedFileHistories([document]);
+    const deleted = result.deletedKeys.includes(document.key);
+    showToast(deleted
+      ? result.localPersisted
+        ? "Document history deleted"
+        : "Disk history deleted; local checkpoints were removed for this session only"
+      : "Document history could not be deleted");
+    return deleted;
+  }
 
-      const nextSnapshots = removeSnapshotsForDocument(draftSnapshotsRef.current, document.key);
+  async function deleteManagedFileHistories(documents: FileHistoryDocument[]): Promise<string[]> {
+    if (documents.length === 0 || !await requestConfirmation({
+      title: t("Delete {count} selected document histories?", { count: documents.length }),
+      message: t("This permanently deletes all retained versions for the selected documents. Source files and current editor content will not change."),
+      confirmLabel: t("Delete selected history"),
+      cancelLabel: t("Cancel"),
+      tone: "danger"
+    })) return [];
+
+    const result = await performDeleteManagedFileHistories(documents);
+    if (result.deletedKeys.length === documents.length) {
+      showToast(t("Deleted history for {count} documents", { count: result.deletedKeys.length }));
+    } else if (result.deletedKeys.length > 0) {
+      showToast(t("Deleted history for {deleted} of {count} documents", {
+        deleted: result.deletedKeys.length,
+        count: documents.length
+      }));
+    } else {
+      showToast("Document history could not be deleted");
+    }
+    return result.deletedKeys;
+  }
+
+  async function performDeleteManagedFileHistories(documents: FileHistoryDocument[]): Promise<{
+    deletedKeys: string[];
+    localPersisted: boolean;
+  }> {
+    const diskResults = await Promise.all(documents.map(async (document) => {
+      if (!document.filePath || !document.diskHistory) return { document, deleted: true };
+      try {
+        await deleteMarkdownBackupHistory(document.filePath, backupPreferences);
+        return { document, deleted: true };
+      } catch (error) {
+        console.warn(error);
+        return { document, deleted: false };
+      }
+    }));
+    const deletedKeys = diskResults
+      .filter((result) => result.deleted)
+      .map((result) => result.document.key);
+    const deletedDiskPaths = diskResults
+      .filter((result) => result.deleted && result.document.filePath && result.document.diskHistory)
+      .map((result) => result.document.filePath!);
+    const targetKeys = new Set(deletedKeys);
+    const currentSnapshots = draftSnapshotsRef.current;
+    let nextSnapshots = currentSnapshots;
+    for (const documentKey of targetKeys) {
+      nextSnapshots = removeSnapshotsForDocument(nextSnapshots, documentKey);
+    }
+    const snapshotsChanged = nextSnapshots.length !== currentSnapshots.length;
+    if (snapshotsChanged) {
       draftSnapshotsRef.current = nextSnapshots;
       setDraftSnapshots(nextSnapshots);
-      const persisted = saveDraftSnapshots(nextSnapshots);
+    }
+    const localPersisted = !snapshotsChanged || saveDraftSnapshots(nextSnapshots);
+
+    if (deletedDiskPaths.length > 0) {
       setBackupHistories((current) => current.filter((history) => (
-        !document.filePath || !sameLocalPath(history.sourcePath, document.filePath)
+        !deletedDiskPaths.some((path) => sameLocalPath(history.sourcePath, path))
       )));
-      if (document.filePath && documentState.filePath && sameLocalPath(document.filePath, documentState.filePath)) {
+      if (documentState.filePath && deletedDiskPaths.some((path) => sameLocalPath(documentState.filePath!, path))) {
         setBackups([]);
       }
-      await refreshFileHistoryDocuments();
-      showToast(persisted ? "Document history deleted" : "Disk history deleted; local checkpoints were removed for this session only");
-      return true;
-    } catch (error) {
-      console.warn(error);
-      showToast("Document history could not be deleted");
-      return false;
     }
+    await refreshFileHistoryDocuments();
+    return { deletedKeys, localPersisted };
   }
 
   async function deleteManagedDiskVersion(document: FileHistoryDocument, backup: MarkdownBackup): Promise<boolean> {
@@ -5403,19 +5457,76 @@ export function App() {
       tone: "danger"
     })) return false;
 
-    try {
-      await deleteMarkdownBackup(document.filePath, backup.path, backupPreferences);
-      if (documentState.filePath && sameLocalPath(document.filePath, documentState.filePath)) {
-        setBackups((current) => current.filter((candidate) => candidate.path !== backup.path));
-      }
-      await refreshFileHistoryDocuments();
-      showToast("Version deleted");
-      return true;
-    } catch (error) {
-      console.warn(error);
+    const result = await performDeleteManagedVersions(document, [{
+      source: "disk",
+      timestamp: backup.updatedAtMs ?? backup.modifiedMs,
+      backup
+    }]);
+    const deleted = result.deletedDiskPaths.includes(backup.path);
+    showToast(deleted ? "Version deleted" : "Version could not be deleted");
+    return deleted;
+  }
+
+  async function deleteManagedVersions(
+    document: FileHistoryDocument,
+    versions: FileHistoryVersion[]
+  ): Promise<FileHistoryVersionDeleteResult> {
+    if (versions.length === 0 || !await requestConfirmation({
+      title: t("Delete {count} selected versions?", { count: versions.length }),
+      message: t("This permanently deletes the selected retained versions. The source file and current editor content will not change."),
+      confirmLabel: t("Delete selected versions"),
+      cancelLabel: t("Cancel"),
+      tone: "danger"
+    })) return { deletedDiskPaths: [], deletedSnapshotIds: [] };
+
+    const result = await performDeleteManagedVersions(document, versions);
+    const deletedCount = result.deletedDiskPaths.length + result.deletedSnapshotIds.length;
+    if (deletedCount === versions.length) {
+      showToast(t("Deleted {count} versions", { count: deletedCount }));
+    } else if (deletedCount > 0) {
+      showToast(t("Deleted {deleted} of {count} versions", { deleted: deletedCount, count: versions.length }));
+    } else {
       showToast("Version could not be deleted");
-      return false;
     }
+    return result;
+  }
+
+  async function performDeleteManagedVersions(
+    document: FileHistoryDocument,
+    versions: FileHistoryVersion[]
+  ): Promise<FileHistoryVersionDeleteResult> {
+    const diskVersions = versions.filter((version) => version.source === "disk");
+    const diskResults = await Promise.all(diskVersions.map(async (version) => {
+      if (!document.filePath) return { path: version.backup.path, deleted: false };
+      try {
+        await deleteMarkdownBackup(document.filePath, version.backup.path, backupPreferences);
+        return { path: version.backup.path, deleted: true };
+      } catch (error) {
+        console.warn(error);
+        return { path: version.backup.path, deleted: false };
+      }
+    }));
+    const deletedDiskPaths = diskResults
+      .filter((result) => result.deleted)
+      .map((result) => result.path);
+    const deletedSnapshotIds = versions
+      .filter((version) => version.source === "local")
+      .map((version) => version.snapshot.id);
+
+    if (deletedSnapshotIds.length > 0) {
+      const ids = new Set(deletedSnapshotIds);
+      const nextSnapshots = draftSnapshotsRef.current.filter((snapshot) => !ids.has(snapshot.id));
+      draftSnapshotsRef.current = nextSnapshots;
+      setDraftSnapshots(nextSnapshots);
+      saveDraftSnapshots(nextSnapshots);
+    }
+    if (deletedDiskPaths.length > 0 && document.filePath && documentState.filePath
+      && sameLocalPath(document.filePath, documentState.filePath)) {
+      const paths = new Set(deletedDiskPaths);
+      setBackups((current) => current.filter((candidate) => !paths.has(candidate.path)));
+    }
+    await refreshFileHistoryDocuments();
+    return { deletedDiskPaths, deletedSnapshotIds };
   }
 
   async function restoreDraftSnapshot(snapshot: DraftSnapshot, expectedTabId?: string) {
@@ -7725,8 +7836,10 @@ export function App() {
         onOpenDiskVersion={openManagedDiskVersionAsDraft}
         onOpenSnapshot={openManagedSnapshotAsDraft}
         onDeleteDocument={deleteManagedFileHistory}
+        onDeleteDocuments={deleteManagedFileHistories}
         onDeleteDiskVersion={deleteManagedDiskVersion}
         onDeleteSnapshot={deleteDraftSnapshot}
+        onDeleteVersions={deleteManagedVersions}
       />
       <SettingsDialog
         open={settingsOpen}

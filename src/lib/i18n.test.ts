@@ -22,6 +22,8 @@ describe("i18n", () => {
     expect(createTranslator("zh-CN")("File history management")).toBe("文件历史管理");
     expect(createTranslator("zh-CN")("Orphaned file history")).toBe("孤立文件历史");
     expect(createTranslator("zh-CN")("{count} versions", { count: 7 })).toBe("7 个版本");
+    expect(createTranslator("zh-CN")("{count} selected", { count: 3 })).toBe("已选择 3 项");
+    expect(createTranslator("zh-CN")("Delete {count} selected versions?", { count: 3 })).toBe("删除所选 3 个历史版本吗？");
     expect(createTranslator("zh-CN")("Open Version History")).toBe("打开版本历史");
     expect(createTranslator("zh-CN")("Save without history")).toBe("无历史版本继续保存");
     expect(createTranslator("zh-CN")("Automatic save paused; version history storage needs attention"))

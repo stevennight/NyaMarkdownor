@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   ChevronRight,
@@ -12,9 +12,11 @@ import {
 } from "lucide-react";
 import type { DraftSnapshot } from "../lib/draftSnapshots";
 import {
+  fileHistoryVersionKey,
   mergeFileHistoryVersions,
   partitionFileHistoryDocuments,
-  type FileHistoryDocument
+  type FileHistoryDocument,
+  type FileHistoryVersion
 } from "../lib/fileHistory";
 import type { MarkdownBackup } from "../lib/fileIo";
 import type { Translator } from "../lib/i18n";
@@ -29,8 +31,18 @@ type FileHistoryManagerDialogProps = {
   onOpenDiskVersion: (document: FileHistoryDocument, backup: MarkdownBackup) => void | Promise<void>;
   onOpenSnapshot: (snapshot: DraftSnapshot) => void;
   onDeleteDocument: (document: FileHistoryDocument) => Promise<boolean>;
+  onDeleteDocuments: (documents: FileHistoryDocument[]) => Promise<string[]>;
   onDeleteDiskVersion: (document: FileHistoryDocument, backup: MarkdownBackup) => Promise<boolean>;
   onDeleteSnapshot: (snapshot: DraftSnapshot) => Promise<boolean>;
+  onDeleteVersions: (
+    document: FileHistoryDocument,
+    versions: FileHistoryVersion[]
+  ) => Promise<FileHistoryVersionDeleteResult>;
+};
+
+export type FileHistoryVersionDeleteResult = {
+  deletedDiskPaths: string[];
+  deletedSnapshotIds: string[];
 };
 
 type HistoryCategory = "documents" | "orphaned";
@@ -45,14 +57,19 @@ export function FileHistoryManagerDialog({
   onOpenDiskVersion,
   onOpenSnapshot,
   onDeleteDocument,
+  onDeleteDocuments,
   onDeleteDiskVersion,
-  onDeleteSnapshot
+  onDeleteSnapshot,
+  onDeleteVersions
 }: FileHistoryManagerDialogProps) {
   const [category, setCategory] = useState<HistoryCategory>("documents");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [diskVersions, setDiskVersions] = useState<MarkdownBackup[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [versionsError, setVersionsError] = useState(false);
+  const [selectedDocumentKeys, setSelectedDocumentKeys] = useState<Set<string>>(() => new Set());
+  const [selectedVersionKeys, setSelectedVersionKeys] = useState<Set<string>>(() => new Set());
+  const [batchDeleting, setBatchDeleting] = useState(false);
   const groups = useMemo(() => partitionFileHistoryDocuments(documents), [documents]);
   const selectedDocument = selectedKey
     ? documents.find((document) => document.key === selectedKey) ?? null
@@ -64,6 +81,14 @@ export function FileHistoryManagerDialog({
       : [],
     [diskVersions, selectedDocument]
   );
+  const selectedDocuments = useMemo(
+    () => visibleDocuments.filter((document) => selectedDocumentKeys.has(document.key)),
+    [selectedDocumentKeys, visibleDocuments]
+  );
+  const selectedVersions = useMemo(
+    () => versions.filter((version) => selectedVersionKeys.has(fileHistoryVersionKey(version))),
+    [selectedVersionKeys, versions]
+  );
 
   useEffect(() => {
     if (!open) {
@@ -71,13 +96,27 @@ export function FileHistoryManagerDialog({
       setDiskVersions([]);
       setVersionsLoading(false);
       setVersionsError(false);
+      setSelectedDocumentKeys(new Set());
+      setSelectedVersionKeys(new Set());
+      setBatchDeleting(false);
     }
   }, [open]);
+
+  useEffect(() => {
+    const available = new Set(visibleDocuments.map((document) => document.key));
+    setSelectedDocumentKeys((current) => intersectSelection(current, available));
+  }, [visibleDocuments]);
+
+  useEffect(() => {
+    const available = new Set(versions.map(fileHistoryVersionKey));
+    setSelectedVersionKeys((current) => intersectSelection(current, available));
+  }, [versions]);
 
   useEffect(() => {
     if (!selectedKey || selectedDocument) return;
     setSelectedKey(null);
     setDiskVersions([]);
+    setSelectedVersionKeys(new Set());
   }, [selectedDocument, selectedKey]);
 
   useEffect(() => {
@@ -88,6 +127,7 @@ export function FileHistoryManagerDialog({
       if (selectedKey) {
         setSelectedKey(null);
         setDiskVersions([]);
+        setSelectedVersionKeys(new Set());
       } else {
         onClose();
       }
@@ -127,6 +167,8 @@ export function FileHistoryManagerDialog({
     setCategory(nextCategory);
     setSelectedKey(null);
     setDiskVersions([]);
+    setSelectedDocumentKeys(new Set());
+    setSelectedVersionKeys(new Set());
   }
 
   async function deleteDocument(document: FileHistoryDocument) {
@@ -139,6 +181,59 @@ export function FileHistoryManagerDialog({
   async function deleteDiskVersion(document: FileHistoryDocument, backup: MarkdownBackup) {
     if (!await onDeleteDiskVersion(document, backup)) return;
     setDiskVersions((current) => current.filter((candidate) => candidate.path !== backup.path));
+  }
+
+  async function deleteSnapshot(snapshot: DraftSnapshot) {
+    if (!await onDeleteSnapshot(snapshot)) return;
+    setSelectedVersionKeys((current) => withoutSelectionKey(current, `local:${snapshot.id}`));
+  }
+
+  function toggleDocument(documentKey: string, checked: boolean) {
+    setSelectedDocumentKeys((current) => toggleSelectionKey(current, documentKey, checked));
+  }
+
+  function toggleVersion(versionKey: string, checked: boolean) {
+    setSelectedVersionKeys((current) => toggleSelectionKey(current, versionKey, checked));
+  }
+
+  function toggleAllDocuments(checked: boolean) {
+    setSelectedDocumentKeys(checked
+      ? new Set(visibleDocuments.map((document) => document.key))
+      : new Set());
+  }
+
+  function toggleAllVersions(checked: boolean) {
+    setSelectedVersionKeys(checked
+      ? new Set(versions.map(fileHistoryVersionKey))
+      : new Set());
+  }
+
+  async function deleteSelectedDocuments() {
+    if (batchDeleting || selectedDocuments.length === 0) return;
+    setBatchDeleting(true);
+    try {
+      const deletedKeys = new Set(await onDeleteDocuments(selectedDocuments));
+      setSelectedDocumentKeys((current) => withoutSelectionKeys(current, deletedKeys));
+    } finally {
+      setBatchDeleting(false);
+    }
+  }
+
+  async function deleteSelectedVersions() {
+    if (batchDeleting || !selectedDocument || selectedVersions.length === 0) return;
+    setBatchDeleting(true);
+    try {
+      const result = await onDeleteVersions(selectedDocument, selectedVersions);
+      const deletedDiskPaths = new Set(result.deletedDiskPaths);
+      const deletedKeys = new Set([
+        ...result.deletedDiskPaths.map((path) => `disk:${path}`),
+        ...result.deletedSnapshotIds.map((id) => `local:${id}`)
+      ]);
+      setDiskVersions((current) => current.filter((backup) => !deletedDiskPaths.has(backup.path)));
+      setSelectedVersionKeys((current) => withoutSelectionKeys(current, deletedKeys));
+    } finally {
+      setBatchDeleting(false);
+    }
   }
 
   const categoryLabel = category === "documents" ? t("Document history") : t("Orphaned file history");
@@ -184,7 +279,16 @@ export function FileHistoryManagerDialog({
             {selectedDocument ? (
               <section className="file-history-detail" aria-label={t("Versions for {name}", { name: selectedDocument.fileName })}>
                 <div className="file-history-detail-header">
-                  <button className="file-history-back" type="button" onClick={() => setSelectedKey(null)}>
+                  <button
+                    className="file-history-back"
+                    type="button"
+                    aria-label={t("Back to documents")}
+                    title={t("Back to documents")}
+                    onClick={() => {
+                      setSelectedKey(null);
+                      setSelectedVersionKeys(new Set());
+                    }}
+                  >
                     <ArrowLeft size={16} />
                     <span>{t("Back to documents")}</span>
                   </button>
@@ -203,9 +307,18 @@ export function FileHistoryManagerDialog({
                   </button>
                 </div>
 
-                <div className="file-history-version-summary">
-                  {t("{count} versions", { count: versions.length })}
-                </div>
+                <HistorySelectionBar
+                  allSelected={versions.length > 0 && selectedVersions.length === versions.length}
+                  deleting={batchDeleting}
+                  disabled={versionsLoading || versions.length === 0}
+                  partiallySelected={selectedVersions.length > 0 && selectedVersions.length < versions.length}
+                  selectedCount={selectedVersions.length}
+                  selectAllLabel={t("Select all versions")}
+                  summary={t("{count} versions", { count: versions.length })}
+                  t={t}
+                  onDelete={() => void deleteSelectedVersions()}
+                  onToggleAll={toggleAllVersions}
+                />
                 {versionsLoading ? (
                   <HistoryEmpty icon={<LoaderCircle className="spin" />} label={t("Loading versions")} />
                 ) : versionsError ? (
@@ -220,12 +333,15 @@ export function FileHistoryManagerDialog({
                         return (
                           <HistoryVersionRow
                             key={`disk:${backup.path}`}
+                            checked={selectedVersionKeys.has(fileHistoryVersionKey(version))}
                             title={formatHistoryTime(version.timestamp)}
                             detail={`${t(backupKindMessage(backup.kind))} - ${formatBytes(backup.size)}`}
+                            selectLabel={t("Select version from {time}", { time: formatHistoryTime(version.timestamp) })}
                             openLabel={t("Open version as draft")}
                             deleteLabel={t("Delete this version")}
                             onOpen={() => void onOpenDiskVersion(selectedDocument, backup)}
                             onDelete={() => void deleteDiskVersion(selectedDocument, backup)}
+                            onToggle={(checked) => toggleVersion(fileHistoryVersionKey(version), checked)}
                           />
                         );
                       }
@@ -234,12 +350,15 @@ export function FileHistoryManagerDialog({
                       return (
                         <HistoryVersionRow
                           key={`local:${snapshot.id}`}
+                          checked={selectedVersionKeys.has(fileHistoryVersionKey(version))}
                           title={formatHistoryTime(version.timestamp)}
                           detail={`${t(snapshotReasonMessage(snapshot))} - ${formatBytes(snapshot.size)}`}
+                          selectLabel={t("Select version from {time}", { time: formatHistoryTime(version.timestamp) })}
                           openLabel={t("Open version as draft")}
                           deleteLabel={t("Delete this version")}
                           onOpen={() => onOpenSnapshot(snapshot)}
-                          onDelete={() => void onDeleteSnapshot(snapshot)}
+                          onDelete={() => void deleteSnapshot(snapshot)}
+                          onToggle={(checked) => toggleVersion(fileHistoryVersionKey(version), checked)}
                         />
                       );
                     })}
@@ -259,6 +378,18 @@ export function FileHistoryManagerDialog({
                   </div>
                   <span>{t("{count} documents", { count: visibleDocuments.length })}</span>
                 </div>
+                <HistorySelectionBar
+                  allSelected={visibleDocuments.length > 0 && selectedDocuments.length === visibleDocuments.length}
+                  deleting={batchDeleting}
+                  disabled={loading || visibleDocuments.length === 0}
+                  partiallySelected={selectedDocuments.length > 0 && selectedDocuments.length < visibleDocuments.length}
+                  selectedCount={selectedDocuments.length}
+                  selectAllLabel={t("Select all documents")}
+                  summary={t("{count} documents", { count: visibleDocuments.length })}
+                  t={t}
+                  onDelete={() => void deleteSelectedDocuments()}
+                  onToggleAll={toggleAllDocuments}
+                />
                 {loading ? (
                   <HistoryEmpty icon={<LoaderCircle className="spin" />} label={t("Loading file history")} />
                 ) : visibleDocuments.length === 0 ? (
@@ -268,7 +399,17 @@ export function FileHistoryManagerDialog({
                   />
                 ) : (
                   visibleDocuments.map((document) => (
-                    <div className="file-history-document-row" key={document.key}>
+                    <div
+                      className={`file-history-document-row${selectedDocumentKeys.has(document.key) ? " selected" : ""}`}
+                      key={document.key}
+                    >
+                      <label className="file-history-row-checkbox">
+                        <SelectionCheckbox
+                          checked={selectedDocumentKeys.has(document.key)}
+                          label={t("Select {name}", { name: document.fileName })}
+                          onChange={(checked) => toggleDocument(document.key, checked)}
+                        />
+                      </label>
                       <button className="file-history-document-open" type="button" onClick={() => setSelectedKey(document.key)}>
                         <FileText size={17} />
                         <span className="file-history-document-copy">
@@ -320,17 +461,33 @@ function HistoryCategoryButton({ active, count, icon, label, onClick }: HistoryC
 }
 
 type HistoryVersionRowProps = {
+  checked: boolean;
   title: string;
   detail: string;
+  selectLabel: string;
   openLabel: string;
   deleteLabel: string;
   onOpen: () => void;
   onDelete: () => void;
+  onToggle: (checked: boolean) => void;
 };
 
-function HistoryVersionRow({ title, detail, openLabel, deleteLabel, onOpen, onDelete }: HistoryVersionRowProps) {
+function HistoryVersionRow({
+  checked,
+  title,
+  detail,
+  selectLabel,
+  openLabel,
+  deleteLabel,
+  onOpen,
+  onDelete,
+  onToggle
+}: HistoryVersionRowProps) {
   return (
-    <div className="file-history-version-row">
+    <div className={`file-history-version-row${checked ? " selected" : ""}`}>
+      <label className="file-history-row-checkbox">
+        <SelectionCheckbox checked={checked} label={selectLabel} onChange={onToggle} />
+      </label>
       <button className="file-history-version-open" type="button" title={openLabel} onClick={onOpen}>
         <History size={16} />
         <span>
@@ -342,6 +499,85 @@ function HistoryVersionRow({ title, detail, openLabel, deleteLabel, onOpen, onDe
         <Trash2 size={15} />
       </button>
     </div>
+  );
+}
+
+type HistorySelectionBarProps = {
+  allSelected: boolean;
+  deleting: boolean;
+  disabled: boolean;
+  partiallySelected: boolean;
+  selectedCount: number;
+  selectAllLabel: string;
+  summary: string;
+  t: Translator;
+  onDelete: () => void;
+  onToggleAll: (checked: boolean) => void;
+};
+
+function HistorySelectionBar({
+  allSelected,
+  deleting,
+  disabled,
+  partiallySelected,
+  selectedCount,
+  selectAllLabel,
+  summary,
+  t,
+  onDelete,
+  onToggleAll
+}: HistorySelectionBarProps) {
+  return (
+    <div className="file-history-selection-bar">
+      <label className="file-history-select-all">
+        <SelectionCheckbox
+          checked={allSelected}
+          disabled={disabled || deleting}
+          indeterminate={partiallySelected}
+          label={selectAllLabel}
+          onChange={onToggleAll}
+        />
+        <span>{selectedCount > 0 ? t("{count} selected", { count: selectedCount }) : summary}</span>
+      </label>
+      <button
+        className="file-history-bulk-delete"
+        type="button"
+        disabled={selectedCount === 0 || deleting}
+        title={t("Delete selected")}
+        onClick={onDelete}
+      >
+        {deleting ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}
+        <span>{deleting ? t("Deleting") : t("Delete selected")}</span>
+      </button>
+    </div>
+  );
+}
+
+type SelectionCheckboxProps = {
+  checked: boolean;
+  disabled?: boolean;
+  indeterminate?: boolean;
+  label: string;
+  onChange: (checked: boolean) => void;
+};
+
+function SelectionCheckbox({ checked, disabled = false, indeterminate = false, label, onChange }: SelectionCheckboxProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.indeterminate = indeterminate;
+  }, [indeterminate]);
+
+  return (
+    <input
+      ref={inputRef}
+      className="file-history-checkbox"
+      type="checkbox"
+      aria-label={label}
+      checked={checked}
+      disabled={disabled}
+      onChange={(event) => onChange(event.target.checked)}
+    />
   );
 }
 
@@ -392,4 +628,30 @@ function snapshotReasonMessage(snapshot: DraftSnapshot): string {
   if (snapshot.reason === "legacy-idle") return "Legacy automatic checkpoint";
   if (snapshot.reason === "legacy-preserved") return "Legacy checkpoint";
   return snapshot.kind === "manual" ? "Manual checkpoint" : "Safety checkpoint";
+}
+
+function intersectSelection(selection: Set<string>, available: Set<string>): Set<string> {
+  const next = new Set([...selection].filter((key) => available.has(key)));
+  return sameSelection(selection, next) ? selection : next;
+}
+
+function toggleSelectionKey(selection: Set<string>, key: string, checked: boolean): Set<string> {
+  if (selection.has(key) === checked) return selection;
+  const next = new Set(selection);
+  if (checked) next.add(key);
+  else next.delete(key);
+  return next;
+}
+
+function withoutSelectionKey(selection: Set<string>, key: string): Set<string> {
+  return toggleSelectionKey(selection, key, false);
+}
+
+function withoutSelectionKeys(selection: Set<string>, keys: Set<string>): Set<string> {
+  if (![...keys].some((key) => selection.has(key))) return selection;
+  return new Set([...selection].filter((key) => !keys.has(key)));
+}
+
+function sameSelection(left: Set<string>, right: Set<string>): boolean {
+  return left.size === right.size && [...left].every((key) => right.has(key));
 }

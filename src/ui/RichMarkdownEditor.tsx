@@ -27,6 +27,7 @@ import { richTableStructureTransaction, type RichTableStructureCommand } from ".
 import { createRichMarkdownExtensions } from "../lib/richMarkdownExtensions";
 import { withoutGeneratedTrailingParagraph } from "../lib/richMarkdownDocument";
 import { shouldOpenRichLinkOnClick } from "../lib/richLinks";
+import { browserTitleLinkFromClipboard } from "../lib/richLinkPaste";
 import type { Translator } from "../lib/i18n";
 
 type RichTableCommand = Extract<
@@ -216,6 +217,21 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
         paste: (_view, event) => {
           const currentEditor = editorRef.current;
           if (!currentEditor || currentEditor.isDestroyed) return false;
+
+          const titleLink = browserTitleLinkFromClipboard({
+            text: event.clipboardData?.getData("text/plain"),
+            html: event.clipboardData?.getData("text/html")
+          });
+          if (titleLink) {
+            const link = currentEditor.state.schema.marks.link.create({ href: titleLink.href });
+            const transaction = currentEditor.state.tr
+              .replaceSelectionWith(currentEditor.state.schema.text(titleLink.text, [link]), false)
+              .setMeta("preventAutolink", true);
+            currentEditor.view.dispatch(transaction);
+            currentEditor.view.focus();
+            event.preventDefault();
+            return true;
+          }
 
           const table = clipboardTableRowsFromData({
             text: event.clipboardData?.getData("text/plain"),

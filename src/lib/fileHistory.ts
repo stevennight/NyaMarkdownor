@@ -151,6 +151,12 @@ export function mergeFileHistoryVersions(
   ].sort(compareVersions);
 }
 
+export function fileHistoryVersionKey(version: FileHistoryVersion): string {
+  return version.source === "disk"
+    ? `disk:${version.backup.path}`
+    : `local:${version.snapshot.id}`;
+}
+
 export function removeSnapshotsForDocument(
   snapshots: readonly DraftSnapshot[],
   documentKey: string
@@ -170,13 +176,7 @@ function compareSnapshotsNewestFirst(left: DraftSnapshot, right: DraftSnapshot):
 
 function compareVersions(left: FileHistoryVersion, right: FileHistoryVersion): number {
   return right.timestamp - left.timestamp
-    || compareText(versionKey(left), versionKey(right));
-}
-
-function versionKey(version: FileHistoryVersion): string {
-  return version.source === "disk"
-    ? `disk:${version.backup.path}`
-    : `local:${version.snapshot.id}`;
+    || compareText(fileHistoryVersionKey(left), fileHistoryVersionKey(right));
 }
 
 function compareText(left: string, right: string): number {

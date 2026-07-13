@@ -4,6 +4,7 @@ import type { MarkdownBackup, MarkdownBackupHistory } from "./fileIo";
 import {
   buildFileHistoryDocuments,
   fileHistoryDocumentKey,
+  fileHistoryVersionKey,
   mergeFileHistoryVersions,
   partitionFileHistoryDocuments,
   removeSnapshotsForDocument
@@ -173,6 +174,19 @@ describe("file history documents", () => {
 });
 
 describe("file history versions", () => {
+  it("builds stable selection keys for disk and local versions", () => {
+    expect(fileHistoryVersionKey({
+      source: "disk",
+      timestamp: 10,
+      backup: backup({ path: "C:\\backups\\note.md.1", modifiedMs: 10 })
+    })).toBe("disk:C:\\backups\\note.md.1");
+    expect(fileHistoryVersionKey({
+      source: "local",
+      timestamp: 20,
+      snapshot: snapshot({ id: "snapshot-20", createdAt: 20 })
+    })).toBe("local:snapshot-20");
+  });
+
   it("interleaves disk and local versions in newest-first order", () => {
     const documentKey = fileHistoryDocumentKey(snapshot());
     const versions = mergeFileHistoryVersions(

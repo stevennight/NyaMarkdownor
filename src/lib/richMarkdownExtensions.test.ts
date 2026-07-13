@@ -11,6 +11,14 @@ const extensions = createRichMarkdownExtensions(null);
 const markdown = new MarkdownManager({ extensions });
 
 describe("rich Markdown extensions", () => {
+  it("keeps normal URL linking enabled", () => {
+    const link = extensions.find((extension) => extension.name === "link");
+    expect(link?.options).toEqual(expect.objectContaining({
+      autolink: true,
+      linkOnPaste: true
+    }));
+  });
+
   it("keeps paragraphs as the default content of newly inserted table cells", () => {
     const schema = getSchema(extensions);
 
