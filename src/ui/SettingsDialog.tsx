@@ -382,6 +382,13 @@ export function SettingsDialog({
                     onChange={(value) => updateBackupPreference("automaticVersionsPerFile", value)}
                   />
                   <NumberSettingRow
+                    label={t("Safety versions per file")}
+                    value={backupPreferences.safetyVersionsPerFile}
+                    min={1}
+                    max={256}
+                    onChange={(value) => updateBackupPreference("safetyVersionsPerFile", value)}
+                  />
+                  <NumberSettingRow
                     label={t("Manual versions per file")}
                     value={backupPreferences.manualVersionsPerFile}
                     min={1}
@@ -395,6 +402,22 @@ export function SettingsDialog({
                     min={7}
                     max={3650}
                     onChange={(value) => updateBackupPreference("automaticRetentionDays", value)}
+                  />
+                  <NumberSettingRow
+                    label={t("Safety retention")}
+                    suffix={t("days")}
+                    value={backupPreferences.safetyRetentionDays}
+                    min={7}
+                    max={3650}
+                    onChange={(value) => updateBackupPreference("safetyRetentionDays", value)}
+                  />
+                  <NumberSettingRow
+                    label={t("Manual retention")}
+                    suffix={t("days (0 = never)")}
+                    value={backupPreferences.manualRetentionDays}
+                    min={0}
+                    max={3650}
+                    onChange={(value) => updateBackupPreference("manualRetentionDays", value)}
                   />
                   <NumberSettingRow
                     label={t("Orphaned history retention")}

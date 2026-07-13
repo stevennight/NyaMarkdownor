@@ -19,11 +19,14 @@ export const defaultBackupPreferences: BackupPreferences = {
   previousDirectories: [],
   checkpointIntervalMinutes: 10,
   automaticVersionsPerFile: 48,
+  safetyVersionsPerFile: 32,
   manualVersionsPerFile: 32,
   maxTotalFiles: 2048,
   maxTotalSizeMb: 2048,
   maxBackupFileSizeMb: 256,
   automaticRetentionDays: 180,
+  safetyRetentionDays: 365,
+  manualRetentionDays: 0,
   orphanRetentionDays: 365
 };
 
@@ -132,11 +135,14 @@ export function normalizeBackupPreferences(value: Partial<BackupPreferences> | n
     previousDirectories: normalizePreviousDirectories(backup.previousDirectories),
     checkpointIntervalMinutes: clampNumber(backup.checkpointIntervalMinutes, 1, 120, defaultBackupPreferences.checkpointIntervalMinutes),
     automaticVersionsPerFile: clampNumber(backup.automaticVersionsPerFile, 1, 256, defaultBackupPreferences.automaticVersionsPerFile),
+    safetyVersionsPerFile: clampNumber(backup.safetyVersionsPerFile, 1, 256, defaultBackupPreferences.safetyVersionsPerFile),
     manualVersionsPerFile: clampNumber(backup.manualVersionsPerFile, 1, 256, defaultBackupPreferences.manualVersionsPerFile),
     maxTotalFiles: clampNumber(backup.maxTotalFiles, 128, 20000, defaultBackupPreferences.maxTotalFiles),
     maxTotalSizeMb,
     maxBackupFileSizeMb,
     automaticRetentionDays: clampNumber(backup.automaticRetentionDays, 7, 3650, defaultBackupPreferences.automaticRetentionDays),
+    safetyRetentionDays: clampNumber(backup.safetyRetentionDays, 7, 3650, defaultBackupPreferences.safetyRetentionDays),
+    manualRetentionDays: clampNumber(backup.manualRetentionDays, 0, 3650, defaultBackupPreferences.manualRetentionDays),
     orphanRetentionDays: clampNumber(backup.orphanRetentionDays, 7, 3650, defaultBackupPreferences.orphanRetentionDays)
   };
 }

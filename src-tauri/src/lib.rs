@@ -1,12 +1,12 @@
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
@@ -20,7 +20,7 @@ const MAX_CHECKPOINT_INTERVAL_MINUTES: u32 = 24 * 60;
 const MAX_VERSIONS_PER_FILE: usize = 512;
 const MAX_TOTAL_BACKUP_FILES: usize = 100_000;
 const MAX_TOTAL_BACKUP_SIZE_MB: u64 = 1_048_576;
-const MAX_AUTOMATIC_RETENTION_DAYS: u32 = 3_650;
+const MAX_BACKUP_RETENTION_DAYS: u32 = 3_650;
 const MIN_ORPHAN_RETENTION_DAYS: u32 = 7;
 const MAX_ORPHAN_RETENTION_DAYS: u32 = 3_650;
 const MAX_WORKSPACE_FILES: usize = 800;
@@ -104,29 +104,33 @@ struct FileStats {
 enum RequestedBackupKind {
     Automatic,
     Manual,
+    Safety,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 enum BackupKind {
-    Previous,
+    Rolling,
     Automatic,
+    Safety,
     Manual,
 }
 
 impl BackupKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Previous => "previous",
+            Self::Rolling => "rolling",
             Self::Automatic => "automatic",
+            Self::Safety => "safety",
             Self::Manual => "manual",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
         match value {
-            "previous" => Some(Self::Previous),
+            "previous" | "rolling" => Some(Self::Rolling),
             "automatic" => Some(Self::Automatic),
+            "safety" => Some(Self::Safety),
             "manual" => Some(Self::Manual),
             _ => None,
         }
@@ -139,6 +143,8 @@ struct BackupEntry {
     path: String,
     name: String,
     modified_ms: u64,
+    started_at_ms: u64,
+    updated_at_ms: u64,
     size: u64,
     kind: Option<BackupKind>,
 }
@@ -150,16 +156,30 @@ struct BackupSettingsInput {
     previous_directories: Vec<String>,
     checkpoint_interval_minutes: u32,
     automatic_versions_per_file: usize,
+    #[serde(default = "default_safety_versions_per_file")]
+    safety_versions_per_file: usize,
     manual_versions_per_file: usize,
     max_total_files: usize,
     max_total_size_mb: u64,
     max_backup_file_size_mb: u64,
     automatic_retention_days: u32,
+    #[serde(default = "default_safety_retention_days")]
+    safety_retention_days: u32,
+    #[serde(default)]
+    manual_retention_days: u32,
     #[serde(default = "default_orphan_retention_days")]
     orphan_retention_days: u32,
 }
 
 fn default_orphan_retention_days() -> u32 {
+    365
+}
+
+fn default_safety_versions_per_file() -> usize {
+    32
+}
+
+fn default_safety_retention_days() -> u32 {
     365
 }
 
@@ -170,11 +190,14 @@ impl Default for BackupSettingsInput {
             previous_directories: Vec::new(),
             checkpoint_interval_minutes: 10,
             automatic_versions_per_file: 48,
+            safety_versions_per_file: default_safety_versions_per_file(),
             manual_versions_per_file: 32,
             max_total_files: 2_048,
             max_total_size_mb: 2_048,
             max_backup_file_size_mb: 256,
             automatic_retention_days: 180,
+            safety_retention_days: default_safety_retention_days(),
+            manual_retention_days: 0,
             orphan_retention_days: default_orphan_retention_days(),
         }
     }
@@ -186,11 +209,14 @@ struct BackupSettings {
     previous_directories: Vec<PathBuf>,
     checkpoint_interval: Duration,
     automatic_versions_per_file: usize,
+    safety_versions_per_file: usize,
     manual_versions_per_file: usize,
     max_total_files: usize,
     max_total_bytes: u64,
     max_backup_file_bytes: u64,
     automatic_retention: Duration,
+    safety_retention: Duration,
+    manual_retention: Option<Duration>,
     orphan_retention: Duration,
 }
 
@@ -200,7 +226,8 @@ struct BackupOperationLock(Mutex<()>);
 #[derive(Clone, Debug)]
 struct CentralBackupFile {
     path: PathBuf,
-    created_ns: u128,
+    started_ns: u128,
+    updated_ns: u128,
     size: u64,
     kind: BackupKind,
 }
@@ -240,6 +267,17 @@ struct BackupHistoryEntry {
     latest_backup_path: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupStorageUsage {
+    backup_count: usize,
+    total_size: u64,
+    max_backup_count: usize,
+    max_total_size: u64,
+    warning_threshold_percent: u8,
+    warning: bool,
+}
+
 struct BackupRoots {
     active: PathBuf,
     readable: Vec<PathBuf>,
@@ -267,8 +305,8 @@ struct WorkspaceFileEntry {
 
 #[derive(Debug, PartialEq, Eq)]
 struct FileManagerCommandSpec {
-  program: String,
-  args: Vec<String>,
+    program: String,
+    args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,7 +371,8 @@ async fn pick_markdown_files(app: AppHandle) -> Result<Vec<String>, String> {
             .unwrap_or_default();
 
         dialog_file_paths_to_strings(files)
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -345,7 +384,8 @@ async fn pick_markdown_workspace(app: AppHandle) -> Result<Option<String>, Strin
             .blocking_pick_folder()
             .map(dialog_file_path_to_string)
             .transpose()
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -357,7 +397,8 @@ async fn pick_markdown_backup_directory(app: AppHandle) -> Result<Option<String>
             .blocking_pick_folder()
             .map(dialog_file_path_to_string)
             .transpose()
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -367,16 +408,23 @@ async fn pick_local_image_files(app: AppHandle) -> Result<Vec<String>, String> {
             .dialog()
             .file()
             .set_title("Insert Local Images")
-            .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"])
+            .add_filter(
+                "Images",
+                &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"],
+            )
             .blocking_pick_files()
             .unwrap_or_default();
 
         dialog_file_paths_to_strings(files)
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]
-async fn pick_markdown_save_path(app: AppHandle, suggested_path: String) -> Result<Option<String>, String> {
+async fn pick_markdown_save_path(
+    app: AppHandle,
+    suggested_path: String,
+) -> Result<Option<String>, String> {
     run_file_dialog(move || {
         let suggested_path = PathBuf::from(suggested_path);
         let (directory, file_name) = save_dialog_defaults(&suggested_path);
@@ -397,11 +445,15 @@ async fn pick_markdown_save_path(app: AppHandle, suggested_path: String) -> Resu
             .blocking_save_file()
             .map(dialog_file_path_to_string)
             .transpose()
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]
-async fn pick_html_export_path(app: AppHandle, suggested_path: String) -> Result<Option<String>, String> {
+async fn pick_html_export_path(
+    app: AppHandle,
+    suggested_path: String,
+) -> Result<Option<String>, String> {
     run_file_dialog(move || {
         let suggested_path = PathBuf::from(suggested_path);
         let (directory, file_name) = save_dialog_defaults(&suggested_path);
@@ -422,7 +474,8 @@ async fn pick_html_export_path(app: AppHandle, suggested_path: String) -> Result
             .blocking_save_file()
             .map(dialog_file_path_to_string)
             .transpose()
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -434,29 +487,72 @@ fn write_markdown_file(
     expected_stats: Option<FileStats>,
     expected_missing: bool,
     backup_kind: RequestedBackupKind,
+    skip_backup: Option<bool>,
     backup_settings: Option<BackupSettingsInput>,
 ) -> Result<WriteResult, String> {
     let backup_settings = validate_backup_settings(backup_settings.unwrap_or_default())?;
     let path = validate_markdown_path(path)?;
     let _backup_guard = lock_backup_operations(&backup_lock)?;
-    let backup_roots = backup_roots_for_app(&app, &backup_settings, true)?;
     if expected_missing {
         verify_expected_file_missing(&path)?;
     } else if let Some(expected_stats) = expected_stats {
         verify_expected_file_stats(&path, expected_stats)?;
     }
     let source_stats_before_backup = source_stats_before_backup(&path, expected_missing)?;
-    let backup_path = backup_existing_file(&backup_roots, &path, backup_kind, &backup_settings)
-        .map_err(|error| format!("Failed to create backup: {error}"))?;
+    if source_stats_before_backup.is_some()
+        && file_content_matches_bytes(&path, content.as_bytes())
+            .map_err(|error| format!("Failed to compare file before save: {error}"))?
+    {
+        return Ok(WriteResult {
+            backup_path: None,
+            stats: source_stats_before_backup.expect("existing source has stats"),
+        });
+    }
+    let backup_path = if skip_backup.unwrap_or(false) {
+        None
+    } else {
+        let backup_roots = backup_roots_for_app(&app, &backup_settings, true)?;
+        backup_existing_file(&backup_roots, &path, backup_kind, &backup_settings)
+            .map_err(|error| format!("Failed to create backup: {error}"))?
+    };
     verify_source_state_after_backup(&path, source_stats_before_backup)?;
     atomic_write_checked(&path, content.as_bytes(), source_stats_before_backup)
         .map_err(|error| format!("Failed to write file: {error}"))?;
-    let stats = file_stats_for(&path).map_err(|error| format!("Failed to inspect file after save: {error}"))?;
+    let stats = file_stats_for(&path)
+        .map_err(|error| format!("Failed to inspect file after save: {error}"))?;
 
     Ok(WriteResult {
         backup_path: backup_path.map(|path| path.to_string_lossy().to_string()),
         stats,
     })
+}
+
+#[tauri::command]
+fn seal_markdown_backup_rolling(
+    app: AppHandle,
+    backup_lock: State<'_, BackupOperationLock>,
+    source_path: String,
+    backup_settings: Option<BackupSettingsInput>,
+) -> Result<Option<String>, String> {
+    let backup_settings = validate_backup_settings(backup_settings.unwrap_or_default())?;
+    let path = validate_markdown_path(source_path)?;
+    let _backup_guard = lock_backup_operations(&backup_lock)?;
+    let backup_roots = backup_roots_for_app(&app, &backup_settings, true)?;
+    let sealed = seal_latest_rolling_backup(&backup_roots, &path)
+        .map_err(|error| format!("Failed to seal rolling backup: {error}"))?;
+    if let Some(sealed_path) = sealed.as_deref() {
+        if let Err(error) = cleanup_central_backups(
+            &backup_roots,
+            &path,
+            Some(sealed_path),
+            system_time_nanoseconds(SystemTime::now()),
+            false,
+            &backup_settings,
+        ) {
+            eprintln!("Failed to clean old backups after sealing rolling backup: {error}");
+        }
+    }
+    Ok(sealed.map(|path| path.to_string_lossy().to_string()))
 }
 
 #[tauri::command]
@@ -469,7 +565,8 @@ fn create_markdown_file(path: String, content: String) -> Result<WriteResult, St
             format!("Failed to create file: {error}")
         }
     })?;
-    let stats = file_stats_for(&path).map_err(|error| format!("Failed to inspect file after create: {error}"))?;
+    let stats = file_stats_for(&path)
+        .map_err(|error| format!("Failed to inspect file after create: {error}"))?;
 
     Ok(WriteResult {
         backup_path: None,
@@ -480,7 +577,8 @@ fn create_markdown_file(path: String, content: String) -> Result<WriteResult, St
 #[tauri::command]
 fn write_export_file(path: String, content: String) -> Result<(), String> {
     let path = validate_export_path(path)?;
-    atomic_write(&path, content.as_bytes()).map_err(|error| format!("Failed to write export: {error}"))
+    atomic_write(&path, content.as_bytes())
+        .map_err(|error| format!("Failed to write export: {error}"))
 }
 
 #[tauri::command]
@@ -501,8 +599,8 @@ fn existing_markdown_file_stats(path: String) -> Result<Option<FileStats>, Strin
 
 #[tauri::command]
 fn reveal_markdown_file(path: String) -> Result<(), String> {
-  let path = validate_markdown_path(path)?;
-  reveal_path_in_file_manager(&path)
+    let path = validate_markdown_path(path)?;
+    reveal_path_in_file_manager(&path)
 }
 
 #[tauri::command]
@@ -538,8 +636,14 @@ fn list_markdown_backup_histories(
     app: AppHandle,
     backup_lock: State<'_, BackupOperationLock>,
     backup_settings: Option<BackupSettingsInput>,
+    source_paths: Option<Vec<String>>,
 ) -> Result<Vec<BackupHistoryEntry>, String> {
     let backup_settings = validate_backup_settings(backup_settings.unwrap_or_default())?;
+    let source_paths = source_paths
+        .unwrap_or_default()
+        .into_iter()
+        .map(validate_markdown_path)
+        .collect::<Result<Vec<_>, _>>()?;
     let _backup_guard = lock_backup_operations(&backup_lock)?;
     let backup_roots = backup_roots_for_app(&app, &backup_settings, true)?;
     maintain_orphaned_backup_histories(
@@ -548,8 +652,42 @@ fn list_markdown_backup_histories(
         &backup_settings,
     )
     .map_err(|error| format!("Failed to maintain backup histories: {error}"))?;
-    list_backup_histories_in_roots(&backup_roots)
+    list_backup_histories_for_sources_in_roots(&backup_roots, &source_paths)
         .map_err(|error| format!("Failed to read backup histories: {error}"))
+}
+
+#[tauri::command]
+fn markdown_backup_storage_usage(
+    app: AppHandle,
+    backup_lock: State<'_, BackupOperationLock>,
+    backup_settings: Option<BackupSettingsInput>,
+) -> Result<BackupStorageUsage, String> {
+    let backup_settings = validate_backup_settings(backup_settings.unwrap_or_default())?;
+    let _backup_guard = lock_backup_operations(&backup_lock)?;
+    let backup_roots = backup_roots_for_app(&app, &backup_settings, true)?;
+    let backups = scan_all_central_backups_in_roots(&backup_roots)
+        .map_err(|error| format!("Failed to inspect backup storage: {error}"))?;
+    let backup_count = backups.len();
+    let total_size = backups
+        .iter()
+        .fold(0u64, |total, backup| total.saturating_add(backup.size));
+    const WARNING_THRESHOLD_PERCENT: u8 = 80;
+    Ok(BackupStorageUsage {
+        backup_count,
+        total_size,
+        max_backup_count: backup_settings.max_total_files,
+        max_total_size: backup_settings.max_total_bytes,
+        warning_threshold_percent: WARNING_THRESHOLD_PERCENT,
+        warning: usage_reaches_percent(
+            backup_count as u128,
+            backup_settings.max_total_files as u128,
+            WARNING_THRESHOLD_PERCENT,
+        ) || usage_reaches_percent(
+            u128::from(total_size),
+            u128::from(backup_settings.max_total_bytes),
+            WARNING_THRESHOLD_PERCENT,
+        ),
+    })
 }
 
 #[tauri::command]
@@ -565,6 +703,22 @@ fn delete_markdown_backup_history(
     let backup_roots = backup_roots_for_app(&app, &backup_settings, true)?;
     delete_backup_history_in_roots(&backup_roots, &source_path)
         .map_err(|error| format!("Failed to delete backup history: {error}"))
+}
+
+#[tauri::command]
+fn delete_markdown_backup(
+    app: AppHandle,
+    backup_lock: State<'_, BackupOperationLock>,
+    source_path: String,
+    backup_path: String,
+    backup_settings: Option<BackupSettingsInput>,
+) -> Result<(), String> {
+    let backup_settings = validate_backup_settings(backup_settings.unwrap_or_default())?;
+    let source_path = validate_markdown_path(source_path)?;
+    let _backup_guard = lock_backup_operations(&backup_lock)?;
+    let backup_roots = backup_roots_for_app(&app, &backup_settings, true)?;
+    delete_backup_in_roots(&backup_roots, &source_path, backup_path)
+        .map_err(|error| format!("Failed to delete backup: {error}"))
 }
 
 #[tauri::command]
@@ -628,8 +782,10 @@ fn write_app_state_file(app: AppHandle, name: String, content: String) -> Result
         .parent()
         .ok_or_else(|| "App state path has no parent folder.".to_string())?;
 
-    fs::create_dir_all(parent).map_err(|error| format!("Failed to prepare app state folder: {error}"))?;
-    atomic_write(&path, content.as_bytes()).map_err(|error| format!("Failed to write app state: {error}"))
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Failed to prepare app state folder: {error}"))?;
+    atomic_write(&path, content.as_bytes())
+        .map_err(|error| format!("Failed to write app state: {error}"))
 }
 
 fn app_state_file_path(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
@@ -654,6 +810,11 @@ fn validate_backup_settings(input: BackupSettingsInput) -> Result<BackupSettings
             "Automatic backup versions must be between 1 and {MAX_VERSIONS_PER_FILE}."
         ));
     }
+    if !(1..=MAX_VERSIONS_PER_FILE).contains(&input.safety_versions_per_file) {
+        return Err(format!(
+            "Safety backup versions must be between 1 and {MAX_VERSIONS_PER_FILE}."
+        ));
+    }
     if !(1..=MAX_VERSIONS_PER_FILE).contains(&input.manual_versions_per_file) {
         return Err(format!(
             "Manual backup versions must be between 1 and {MAX_VERSIONS_PER_FILE}."
@@ -674,9 +835,19 @@ fn validate_backup_settings(input: BackupSettingsInput) -> Result<BackupSettings
             "Maximum backup file size must be between 1 and {MAX_TOTAL_BACKUP_SIZE_MB} MiB."
         ));
     }
-    if !(1..=MAX_AUTOMATIC_RETENTION_DAYS).contains(&input.automatic_retention_days) {
+    if !(1..=MAX_BACKUP_RETENTION_DAYS).contains(&input.automatic_retention_days) {
         return Err(format!(
-            "Automatic backup retention must be between 1 and {MAX_AUTOMATIC_RETENTION_DAYS} days."
+            "Automatic backup retention must be between 1 and {MAX_BACKUP_RETENTION_DAYS} days."
+        ));
+    }
+    if !(1..=MAX_BACKUP_RETENTION_DAYS).contains(&input.safety_retention_days) {
+        return Err(format!(
+            "Safety backup retention must be between 1 and {MAX_BACKUP_RETENTION_DAYS} days."
+        ));
+    }
+    if input.manual_retention_days > MAX_BACKUP_RETENTION_DAYS {
+        return Err(format!(
+            "Manual backup retention must be 0 or at most {MAX_BACKUP_RETENTION_DAYS} days."
         ));
     }
     if !(MIN_ORPHAN_RETENTION_DAYS..=MAX_ORPHAN_RETENTION_DAYS)
@@ -712,15 +883,22 @@ fn validate_backup_settings(input: BackupSettingsInput) -> Result<BackupSettings
         previous_directories,
         checkpoint_interval: Duration::from_secs(u64::from(input.checkpoint_interval_minutes) * 60),
         automatic_versions_per_file: input.automatic_versions_per_file,
+        safety_versions_per_file: input.safety_versions_per_file,
         manual_versions_per_file: input.manual_versions_per_file,
         max_total_files: input.max_total_files,
         max_total_bytes: input.max_total_size_mb * MIB,
-        max_backup_file_bytes: input
-            .max_backup_file_size_mb
-            .min(input.max_total_size_mb)
-            * MIB,
-        automatic_retention: Duration::from_secs(u64::from(input.automatic_retention_days) * 24 * 60 * 60),
-        orphan_retention: Duration::from_secs(u64::from(input.orphan_retention_days) * 24 * 60 * 60),
+        max_backup_file_bytes: input.max_backup_file_size_mb.min(input.max_total_size_mb) * MIB,
+        automatic_retention: Duration::from_secs(
+            u64::from(input.automatic_retention_days) * 24 * 60 * 60,
+        ),
+        safety_retention: Duration::from_secs(
+            u64::from(input.safety_retention_days) * 24 * 60 * 60,
+        ),
+        manual_retention: (input.manual_retention_days > 0)
+            .then(|| Duration::from_secs(u64::from(input.manual_retention_days) * 24 * 60 * 60)),
+        orphan_retention: Duration::from_secs(
+            u64::from(input.orphan_retention_days) * 24 * 60 * 60,
+        ),
     })
 }
 
@@ -779,7 +957,12 @@ fn backup_roots_from_default(
     let mut seen = HashSet::new();
     for root in std::iter::once(active.clone())
         .chain(std::iter::once(default_root))
-        .chain(settings.previous_directories.iter().map(|directory| configured_backup_root(directory)))
+        .chain(
+            settings
+                .previous_directories
+                .iter()
+                .map(|directory| configured_backup_root(directory)),
+        )
     {
         let key = backup_root_identity(&root);
         if seen.insert(key) {
@@ -913,7 +1096,8 @@ fn local_path_key(path: &str) -> String {
 }
 
 fn reveal_path_in_file_manager(path: &Path) -> Result<(), String> {
-    let metadata = fs::metadata(path).map_err(|error| format!("Failed to inspect file before reveal: {error}"))?;
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Failed to inspect file before reveal: {error}"))?;
     let command = reveal_command_for_platform(path, metadata.is_dir(), std::env::consts::OS)?;
 
     Command::new(&command.program)
@@ -949,7 +1133,11 @@ fn file_association_command(
     }
 }
 
-fn reveal_command_for_platform(path: &Path, is_dir: bool, platform: &str) -> Result<FileManagerCommandSpec, String> {
+fn reveal_command_for_platform(
+    path: &Path,
+    is_dir: bool,
+    platform: &str,
+) -> Result<FileManagerCommandSpec, String> {
     match platform {
         "windows" => Ok(FileManagerCommandSpec {
             program: "explorer.exe".to_string(),
@@ -1010,7 +1198,9 @@ fn save_dialog_defaults(suggested_path: &Path) -> (Option<PathBuf>, Option<Strin
     (directory, file_name)
 }
 
-fn dialog_file_paths_to_strings(paths: Vec<tauri_plugin_dialog::FilePath>) -> Result<Vec<String>, String> {
+fn dialog_file_paths_to_strings(
+    paths: Vec<tauri_plugin_dialog::FilePath>,
+) -> Result<Vec<String>, String> {
     paths.into_iter().map(dialog_file_path_to_string).collect()
 }
 
@@ -1053,7 +1243,10 @@ fn verify_expected_file_missing(path: &Path) -> Result<(), String> {
     }
 }
 
-fn source_stats_before_backup(path: &Path, expected_missing: bool) -> Result<Option<FileStats>, String> {
+fn source_stats_before_backup(
+    path: &Path,
+    expected_missing: bool,
+) -> Result<Option<FileStats>, String> {
     match file_stats_for(path) {
         Ok(_) if expected_missing => Err(FILE_CHANGED_DURING_SAVE_ERROR.to_string()),
         Ok(stats) => Ok(Some(stats)),
@@ -1075,7 +1268,12 @@ fn verify_source_state_after_backup(
     }
 }
 
-fn collect_workspace_files(root_path: &Path, folder: &Path, files: &mut Vec<WorkspaceFileEntry>, truncated: &mut bool) {
+fn collect_workspace_files(
+    root_path: &Path,
+    folder: &Path,
+    files: &mut Vec<WorkspaceFileEntry>,
+    truncated: &mut bool,
+) {
     if files.len() >= MAX_WORKSPACE_FILES {
         *truncated = true;
         return;
@@ -1086,12 +1284,7 @@ fn collect_workspace_files(root_path: &Path, folder: &Path, files: &mut Vec<Work
     };
 
     let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by_key(|entry| {
-        entry
-            .file_name()
-            .to_string_lossy()
-            .to_ascii_lowercase()
-    });
+    entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
 
     for entry in entries {
         if files.len() >= MAX_WORKSPACE_FILES {
@@ -1148,7 +1341,10 @@ fn should_skip_workspace_dir(name: &str) -> bool {
     )
 }
 
-fn list_backups_for_source(backup_roots: &BackupRoots, source_path: &Path) -> io::Result<Vec<BackupEntry>> {
+fn list_backups_for_source(
+    backup_roots: &BackupRoots,
+    source_path: &Path,
+) -> io::Result<Vec<BackupEntry>> {
     let mut backups = Vec::new();
     for backup_root in &backup_roots.readable {
         if let Err(error) = append_central_backup_entries(backup_root, source_path, &mut backups) {
@@ -1186,14 +1382,17 @@ fn append_central_backup_entries(
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        let Some((kind, created_ns)) = parse_central_backup_name(source_path, name) else {
+        let Some((kind, started_ns, updated_ns)) = parse_central_backup_name(source_path, name)
+        else {
             continue;
         };
         let metadata = entry.metadata()?;
         backups.push(BackupEntry {
             path: path.to_string_lossy().to_string(),
             name: name.to_string(),
-            modified_ms: nanoseconds_to_milliseconds(created_ns),
+            modified_ms: nanoseconds_to_milliseconds(updated_ns),
+            started_at_ms: nanoseconds_to_milliseconds(started_ns),
+            updated_at_ms: nanoseconds_to_milliseconds(updated_ns),
             size: metadata.len(),
             kind: Some(kind),
         });
@@ -1202,7 +1401,10 @@ fn append_central_backup_entries(
     Ok(())
 }
 
-fn append_legacy_backup_entries(source_path: &Path, backups: &mut Vec<BackupEntry>) -> io::Result<()> {
+fn append_legacy_backup_entries(
+    source_path: &Path,
+    backups: &mut Vec<BackupEntry>,
+) -> io::Result<()> {
     let backup_dir = legacy_backup_dir_for_source(source_path);
     if !backup_dir.exists() {
         return Ok(());
@@ -1221,10 +1423,13 @@ fn append_legacy_backup_entries(source_path: &Path, backups: &mut Vec<BackupEntr
             continue;
         }
         let metadata = entry.metadata()?;
+        let timestamp = modified_ms(metadata.modified().unwrap_or(UNIX_EPOCH));
         backups.push(BackupEntry {
             path: path.to_string_lossy().to_string(),
             name: name.to_string(),
-            modified_ms: modified_ms(metadata.modified().unwrap_or(UNIX_EPOCH)),
+            modified_ms: timestamp,
+            started_at_ms: timestamp,
+            updated_at_ms: timestamp,
             size: metadata.len(),
             kind: None,
         });
@@ -1233,7 +1438,10 @@ fn append_legacy_backup_entries(source_path: &Path, backups: &mut Vec<BackupEntr
     Ok(())
 }
 
-fn list_backup_histories_in_roots(backup_roots: &BackupRoots) -> io::Result<Vec<BackupHistoryEntry>> {
+fn list_backup_histories_for_sources_in_roots(
+    backup_roots: &BackupRoots,
+    source_paths: &[PathBuf],
+) -> io::Result<Vec<BackupHistoryEntry>> {
     let mut histories = HashMap::<String, BackupHistoryEntry>::new();
     for backup_root in &backup_roots.readable {
         if let Err(error) = append_backup_histories(backup_root, &mut histories) {
@@ -1241,6 +1449,24 @@ fn list_backup_histories_in_roots(backup_roots: &BackupRoots) -> io::Result<Vec<
                 return Err(error);
             }
         }
+    }
+
+    let mut known_sources = histories
+        .values()
+        .map(|history| {
+            (
+                local_path_key(&history.source_path),
+                PathBuf::from(&history.source_path),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    for source_path in source_paths {
+        known_sources
+            .entry(local_path_key(&source_path.to_string_lossy()))
+            .or_insert_with(|| source_path.clone());
+    }
+    for source_path in known_sources.into_values() {
+        append_legacy_backup_history(&source_path, &mut histories)?;
     }
 
     let mut histories = histories.into_values().collect::<Vec<_>>();
@@ -1251,6 +1477,51 @@ fn list_backup_histories_in_roots(backup_roots: &BackupRoots) -> io::Result<Vec<
             .then_with(|| left.source_path.cmp(&right.source_path))
     });
     Ok(histories)
+}
+
+fn append_legacy_backup_history(
+    source_path: &Path,
+    histories: &mut HashMap<String, BackupHistoryEntry>,
+) -> io::Result<()> {
+    let mut backups = Vec::new();
+    append_legacy_backup_entries(source_path, &mut backups)?;
+    let Some(latest) = backups.iter().max_by(|left, right| {
+        left.modified_ms
+            .cmp(&right.modified_ms)
+            .then_with(|| left.path.cmp(&right.path))
+    }) else {
+        return Ok(());
+    };
+    let source_path_text = source_path.to_string_lossy().to_string();
+    let source_exists = source_path_state_with_probe(source_path, |path| fs::metadata(path))
+        .source_exists_for_listing();
+    let history = histories
+        .entry(local_path_key(&source_path_text))
+        .or_insert_with(|| BackupHistoryEntry {
+            source_path: source_path_text,
+            file_name: source_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("document.md")
+                .to_string(),
+            latest_ms: 0,
+            backup_count: 0,
+            total_size: 0,
+            source_exists,
+            latest_backup_path: None,
+        });
+    history.source_exists |= source_exists;
+    history.backup_count = history.backup_count.saturating_add(backups.len());
+    history.total_size = history.total_size.saturating_add(
+        backups
+            .iter()
+            .fold(0u64, |total, backup| total.saturating_add(backup.size)),
+    );
+    if latest.modified_ms >= history.latest_ms {
+        history.latest_ms = latest.modified_ms;
+        history.latest_backup_path = Some(latest.path.clone());
+    }
+    Ok(())
 }
 
 fn append_backup_histories(
@@ -1289,12 +1560,13 @@ where
             continue;
         }
         let backups = scan_central_backups_for_source(&bucket_dir, &source_path)?;
-        let Some(latest) = backups.iter().max_by_key(|backup| backup.created_ns) else {
+        let Some(latest) = backups.iter().max_by_key(|backup| backup.updated_ns) else {
             continue;
         };
         let key = local_path_key(&metadata.source_path);
-        let candidate_source_exists = source_path_state_with_probe(&source_path, &mut *source_probe)
-            .source_exists_for_listing();
+        let candidate_source_exists =
+            source_path_state_with_probe(&source_path, &mut *source_probe)
+                .source_exists_for_listing();
         let history = histories.entry(key).or_insert_with(|| BackupHistoryEntry {
             source_path: metadata.source_path.clone(),
             file_name: metadata.file_name.clone(),
@@ -1306,11 +1578,13 @@ where
         });
         history.source_exists |= candidate_source_exists;
         history.backup_count = history.backup_count.saturating_add(backups.len());
-        history.total_size = history
-            .total_size
-            .saturating_add(backups.iter().fold(0u64, |total, backup| total.saturating_add(backup.size)));
+        history.total_size = history.total_size.saturating_add(
+            backups
+                .iter()
+                .fold(0u64, |total, backup| total.saturating_add(backup.size)),
+        );
         let _last_seen_ms = metadata.last_seen_ms;
-        let latest_ms = nanoseconds_to_milliseconds(latest.created_ns);
+        let latest_ms = nanoseconds_to_milliseconds(latest.updated_ns);
         if latest_ms >= history.latest_ms {
             history.latest_ms = latest_ms;
             history.latest_backup_path = Some(latest.path.to_string_lossy().to_string());
@@ -1347,7 +1621,10 @@ fn validate_backup_path(
         return Err("Backup is outside the current file backup folder.".to_string());
     }
 
-    let Some(name) = canonical_backup.file_name().and_then(|value| value.to_str()) else {
+    let Some(name) = canonical_backup
+        .file_name()
+        .and_then(|value| value.to_str())
+    else {
         return Err("Backup file has no name.".to_string());
     };
     let valid_name = (in_central_dir && parse_central_backup_name(source_path, name).is_some())
@@ -1399,8 +1676,9 @@ fn decode_text_bytes(bytes: Vec<u8>) -> Result<String, String> {
         Err(error) => {
             let utf8_error = error.utf8_error();
             let bytes = error.into_bytes();
-            decode_platform_legacy_text(&bytes)
-                .map_err(|fallback_error| format!("File is not valid UTF-8 or UTF-16 text: {utf8_error}; {fallback_error}"))
+            decode_platform_legacy_text(&bytes).map_err(|fallback_error| {
+                format!("File is not valid UTF-8 or UTF-16 text: {utf8_error}; {fallback_error}")
+            })
         }
     }
 }
@@ -1437,18 +1715,27 @@ fn decode_platform_legacy_text(bytes: &[u8]) -> Result<String, String> {
 
 #[cfg(windows)]
 fn decode_windows_code_page(bytes: &[u8], code_page: u32) -> Result<String, String> {
-    decode_windows_code_page_with_flags(bytes, code_page, windows_sys::Win32::Globalization::MB_ERR_INVALID_CHARS)
+    decode_windows_code_page_with_flags(
+        bytes,
+        code_page,
+        windows_sys::Win32::Globalization::MB_ERR_INVALID_CHARS,
+    )
 }
 
 #[cfg(windows)]
-fn decode_windows_code_page_with_flags(bytes: &[u8], code_page: u32, flags: u32) -> Result<String, String> {
+fn decode_windows_code_page_with_flags(
+    bytes: &[u8],
+    code_page: u32,
+    flags: u32,
+) -> Result<String, String> {
     use windows_sys::Win32::Globalization::MultiByteToWideChar;
 
     if bytes.is_empty() {
         return Ok(String::new());
     }
 
-    let input_len = i32::try_from(bytes.len()).map_err(|_| "file is too large to decode with Windows code pages".to_string())?;
+    let input_len = i32::try_from(bytes.len())
+        .map_err(|_| "file is too large to decode with Windows code pages".to_string())?;
     let required_len = unsafe {
         MultiByteToWideChar(
             code_page,
@@ -1538,12 +1825,7 @@ fn atomic_write_checked(
     content: &[u8],
     expected_source_stats: Option<FileStats>,
 ) -> std::io::Result<()> {
-    atomic_write_checked_with_hook(
-        path,
-        content,
-        expected_source_stats,
-        |_, _| Ok(()),
-    )
+    atomic_write_checked_with_hook(path, content, expected_source_stats, |_, _| Ok(()))
 }
 
 fn atomic_write_checked_with_hook<F>(
@@ -1635,16 +1917,10 @@ where
                     Ok(())
                 }
                 Err(error) => {
-                    let restore = restore_rollback_no_clobber(
-                        &stage.rollback_path,
-                        path,
-                        &hard_link,
-                    );
-                    let (error, retain_rollback) = checked_write_failure(
-                        error,
-                        restore,
-                        &stage.rollback_path,
-                    );
+                    let restore =
+                        restore_rollback_no_clobber(&stage.rollback_path, path, &hard_link);
+                    let (error, retain_rollback) =
+                        checked_write_failure(error, restore, &stage.rollback_path);
                     cleanup_checked_write_stage(&stage, !retain_rollback);
                     Err(error)
                 }
@@ -1675,7 +1951,10 @@ fn create_checked_write_stage(
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 nonce = nonce.checked_add(1).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::AlreadyExists, "Temporary filename space is exhausted.")
+                    io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "Temporary filename space is exhausted.",
+                    )
                 })?;
                 continue;
             }
@@ -1888,7 +2167,13 @@ fn backup_existing_file(
     requested_kind: RequestedBackupKind,
     settings: &BackupSettings,
 ) -> io::Result<Option<PathBuf>> {
-    backup_existing_file_at(backup_roots, path, requested_kind, SystemTime::now(), settings)
+    backup_existing_file_at(
+        backup_roots,
+        path,
+        requested_kind,
+        SystemTime::now(),
+        settings,
+    )
 }
 
 fn backup_existing_file_at(
@@ -1927,46 +2212,163 @@ where
     ensure_backup_file_size_allowed(source_metadata.len(), settings)?;
     let expected_stats = file_stats_for(path)?;
     ensure_backup_file_size_allowed(expected_stats.size, settings)?;
-    let allow_manual_eviction = requested_kind == RequestedBackupKind::Manual;
     let backup_dir = central_backup_dir_for_source(&backup_roots.active, path);
     let _ = safe_existing_backup_bucket(&backup_roots.active, &backup_dir)?;
     cleanup_partial_backup_files_in_roots(backup_roots)?;
-    enforce_global_backup_limits(
-        backup_roots,
-        1,
-        expected_stats.size,
-        None,
-        allow_manual_eviction,
-        settings,
-    )?;
-
     let now_ns = system_time_nanoseconds(now);
     prepare_safe_backup_bucket(&backup_roots.active, &backup_dir)?;
-    let existing = scan_central_backups_for_source(&backup_dir, path)?;
-    let kind = match requested_kind {
-        RequestedBackupKind::Manual => BackupKind::Manual,
-        RequestedBackupKind::Automatic => {
-            let latest_checkpoint = existing
-                .iter()
-                .filter(|backup| backup.kind == BackupKind::Automatic)
-                .max_by_key(|backup| backup.created_ns);
-            if latest_checkpoint.is_some_and(|backup| {
-                now_ns.saturating_sub(backup.created_ns) < settings.checkpoint_interval.as_nanos()
-            }) {
-                BackupKind::Previous
+    let mut existing = scan_central_backups_for_source(&backup_dir, path)?;
+
+    let fixed_kind = match requested_kind {
+        RequestedBackupKind::Automatic => None,
+        RequestedBackupKind::Manual => Some(BackupKind::Manual),
+        RequestedBackupKind::Safety => Some(BackupKind::Safety),
+    };
+    // User-created checkpoints are never silently removed. A full history must be
+    // resolved by the caller before another manual checkpoint can be persisted.
+    let allow_manual_eviction = false;
+
+    let (backup_path, started_ns, updated_ns, replaced_rolling) = if let Some(fixed_kind) =
+        fixed_kind
+    {
+        let duplicate = find_duplicate_fixed_backup(path, &existing)?.cloned();
+        if fixed_kind == BackupKind::Manual
+            && duplicate
+                .as_ref()
+                .is_none_or(|backup| backup.kind != BackupKind::Manual)
+        {
+            ensure_manual_checkpoint_slot(backup_roots, path, now_ns, settings)?;
+        }
+
+        let latest_rolling = latest_backup_of_kind(&existing, BackupKind::Rolling).cloned();
+        if let Some(rolling) = latest_rolling.as_ref() {
+            if files_have_same_content(path, &rolling.path)? {
+                if duplicate.is_some() {
+                    fs::remove_file(&rolling.path)?;
+                    existing.retain(|backup| backup.path != rolling.path);
+                }
             } else {
-                BackupKind::Automatic
+                let _ = seal_rolling_backup_file(&backup_dir, path, rolling)?;
+                existing.retain(|backup| backup.path != rolling.path);
             }
         }
-    };
 
-    let (backup_path, created_ns) = create_central_backup(
-        &backup_dir,
-        path,
-        kind,
-        now,
-        expected_stats,
-    )?;
+        if let Some(duplicate) = duplicate {
+            if backup_retention_priority(duplicate.kind) >= backup_retention_priority(fixed_kind) {
+                write_metadata(&backup_dir, path, now)?;
+                return Ok(Some(duplicate.path.clone()));
+            }
+            let fixed_path = promote_backup_kind(&backup_dir, path, &duplicate, fixed_kind)?;
+            existing.retain(|backup| backup.path != duplicate.path);
+            existing.push(CentralBackupFile {
+                path: fixed_path.clone(),
+                started_ns: duplicate.started_ns,
+                updated_ns: duplicate.updated_ns,
+                size: duplicate.size,
+                kind: fixed_kind,
+            });
+            write_metadata(&backup_dir, path, now)?;
+            if let Err(error) = cleanup_central_backups(
+                backup_roots,
+                path,
+                Some(&fixed_path),
+                duplicate.updated_ns,
+                allow_manual_eviction,
+                settings,
+            ) {
+                eprintln!("Failed to clean old backups: {error}");
+            }
+            return Ok(Some(fixed_path));
+        }
+
+        let latest_rolling = latest_backup_of_kind(&existing, BackupKind::Rolling).cloned();
+        if let Some(rolling) = latest_rolling.as_ref() {
+            let fixed_path = promote_backup_kind(&backup_dir, path, rolling, fixed_kind)?;
+            existing.retain(|backup| backup.path != rolling.path);
+            (fixed_path, rolling.updated_ns, rolling.updated_ns, None)
+        } else {
+            enforce_global_backup_limits(
+                backup_roots,
+                1,
+                expected_stats.size,
+                None,
+                now_ns,
+                allow_manual_eviction,
+                settings,
+            )?;
+            let (path, nonce) =
+                create_central_backup(&backup_dir, path, fixed_kind, now, expected_stats)?;
+            (path, nonce, nonce, None)
+        }
+    } else {
+        let latest_rolling = latest_backup_of_kind(&existing, BackupKind::Rolling).cloned();
+        if let Some(rolling) = latest_rolling.as_ref() {
+            let interval_elapsed = now_ns.saturating_sub(rolling.started_ns)
+                >= settings.checkpoint_interval.as_nanos();
+            if interval_elapsed {
+                let _ = seal_rolling_backup_file(&backup_dir, path, rolling)?;
+                existing.retain(|backup| backup.path != rolling.path);
+                existing = scan_central_backups_for_source(&backup_dir, path)?;
+                if let Some(duplicate) = find_duplicate_fixed_backup(path, &existing)? {
+                    write_metadata(&backup_dir, path, now)?;
+                    return Ok(Some(duplicate.path.clone()));
+                }
+                enforce_global_backup_limits(
+                    backup_roots,
+                    1,
+                    expected_stats.size,
+                    None,
+                    now_ns,
+                    false,
+                    settings,
+                )?;
+                let (path, started_ns, updated_ns) =
+                    create_rolling_backup(&backup_dir, path, now_ns, now_ns, expected_stats)?;
+                (path, started_ns, updated_ns, None)
+            } else if files_have_same_content(path, &rolling.path)? {
+                return Ok(Some(rolling.path.clone()));
+            } else if let Some(duplicate) = find_duplicate_fixed_backup(path, &existing)? {
+                let _ = seal_rolling_backup_file(&backup_dir, path, rolling)?;
+                write_metadata(&backup_dir, path, now)?;
+                return Ok(Some(duplicate.path.clone()));
+            } else {
+                enforce_global_backup_limits(
+                    backup_roots,
+                    0,
+                    expected_stats.size.saturating_sub(rolling.size),
+                    Some(&rolling.path),
+                    now_ns,
+                    false,
+                    settings,
+                )?;
+                let (path, started_ns, updated_ns) = create_rolling_backup(
+                    &backup_dir,
+                    path,
+                    rolling.started_ns,
+                    now_ns,
+                    expected_stats,
+                )?;
+                (path, started_ns, updated_ns, Some(rolling.path.clone()))
+            }
+        } else {
+            if let Some(duplicate) = find_duplicate_fixed_backup(path, &existing)? {
+                write_metadata(&backup_dir, path, now)?;
+                return Ok(Some(duplicate.path.clone()));
+            }
+            enforce_global_backup_limits(
+                backup_roots,
+                1,
+                expected_stats.size,
+                None,
+                now_ns,
+                false,
+                settings,
+            )?;
+            let (path, started_ns, updated_ns) =
+                create_rolling_backup(&backup_dir, path, now_ns, now_ns, expected_stats)?;
+            (path, started_ns, updated_ns, None)
+        }
+    };
     if let Err(error) = write_metadata(&backup_dir, path, now) {
         let _ = fs::remove_file(&backup_path);
         if validate_existing_backup_bucket(&backup_roots.active, &backup_dir).is_ok() {
@@ -1974,31 +2376,33 @@ where
         }
         return Err(error);
     }
-    if kind != BackupKind::Previous {
-        match scan_central_backup_dir(&backup_dir) {
-            Ok(backups) => {
-                let previous = backups
-                    .into_iter()
-                    .filter(|backup| backup.kind == BackupKind::Previous)
-                    .collect::<Vec<_>>();
-                if let Err(error) = remove_oldest_excess(previous, 0, Some(&backup_path)) {
-                    eprintln!("Failed to retire the previous rolling backup: {error}");
-                }
-            }
-            Err(error) => eprintln!("Failed to inspect rolling backups: {error}"),
+    if let Some(replaced_rolling) = replaced_rolling {
+        if let Err(error) = fs::remove_file(&replaced_rolling) {
+            eprintln!("Failed to retire replaced rolling backup: {error}");
         }
     }
     if let Err(error) = cleanup_central_backups(
         backup_roots,
         path,
         Some(&backup_path),
-        created_ns,
+        updated_ns,
         allow_manual_eviction,
         settings,
     ) {
         eprintln!("Failed to clean old backups: {error}");
     }
+    let _ = started_ns;
     Ok(Some(backup_path))
+}
+
+fn latest_backup_of_kind(
+    backups: &[CentralBackupFile],
+    kind: BackupKind,
+) -> Option<&CentralBackupFile> {
+    backups
+        .iter()
+        .filter(|backup| backup.kind == kind)
+        .max_by_key(|backup| (backup.updated_ns, backup.started_ns))
 }
 
 fn ensure_backup_file_size_allowed(size: u64, settings: &BackupSettings) -> io::Result<()> {
@@ -2015,6 +2419,175 @@ fn ensure_backup_file_size_allowed(size: u64, settings: &BackupSettings) -> io::
     ))
 }
 
+fn file_content_matches_bytes(path: &Path, expected: &[u8]) -> io::Result<bool> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() != expected.len() as u64 {
+        return Ok(false);
+    }
+    let mut file = fs::File::open(path)?;
+    let mut offset = 0usize;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(offset == expected.len());
+        }
+        if expected.get(offset..offset + count) != Some(&buffer[..count]) {
+            return Ok(false);
+        }
+        offset += count;
+    }
+}
+
+fn files_have_same_content(left: &Path, right: &Path) -> io::Result<bool> {
+    let left_metadata = fs::metadata(left)?;
+    let right_metadata = fs::metadata(right)?;
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+    let mut left = fs::File::open(left)?;
+    let mut right = fs::File::open(right)?;
+    let mut left_buffer = [0u8; 64 * 1024];
+    let mut right_buffer = [0u8; 64 * 1024];
+    loop {
+        let left_count = left.read(&mut left_buffer)?;
+        let right_count = right.read(&mut right_buffer)?;
+        if left_count != right_count {
+            return Ok(false);
+        }
+        if left_count == 0 {
+            return Ok(true);
+        }
+        if left_buffer[..left_count] != right_buffer[..right_count] {
+            return Ok(false);
+        }
+    }
+}
+
+fn find_duplicate_fixed_backup<'a>(
+    source_path: &Path,
+    backups: &'a [CentralBackupFile],
+) -> io::Result<Option<&'a CentralBackupFile>> {
+    let mut duplicate = None;
+    for backup in backups
+        .iter()
+        .filter(|backup| backup.kind != BackupKind::Rolling)
+    {
+        if !files_have_same_content(source_path, &backup.path)? {
+            continue;
+        }
+        if duplicate.is_none_or(|current: &CentralBackupFile| {
+            backup_retention_priority(backup.kind) > backup_retention_priority(current.kind)
+        }) {
+            duplicate = Some(backup);
+        }
+    }
+    Ok(duplicate)
+}
+
+fn ensure_manual_checkpoint_slot(
+    backup_roots: &BackupRoots,
+    source_path: &Path,
+    now_ns: u128,
+    settings: &BackupSettings,
+) -> io::Result<()> {
+    let manual_count = scan_source_backups_in_roots(backup_roots, source_path)?
+        .into_iter()
+        .filter(|backup| {
+            backup.kind == BackupKind::Manual && !backup_expired(backup, now_ns, settings)
+        })
+        .count();
+    if manual_count < settings.manual_versions_per_file {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::StorageFull,
+        "Backup storage limits cannot accommodate this recovery copy: the configured manual checkpoint limit for this file has been reached.",
+    ))
+}
+
+fn seal_latest_rolling_backup(
+    backup_roots: &BackupRoots,
+    source_path: &Path,
+) -> io::Result<Option<PathBuf>> {
+    let backup_dir = central_backup_dir_for_source(&backup_roots.active, source_path);
+    let Some(backup_dir) = safe_existing_backup_bucket(&backup_roots.active, &backup_dir)? else {
+        return Ok(None);
+    };
+    let backups = scan_central_backups_for_source(&backup_dir, source_path)?;
+    let Some(rolling) = latest_backup_of_kind(&backups, BackupKind::Rolling) else {
+        return Ok(None);
+    };
+    let sealed = seal_rolling_backup_file(&backup_dir, source_path, rolling)?;
+    for backup in backups
+        .iter()
+        .filter(|backup| backup.kind == BackupKind::Rolling && backup.path != rolling.path)
+    {
+        fs::remove_file(&backup.path)?;
+    }
+    Ok(Some(sealed))
+}
+
+fn seal_rolling_backup_file(
+    backup_dir: &Path,
+    source_path: &Path,
+    rolling: &CentralBackupFile,
+) -> io::Result<PathBuf> {
+    for existing in scan_central_backups_for_source(backup_dir, source_path)?
+        .into_iter()
+        .filter(|backup| backup.kind != BackupKind::Rolling && backup.path != rolling.path)
+    {
+        if files_have_same_content(&rolling.path, &existing.path)? {
+            fs::remove_file(&rolling.path)?;
+            return Ok(existing.path);
+        }
+    }
+    promote_backup_kind(backup_dir, source_path, rolling, BackupKind::Automatic)
+}
+
+fn promote_backup_kind(
+    backup_dir: &Path,
+    source_path: &Path,
+    backup: &CentralBackupFile,
+    target_kind: BackupKind,
+) -> io::Result<PathBuf> {
+    debug_assert!(target_kind != BackupKind::Rolling);
+    let mut nonce = backup.updated_ns;
+    loop {
+        let target = central_backup_path(backup_dir, source_path, target_kind, nonce, nonce);
+        if target.exists() {
+            nonce = nonce.checked_add(1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "Backup timestamp space is exhausted.",
+                )
+            })?;
+            continue;
+        }
+        fs::rename(&backup.path, &target)?;
+        let _ = fs::File::open(backup_dir).and_then(|directory| directory.sync_all());
+        return Ok(target);
+    }
+}
+
+fn create_rolling_backup(
+    backup_dir: &Path,
+    source_path: &Path,
+    started_ns: u128,
+    updated_ns: u128,
+    expected_stats: FileStats,
+) -> io::Result<(PathBuf, u128, u128)> {
+    let (path, actual_updated_ns) = create_central_backup_at_times(
+        backup_dir,
+        source_path,
+        BackupKind::Rolling,
+        started_ns,
+        updated_ns,
+        expected_stats,
+    )?;
+    Ok((path, started_ns, actual_updated_ns))
+}
+
 fn create_central_backup(
     backup_dir: &Path,
     source_path: &Path,
@@ -2022,16 +2595,35 @@ fn create_central_backup(
     now: SystemTime,
     expected_stats: FileStats,
 ) -> io::Result<(PathBuf, u128)> {
-    let mut nonce = system_time_nanoseconds(now);
+    let nonce = system_time_nanoseconds(now);
+    let (path, actual_nonce) = create_central_backup_at_times(
+        backup_dir,
+        source_path,
+        kind,
+        nonce,
+        nonce,
+        expected_stats,
+    )?;
+    Ok((path, actual_nonce))
+}
+
+fn create_central_backup_at_times(
+    backup_dir: &Path,
+    source_path: &Path,
+    kind: BackupKind,
+    started_ns: u128,
+    updated_ns: u128,
+    expected_stats: FileStats,
+) -> io::Result<(PathBuf, u128)> {
+    let mut nonce = updated_ns;
     loop {
-        let backup_path = backup_dir.join(format!(
-            "{}{}.{nonce}.bak",
-            backup_prefix_for_source(source_path),
-            kind.as_str()
-        ));
+        let backup_path = central_backup_path(backup_dir, source_path, kind, started_ns, nonce);
         if backup_path.exists() {
             nonce = nonce.checked_add(1).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::AlreadyExists, "Backup timestamp space is exhausted.")
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "Backup timestamp space is exhausted.",
+                )
             })?;
             continue;
         }
@@ -2050,7 +2642,10 @@ fn create_central_backup(
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 nonce = nonce.checked_add(1).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::AlreadyExists, "Backup timestamp space is exhausted.")
+                    io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "Backup timestamp space is exhausted.",
+                    )
                 })?;
                 continue;
             }
@@ -2081,6 +2676,21 @@ fn create_central_backup(
         let _ = fs::File::open(backup_dir).and_then(|directory| directory.sync_all());
         return Ok((backup_path, nonce));
     }
+}
+
+fn central_backup_path(
+    backup_dir: &Path,
+    source_path: &Path,
+    kind: BackupKind,
+    started_ns: u128,
+    updated_ns: u128,
+) -> PathBuf {
+    let suffix = if kind == BackupKind::Rolling {
+        format!("{}.{started_ns}.{updated_ns}.bak", kind.as_str())
+    } else {
+        format!("{}.{updated_ns}.bak", kind.as_str())
+    };
+    backup_dir.join(format!("{}{suffix}", backup_prefix_for_source(source_path)))
 }
 
 fn write_source_metadata(backup_dir: &Path, source_path: &Path, now: SystemTime) -> io::Result<()> {
@@ -2183,9 +2793,7 @@ where
         return Ok(());
     }
 
-    let retention_ms = orphan_retention
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64;
+    let retention_ms = orphan_retention.as_millis().min(u128::from(u64::MAX)) as u64;
     for entry in fs::read_dir(backup_root)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() || !is_backup_bucket_name(&entry.file_name()) {
@@ -2215,14 +2823,8 @@ where
                 metadata.orphaned_since_ms = Some(now_ms);
                 write_source_metadata_record(&bucket_dir, &metadata)?;
             }
-            Some(orphaned_since_ms)
-                if now_ms.saturating_sub(orphaned_since_ms) >= retention_ms =>
-            {
-                match validate_backup_bucket_for_removal(
-                    backup_root,
-                    &bucket_dir,
-                    &source_path,
-                ) {
+            Some(orphaned_since_ms) if now_ms.saturating_sub(orphaned_since_ms) >= retention_ms => {
+                match validate_backup_bucket_for_removal(backup_root, &bucket_dir, &source_path) {
                     Ok(files) => remove_validated_backup_bucket(
                         backup_root,
                         &bucket_dir,
@@ -2285,9 +2887,7 @@ fn validate_backup_bucket_for_removal(
         let entry = entry?;
         let path = entry.path();
         let file_metadata = fs::symlink_metadata(&path)?;
-        if !file_metadata.file_type().is_file()
-            || metadata_is_reparse_or_symlink(&file_metadata)
-        {
+        if !file_metadata.file_type().is_file() || metadata_is_reparse_or_symlink(&file_metadata) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Backup bucket contains a non-file, link, or reparse point.",
@@ -2355,6 +2955,101 @@ fn remove_validated_backup_bucket(
     fs::remove_dir(bucket_dir)
 }
 
+fn validate_legacy_backups_for_removal(
+    source_path: &Path,
+) -> io::Result<Option<(PathBuf, Vec<PathBuf>)>> {
+    let legacy_dir = legacy_backup_dir_for_source(source_path);
+    let directory_metadata = match fs::symlink_metadata(&legacy_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !directory_metadata.file_type().is_dir()
+        || metadata_is_reparse_or_symlink(&directory_metadata)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Legacy backup folder must be a real directory, not a link or reparse point.",
+        ));
+    }
+    let canonical_parent = source_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()?;
+    let canonical_legacy_dir = legacy_dir.canonicalize()?;
+    if canonical_legacy_dir.parent() != Some(canonical_parent.as_path()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Legacy backup folder is not adjacent to the source file.",
+        ));
+    }
+
+    let mut matching_files = Vec::new();
+    for entry in fs::read_dir(&legacy_dir)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !is_legacy_backup_name(source_path, &name) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() || metadata_is_reparse_or_symlink(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Legacy backup must be a real file, not a link or reparse point.",
+            ));
+        }
+        matching_files.push(path);
+    }
+    matching_files.sort();
+
+    let current_directory_metadata = fs::symlink_metadata(&legacy_dir)?;
+    if !current_directory_metadata.file_type().is_dir()
+        || metadata_is_reparse_or_symlink(&current_directory_metadata)
+        || legacy_dir.canonicalize()? != canonical_legacy_dir
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Legacy backup folder changed while it was being inspected.",
+        ));
+    }
+    Ok(Some((legacy_dir, matching_files)))
+}
+
+fn remove_validated_legacy_backups(
+    source_path: &Path,
+    legacy_dir: &Path,
+    expected_files: &[PathBuf],
+) -> io::Result<()> {
+    let Some((current_legacy_dir, current_files)) =
+        validate_legacy_backups_for_removal(source_path)?
+    else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Legacy backup folder changed while it was being deleted.",
+        ));
+    };
+    if current_legacy_dir != legacy_dir || current_files != expected_files {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Legacy backup folder changed while it was being deleted.",
+        ));
+    }
+    for path in current_files {
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() || metadata_is_reparse_or_symlink(&metadata) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Legacy backup changed while it was being deleted.",
+            ));
+        }
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 fn delete_backup_history_in_roots(
     backup_roots: &BackupRoots,
     source_path: &Path,
@@ -2368,12 +3063,82 @@ fn delete_backup_history_in_roots(
         let files = validate_backup_bucket_for_removal(backup_root, &bucket_dir, source_path)?;
         matching_buckets.push((backup_root.clone(), bucket_dir, files));
     }
+    let legacy_backups = validate_legacy_backups_for_removal(source_path)?;
     matching_buckets.sort_by_key(|(backup_root, _, _)| backup_root == &backup_roots.active);
 
     for (backup_root, bucket_dir, files) in matching_buckets {
         remove_validated_backup_bucket(&backup_root, &bucket_dir, source_path, &files)?;
     }
+    if let Some((legacy_dir, files)) = legacy_backups {
+        remove_validated_legacy_backups(source_path, &legacy_dir, &files)?;
+    }
     Ok(())
+}
+
+fn delete_backup_in_roots(
+    backup_roots: &BackupRoots,
+    source_path: &Path,
+    backup_path: String,
+) -> Result<(), String> {
+    let backup_path = validate_backup_path(backup_roots, source_path, backup_path)?;
+    let backup_parent = backup_path
+        .parent()
+        .ok_or_else(|| "Backup file has no parent folder.".to_string())?
+        .canonicalize()
+        .map_err(|_| "Backup folder does not exist.".to_string())?;
+
+    for backup_root in &backup_roots.readable {
+        let bucket_dir = central_backup_dir_for_source(backup_root, source_path);
+        let Some(bucket_dir) = safe_existing_backup_bucket(backup_root, &bucket_dir)
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        let canonical_bucket = bucket_dir
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        if backup_parent != canonical_bucket {
+            continue;
+        }
+
+        let files = validate_backup_bucket_for_removal(backup_root, &bucket_dir, source_path)
+            .map_err(|error| error.to_string())?;
+        if !files
+            .iter()
+            .any(|path| path.file_name() == backup_path.file_name())
+        {
+            return Err("Backup does not belong to the current file.".to_string());
+        }
+        remove_regular_backup_file(&backup_path)?;
+        let remaining = validate_backup_bucket_for_removal(backup_root, &bucket_dir, source_path)
+            .map_err(|error| error.to_string())?;
+        if remaining.iter().all(|path| {
+            path.file_name()
+                .is_some_and(|name| name == SOURCE_METADATA_FILE_NAME)
+        }) {
+            remove_validated_backup_bucket(backup_root, &bucket_dir, source_path, &remaining)
+                .map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+
+    let legacy_dir = legacy_backup_dir_for_source(source_path);
+    let canonical_legacy_dir = legacy_dir
+        .canonicalize()
+        .map_err(|_| "Backup folder does not exist.".to_string())?;
+    if backup_parent != canonical_legacy_dir {
+        return Err("Backup is not a direct child of the current file backup folder.".to_string());
+    }
+    remove_regular_backup_file(&backup_path)
+}
+
+fn remove_regular_backup_file(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("Failed to inspect backup file: {error}"))?;
+    if !metadata.file_type().is_file() || metadata_is_reparse_or_symlink(&metadata) {
+        return Err("Backup must be a real file, not a link or reparse point.".to_string());
+    }
+    fs::remove_file(path).map_err(|error| error.to_string())
 }
 
 fn cleanup_central_backups(
@@ -2381,7 +3146,7 @@ fn cleanup_central_backups(
     source_path: &Path,
     protected_path: Option<&Path>,
     now_ns: u128,
-    allow_manual_eviction: bool,
+    _allow_manual_eviction: bool,
     settings: &BackupSettings,
 ) -> io::Result<()> {
     maintain_orphaned_backup_histories(
@@ -2392,9 +3157,14 @@ fn cleanup_central_backups(
     cleanup_partial_backup_files_in_roots(backup_roots)?;
     let source_backups = scan_source_backups_in_roots(backup_roots, source_path)?;
     for (kind, retain) in [
-        (BackupKind::Previous, 1usize),
+        (BackupKind::Rolling, 1usize),
         (BackupKind::Automatic, settings.automatic_versions_per_file),
+        (BackupKind::Safety, settings.safety_versions_per_file),
+        (BackupKind::Manual, settings.manual_versions_per_file),
     ] {
+        if kind == BackupKind::Manual {
+            continue;
+        }
         remove_oldest_excess(
             source_backups
                 .iter()
@@ -2405,40 +3175,15 @@ fn cleanup_central_backups(
             protected_path,
         )?;
     }
-    if allow_manual_eviction {
-        remove_oldest_excess(
-            source_backups
-                .iter()
-                .filter(|backup| backup.kind == BackupKind::Manual)
-                .cloned()
-                .collect(),
-            settings.manual_versions_per_file,
-            protected_path,
-        )?;
-    }
-
-    let cutoff_ns = now_ns.saturating_sub(settings.automatic_retention.as_nanos());
     let mut global_backups = scan_all_central_backups_in_roots(backup_roots)?;
     global_backups.sort_by(central_backup_age_order);
-    for backup in global_backups
-        .iter()
-        .filter(|backup| {
-            backup.kind != BackupKind::Manual
-                && backup.created_ns < cutoff_ns
-                && !path_is_protected(&backup.path, protected_path)
-        })
-    {
+    for backup in global_backups.iter().filter(|backup| {
+        backup_expired(backup, now_ns, settings) && !path_is_protected(&backup.path, protected_path)
+    }) {
         fs::remove_file(&backup.path)?;
     }
 
-    enforce_global_backup_limits(
-        backup_roots,
-        0,
-        0,
-        protected_path,
-        allow_manual_eviction,
-        settings,
-    )?;
+    enforce_global_backup_limits(backup_roots, 0, 0, protected_path, now_ns, false, settings)?;
     remove_empty_backup_buckets_in_roots(backup_roots)
 }
 
@@ -2447,15 +3192,16 @@ fn enforce_global_backup_limits(
     additional_files: usize,
     additional_bytes: u64,
     protected_path: Option<&Path>,
-    allow_manual_eviction: bool,
+    now_ns: u128,
+    _allow_manual_eviction: bool,
     settings: &BackupSettings,
 ) -> io::Result<()> {
     let mut backups = scan_all_central_backups_in_roots(backup_roots)?;
     backups.sort_by(global_backup_cleanup_order);
     let mut remaining_files = backups.len().saturating_add(additional_files);
-    let mut remaining_bytes = backups
-        .iter()
-        .fold(additional_bytes, |total, backup| total.saturating_add(backup.size));
+    let mut remaining_bytes = backups.iter().fold(additional_bytes, |total, backup| {
+        total.saturating_add(backup.size)
+    });
     let mut removals = Vec::new();
     for backup in backups {
         if remaining_files <= settings.max_total_files
@@ -2463,9 +3209,12 @@ fn enforce_global_backup_limits(
         {
             break;
         }
-        if path_is_protected(&backup.path, protected_path)
-            || (!allow_manual_eviction && backup.kind == BackupKind::Manual)
-        {
+        let can_remove = match backup.kind {
+            BackupKind::Rolling | BackupKind::Automatic => true,
+            BackupKind::Safety => backup_expired(&backup, now_ns, settings),
+            BackupKind::Manual => false,
+        };
+        if path_is_protected(&backup.path, protected_path) || !can_remove {
             continue;
         }
         remaining_files = remaining_files.saturating_sub(1);
@@ -2482,6 +3231,21 @@ fn enforce_global_backup_limits(
         fs::remove_file(path)?;
     }
     Ok(())
+}
+
+fn usage_reaches_percent(value: u128, limit: u128, percent: u8) -> bool {
+    limit > 0 && value.saturating_mul(100) >= limit.saturating_mul(u128::from(percent))
+}
+
+fn backup_expired(backup: &CentralBackupFile, now_ns: u128, settings: &BackupSettings) -> bool {
+    let retention = match backup.kind {
+        BackupKind::Rolling => return false,
+        BackupKind::Automatic => Some(settings.automatic_retention),
+        BackupKind::Safety => Some(settings.safety_retention),
+        BackupKind::Manual => settings.manual_retention,
+    };
+    retention
+        .is_some_and(|retention| backup.updated_ns < now_ns.saturating_sub(retention.as_nanos()))
 }
 
 fn path_is_protected(path: &Path, protected_path: Option<&Path>) -> bool {
@@ -2509,7 +3273,10 @@ fn remove_oldest_excess(
     Ok(())
 }
 
-fn global_backup_cleanup_order(left: &CentralBackupFile, right: &CentralBackupFile) -> std::cmp::Ordering {
+fn global_backup_cleanup_order(
+    left: &CentralBackupFile,
+    right: &CentralBackupFile,
+) -> std::cmp::Ordering {
     backup_cleanup_priority(left.kind)
         .cmp(&backup_cleanup_priority(right.kind))
         .then_with(|| central_backup_age_order(left, right))
@@ -2517,9 +3284,19 @@ fn global_backup_cleanup_order(left: &CentralBackupFile, right: &CentralBackupFi
 
 fn backup_cleanup_priority(kind: BackupKind) -> u8 {
     match kind {
-        BackupKind::Previous => 0,
+        BackupKind::Rolling => 0,
         BackupKind::Automatic => 1,
-        BackupKind::Manual => 2,
+        BackupKind::Safety => 2,
+        BackupKind::Manual => 3,
+    }
+}
+
+fn backup_retention_priority(kind: BackupKind) -> u8 {
+    match kind {
+        BackupKind::Rolling => 0,
+        BackupKind::Automatic => 1,
+        BackupKind::Safety => 2,
+        BackupKind::Manual => 3,
     }
 }
 
@@ -2554,13 +3331,14 @@ fn scan_central_backup_dir(backup_dir: &Path) -> io::Result<Vec<CentralBackupFil
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        let Some((kind, created_ns)) = parse_central_backup_filename(name) else {
+        let Some((kind, started_ns, updated_ns)) = parse_central_backup_filename(name) else {
             continue;
         };
         let metadata = entry.metadata()?;
         backups.push(CentralBackupFile {
             path,
-            created_ns,
+            started_ns,
+            updated_ns,
             size: metadata.len(),
             kind,
         });
@@ -2600,15 +3378,19 @@ fn scan_partial_backup_files(backup_dir: &Path) -> io::Result<Vec<CentralBackupF
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        let Some(final_name) = name.strip_prefix('.').and_then(|name| name.strip_suffix(".partial")) else {
+        let Some(final_name) = name
+            .strip_prefix('.')
+            .and_then(|name| name.strip_suffix(".partial"))
+        else {
             continue;
         };
-        let Some((kind, created_ns)) = parse_central_backup_filename(final_name) else {
+        let Some((kind, started_ns, updated_ns)) = parse_central_backup_filename(final_name) else {
             continue;
         };
         backups.push(CentralBackupFile {
             path,
-            created_ns,
+            started_ns,
+            updated_ns,
             size: entry.metadata()?.len(),
             kind,
         });
@@ -2616,7 +3398,9 @@ fn scan_partial_backup_files(backup_dir: &Path) -> io::Result<Vec<CentralBackupF
     Ok(backups)
 }
 
-fn scan_all_central_backups_in_roots(backup_roots: &BackupRoots) -> io::Result<Vec<CentralBackupFile>> {
+fn scan_all_central_backups_in_roots(
+    backup_roots: &BackupRoots,
+) -> io::Result<Vec<CentralBackupFile>> {
     let mut backups = Vec::new();
     for backup_root in &backup_roots.readable {
         match scan_all_central_backups(backup_root) {
@@ -2717,7 +3501,9 @@ fn remove_validated_backup_bucket_if_empty(bucket_dir: &Path) -> io::Result<()> 
             .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<io::Result<Vec<_>>>()?;
         if remaining.is_empty()
-            || remaining.iter().all(|name| name == SOURCE_METADATA_FILE_NAME)
+            || remaining
+                .iter()
+                .all(|name| name == SOURCE_METADATA_FILE_NAME)
         {
             let _ = fs::remove_file(bucket_dir.join(SOURCE_METADATA_FILE_NAME));
             fs::remove_dir(bucket_dir)?;
@@ -2737,9 +3523,12 @@ fn remove_empty_backup_buckets_in_roots(backup_roots: &BackupRoots) -> io::Resul
     Ok(())
 }
 
-fn central_backup_age_order(left: &CentralBackupFile, right: &CentralBackupFile) -> std::cmp::Ordering {
-    left.created_ns
-        .cmp(&right.created_ns)
+fn central_backup_age_order(
+    left: &CentralBackupFile,
+    right: &CentralBackupFile,
+) -> std::cmp::Ordering {
+    left.updated_ns
+        .cmp(&right.updated_ns)
         .then_with(|| left.path.cmp(&right.path))
 }
 
@@ -2751,19 +3540,20 @@ fn prepare_safe_backup_bucket(backup_root: &Path, backup_dir: &Path) -> io::Resu
     fs::create_dir_all(backup_root)?;
     match fs::symlink_metadata(backup_dir) {
         Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            match fs::create_dir(backup_dir) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error),
-            }
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => match fs::create_dir(backup_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        },
         Err(error) => return Err(error),
     }
     validate_existing_backup_bucket(backup_root, backup_dir)
 }
 
-fn safe_existing_backup_bucket(backup_root: &Path, backup_dir: &Path) -> io::Result<Option<PathBuf>> {
+fn safe_existing_backup_bucket(
+    backup_root: &Path,
+    backup_dir: &Path,
+) -> io::Result<Option<PathBuf>> {
     match fs::symlink_metadata(backup_dir) {
         Ok(_) => {
             validate_existing_backup_bucket(backup_root, backup_dir)?;
@@ -2819,9 +3609,8 @@ fn source_backup_key(path: &Path) -> String {
 }
 
 fn is_backup_bucket_name(name: &std::ffi::OsStr) -> bool {
-    name.to_str().is_some_and(|name| {
-        name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
+    name.to_str()
+        .is_some_and(|name| name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn backup_prefix_for_source(path: &Path) -> String {
@@ -2832,7 +3621,7 @@ fn backup_prefix_for_source(path: &Path) -> String {
     format!("{}.", sanitize_backup_name(file_name))
 }
 
-fn parse_central_backup_name(source_path: &Path, name: &str) -> Option<(BackupKind, u128)> {
+fn parse_central_backup_name(source_path: &Path, name: &str) -> Option<(BackupKind, u128, u128)> {
     parse_central_backup_name_for_platform(source_path, name, cfg!(windows))
 }
 
@@ -2840,7 +3629,7 @@ fn parse_central_backup_name_for_platform(
     source_path: &Path,
     name: &str,
     windows: bool,
-) -> Option<(BackupKind, u128)> {
+) -> Option<(BackupKind, u128, u128)> {
     let prefix = backup_prefix_for_source(source_path);
     let candidate_prefix = name.get(..prefix.len())?;
     let prefix_matches = if windows {
@@ -2851,22 +3640,38 @@ fn parse_central_backup_name_for_platform(
     if !prefix_matches {
         return None;
     }
-    let value = name.get(prefix.len()..)?.strip_suffix(".bak")?;
-    let (kind, nonce) = value.split_once('.')?;
-    if nonce.contains('.') {
-        return None;
-    }
-    Some((BackupKind::parse(kind)?, nonce.parse().ok()?))
+    parse_central_backup_suffix(name.get(prefix.len()..)?.strip_suffix(".bak")?)
 }
 
-fn parse_central_backup_filename(name: &str) -> Option<(BackupKind, u128)> {
-    let value = name.strip_suffix(".bak")?;
-    let (prefix_and_kind, nonce) = value.rsplit_once('.')?;
-    let (prefix, kind) = prefix_and_kind.rsplit_once('.')?;
-    if prefix.is_empty() {
-        return None;
+fn parse_central_backup_suffix(value: &str) -> Option<(BackupKind, u128, u128)> {
+    let mut parts = value.split('.');
+    let raw_kind = parts.next()?;
+    let kind = BackupKind::parse(raw_kind)?;
+    let first: u128 = parts.next()?.parse().ok()?;
+    match (kind, parts.next(), parts.next()) {
+        (BackupKind::Rolling, Some(updated), None) => Some((kind, first, updated.parse().ok()?)),
+        (BackupKind::Rolling, None, None) => Some((kind, first, first)),
+        (_, None, None) => Some((kind, first, first)),
+        _ => None,
     }
-    Some((BackupKind::parse(kind)?, nonce.parse().ok()?))
+}
+
+fn parse_central_backup_filename(name: &str) -> Option<(BackupKind, u128, u128)> {
+    let value = name.strip_suffix(".bak")?;
+    for raw_kind in ["rolling", "previous", "automatic", "safety", "manual"] {
+        let marker = format!(".{raw_kind}.");
+        let Some(index) = value.rfind(&marker) else {
+            continue;
+        };
+        if index == 0 {
+            continue;
+        }
+        let suffix = &value[index + 1..];
+        if let Some(parsed) = parse_central_backup_suffix(suffix) {
+            return Some(parsed);
+        }
+    }
+    None
 }
 
 fn is_legacy_backup_name(source_path: &Path, name: &str) -> bool {
@@ -2907,22 +3712,20 @@ mod tests {
 
     use super::{
         atomic_write, atomic_write_checked, atomic_write_checked_with_hook,
-        atomic_write_checked_with_ops,
-        backup_existing_file_at, backup_existing_file_at_with_metadata_writer,
-        backup_prefix_for_source,
-        backup_roots_from_default,
-        central_backup_dir_for_source, cleanup_central_backups, configured_backup_root,
-        create_central_backup, create_new_file, decode_text_bytes,
+        atomic_write_checked_with_ops, backup_existing_file_at,
+        backup_existing_file_at_with_metadata_writer, backup_prefix_for_source,
+        backup_roots_from_default, central_backup_dir_for_source, cleanup_central_backups,
+        configured_backup_root, create_central_backup, create_new_file, decode_text_bytes,
         enforce_global_backup_limits, file_association_command, file_stats_for,
-        legacy_backup_dir_for_source, list_backup_histories_in_roots, list_backups_for_source,
-        markdown_file_paths_from_args, parse_central_backup_name_for_platform,
-        reveal_command_for_platform, save_dialog_defaults, scan_all_central_backups,
-        scan_central_backup_dir, secondary_instance_markdown_paths, source_backup_key,
-        source_stats_before_backup, system_time_nanoseconds, validate_backup_path, validate_backup_settings,
-        verify_expected_file_missing, verify_expected_file_stats, verify_source_state_after_backup,
-        BackupKind, BackupRoots,
-        BackupSettings, BackupSettingsInput,
-        FileAssociationScope, FileManagerCommandSpec, RequestedBackupKind,
+        legacy_backup_dir_for_source, list_backup_histories_for_sources_in_roots,
+        list_backups_for_source, markdown_file_paths_from_args,
+        parse_central_backup_name_for_platform, reveal_command_for_platform, save_dialog_defaults,
+        scan_all_central_backups, scan_central_backup_dir, seal_latest_rolling_backup,
+        secondary_instance_markdown_paths, source_backup_key, source_stats_before_backup,
+        system_time_nanoseconds, usage_reaches_percent, validate_backup_path,
+        validate_backup_settings, verify_expected_file_missing, verify_expected_file_stats,
+        verify_source_state_after_backup, BackupKind, BackupRoots, BackupSettings,
+        BackupSettingsInput, FileAssociationScope, FileManagerCommandSpec, RequestedBackupKind,
         FILE_CHANGED_DURING_SAVE_ERROR, MIB,
     };
 
@@ -2963,9 +3766,18 @@ mod tests {
     }
 
     #[test]
+    fn backup_usage_warning_starts_at_eighty_percent() {
+        assert!(!usage_reaches_percent(79, 100, 80));
+        assert!(usage_reaches_percent(80, 100, 80));
+        assert!(usage_reaches_percent(4, 5, 80));
+        assert!(!usage_reaches_percent(1, 0, 80));
+    }
+
+    #[test]
     fn builds_macos_reveal_command_for_file_selection() {
         assert_eq!(
-            reveal_command_for_platform(Path::new("/Users/me/notes/Draft.md"), false, "macos").unwrap(),
+            reveal_command_for_platform(Path::new("/Users/me/notes/Draft.md"), false, "macos")
+                .unwrap(),
             FileManagerCommandSpec {
                 program: "open".to_string(),
                 args: vec!["-R".to_string(), "/Users/me/notes/Draft.md".to_string()],
@@ -2976,7 +3788,8 @@ mod tests {
     #[test]
     fn builds_linux_reveal_command_for_parent_folder() {
         assert_eq!(
-            reveal_command_for_platform(Path::new("/home/me/notes/Draft.md"), false, "linux").unwrap(),
+            reveal_command_for_platform(Path::new("/home/me/notes/Draft.md"), false, "linux")
+                .unwrap(),
             FileManagerCommandSpec {
                 program: "xdg-open".to_string(),
                 args: vec!["/home/me/notes".to_string()],
@@ -3065,7 +3878,11 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                markdown.canonicalize().unwrap().to_string_lossy().to_string(),
+                markdown
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
                 text.canonicalize().unwrap().to_string_lossy().to_string(),
             ]
         );
@@ -3084,7 +3901,14 @@ mod tests {
             markdown.clone().into_os_string(),
         ]);
 
-        assert_eq!(paths, vec![markdown.canonicalize().unwrap().to_string_lossy().to_string()]);
+        assert_eq!(
+            paths,
+            vec![markdown
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()]
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3103,7 +3927,14 @@ mod tests {
             image.to_string_lossy().to_string(),
         ]);
 
-        assert_eq!(paths, vec![markdown.canonicalize().unwrap().to_string_lossy().to_string()]);
+        assert_eq!(
+            paths,
+            vec![markdown
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()]
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3170,7 +4001,10 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.to_string(), FILE_CHANGED_DURING_SAVE_ERROR);
-        assert_eq!(std::fs::read_to_string(&raced).unwrap(), "# External content");
+        assert_eq!(
+            std::fs::read_to_string(&raced).unwrap(),
+            "# External content"
+        );
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
 
         std::fs::remove_dir_all(root).unwrap();
@@ -3267,9 +4101,17 @@ mod tests {
 
         let recovery_path = recovery_path.unwrap();
         assert!(error.to_string().contains(FILE_CHANGED_DURING_SAVE_ERROR));
-        assert!(error.to_string().contains(&recovery_path.to_string_lossy().to_string()));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# External content");
-        assert_eq!(std::fs::read_to_string(&recovery_path).unwrap(), "# Original");
+        assert!(error
+            .to_string()
+            .contains(&recovery_path.to_string_lossy().to_string()));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# External content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&recovery_path).unwrap(),
+            "# Original"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3286,7 +4128,10 @@ mod tests {
 
         atomic_write(&path, b"# Updated").unwrap();
 
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o640);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3328,13 +4173,16 @@ mod tests {
         let root = temporary_test_dir("source-disappeared-before-backup");
         let source = root.join("Draft.md");
         std::fs::write(&source, "existing").unwrap();
-        assert!(source_stats_before_backup(&source, false).unwrap().is_some());
+        assert!(source_stats_before_backup(&source, false)
+            .unwrap()
+            .is_some());
         std::fs::remove_file(&source).unwrap();
 
-        let result: Result<(), String> = source_stats_before_backup(&source, false).and_then(|_| {
-            atomic_write(&source, b"replacement").map_err(|error| error.to_string())?;
-            Ok(())
-        });
+        let result: Result<(), String> =
+            source_stats_before_backup(&source, false).and_then(|_| {
+                atomic_write(&source, b"replacement").map_err(|error| error.to_string())?;
+                Ok(())
+            });
         assert_eq!(result.unwrap_err(), FILE_CHANGED_DURING_SAVE_ERROR);
         assert!(!source.exists());
 
@@ -3370,7 +4218,10 @@ mod tests {
         let differently_cased = "draft.md.manual.123.bak";
         assert!(parse_central_backup_name_for_platform(source, differently_cased, true).is_some());
         assert!(parse_central_backup_name_for_platform(source, differently_cased, false).is_none());
-        assert!(parse_central_backup_name_for_platform(source, "Draft.md.manual.123.bak", false).is_some());
+        assert!(
+            parse_central_backup_name_for_platform(source, "Draft.md.manual.123.bak", false)
+                .is_some()
+        );
     }
 
     #[test]
@@ -3378,8 +4229,21 @@ mod tests {
         let settings = validate_backup_settings(BackupSettingsInput::default()).unwrap();
         assert_eq!(settings.checkpoint_interval, Duration::from_secs(10 * 60));
         assert_eq!(settings.automatic_versions_per_file, 48);
+        assert_eq!(settings.safety_versions_per_file, 32);
         assert_eq!(settings.manual_versions_per_file, 32);
-        assert_eq!(settings.orphan_retention, Duration::from_secs(365 * 24 * 60 * 60));
+        assert_eq!(
+            settings.automatic_retention,
+            Duration::from_secs(180 * 24 * 60 * 60)
+        );
+        assert_eq!(
+            settings.safety_retention,
+            Duration::from_secs(365 * 24 * 60 * 60)
+        );
+        assert_eq!(settings.manual_retention, None);
+        assert_eq!(
+            settings.orphan_retention,
+            Duration::from_secs(365 * 24 * 60 * 60)
+        );
 
         let mut input = BackupSettingsInput::default();
         input.checkpoint_interval_minutes = 0;
@@ -3402,6 +4266,21 @@ mod tests {
         let mut input = BackupSettingsInput::default();
         input.orphan_retention_days = 3_651;
         assert!(validate_backup_settings(input).is_err());
+
+        let mut input = BackupSettingsInput::default();
+        input.safety_versions_per_file = 0;
+        assert!(validate_backup_settings(input).is_err());
+
+        let mut input = BackupSettingsInput::default();
+        input.manual_retention_days = 3_651;
+        assert!(validate_backup_settings(input).is_err());
+
+        let mut input = BackupSettingsInput::default();
+        input.manual_retention_days = 0;
+        assert_eq!(
+            validate_backup_settings(input).unwrap().manual_retention,
+            None
+        );
     }
 
     #[test]
@@ -3460,15 +4339,20 @@ mod tests {
         let bucket = central_backup_dir_for_source(&backup_root, &source);
         std::fs::create_dir_all(&bucket).unwrap();
         std::fs::write(
-            bucket.join(format!(".{}previous.123.bak.partial", backup_prefix_for_source(&source))),
+            bucket.join(format!(
+                ".{}previous.123.bak.partial",
+                backup_prefix_for_source(&source)
+            )),
             "incomplete",
         )
         .unwrap();
 
         assert!(scan_central_backup_dir(&bucket).unwrap().is_empty());
-        assert!(list_backups_for_source(&test_backup_roots(&backup_root), &source)
-            .unwrap()
-            .is_empty());
+        assert!(
+            list_backups_for_source(&test_backup_roots(&backup_root), &source)
+                .unwrap()
+                .is_empty()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3514,9 +4398,11 @@ mod tests {
         .unwrap();
 
         assert!(scan_all_central_backups(&backup_root).unwrap().is_empty());
-        assert!(list_backup_histories_in_roots(&backup_roots)
-            .unwrap()
-            .is_empty());
+        assert!(
+            list_backup_histories_for_sources_in_roots(&backup_roots, &[])
+                .unwrap()
+                .is_empty()
+        );
         assert!(list_backups_for_source(&backup_roots, &source).is_err());
         assert!(planted_backup.exists());
 
@@ -3586,7 +4472,7 @@ mod tests {
         .unwrap();
         std::fs::remove_file(&source).unwrap();
 
-        let histories = list_backup_histories_in_roots(&backup_roots).unwrap();
+        let histories = list_backup_histories_for_sources_in_roots(&backup_roots, &[]).unwrap();
         assert_eq!(histories.len(), 1);
         assert_eq!(histories[0].source_path, source.to_string_lossy());
         assert_eq!(histories[0].file_name, "Draft.md");
@@ -3598,6 +4484,73 @@ mod tests {
         assert_eq!(json["totalSize"], 7);
         assert!(json["latestBackupPath"].is_string());
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn known_source_with_only_legacy_backups_is_listed_as_a_history() {
+        let root = temporary_test_dir("legacy-only-backup-history");
+        let backup_root = root.join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("notes").join("Draft.md");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let legacy_dir = legacy_backup_dir_for_source(&source);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let first = legacy_dir.join(format!("{}100.bak", backup_prefix_for_source(&source)));
+        let second = legacy_dir.join(format!("{}200.bak", backup_prefix_for_source(&source)));
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second version").unwrap();
+
+        let histories = super::list_backup_histories_for_sources_in_roots(
+            &backup_roots,
+            std::slice::from_ref(&source),
+        )
+        .unwrap();
+
+        assert_eq!(histories.len(), 1);
+        assert_eq!(histories[0].source_path, source.to_string_lossy());
+        assert_eq!(histories[0].file_name, "Draft.md");
+        assert_eq!(histories[0].backup_count, 2);
+        assert_eq!(histories[0].total_size, 5 + 14);
+        assert!(!histories[0].source_exists);
+        assert!(histories[0].latest_backup_path.is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn central_history_summary_includes_adjacent_legacy_backups_once() {
+        let root = temporary_test_dir("mixed-central-legacy-history");
+        let backup_root = root.join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        std::fs::write(&source, "central").unwrap();
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(100),
+            &test_backup_settings(),
+        )
+        .unwrap();
+        let legacy_dir = legacy_backup_dir_for_source(&source);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy = legacy_dir.join(format!("{}200.bak", backup_prefix_for_source(&source)));
+        std::fs::write(&legacy, "legacy").unwrap();
+
+        let histories = super::list_backup_histories_for_sources_in_roots(
+            &backup_roots,
+            &[source.clone(), source.clone()],
+        )
+        .unwrap();
+
+        assert_eq!(histories.len(), 1);
+        assert_eq!(histories[0].backup_count, 2);
+        assert_eq!(histories[0].total_size, 7 + 6);
+        assert!(histories[0].source_exists);
+        assert_eq!(
+            histories[0].latest_backup_path,
+            Some(legacy.to_string_lossy().to_string())
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3618,16 +4571,12 @@ mod tests {
         .unwrap();
         std::fs::remove_file(&source).unwrap();
         let bucket = central_backup_dir_for_source(&backup_root, &source);
-        let old_metadata_json = std::fs::read_to_string(bucket.join(super::SOURCE_METADATA_FILE_NAME))
-            .unwrap();
+        let old_metadata_json =
+            std::fs::read_to_string(bucket.join(super::SOURCE_METADATA_FILE_NAME)).unwrap();
         assert!(!old_metadata_json.contains("orphanedSinceMs"));
 
-        super::maintain_orphaned_backup_histories(
-            &backup_roots,
-            10_000,
-            &test_backup_settings(),
-        )
-        .unwrap();
+        super::maintain_orphaned_backup_histories(&backup_roots, 10_000, &test_backup_settings())
+            .unwrap();
 
         assert!(bucket.exists());
         assert_eq!(
@@ -3641,7 +4590,7 @@ mod tests {
     }
 
     #[test]
-    fn orphan_maintenance_keeps_manual_history_before_expiry() {
+    fn orphan_maintenance_keeps_rolling_history_before_expiry() {
         let root = temporary_test_dir("orphan-manual-before-expiry");
         let backup_root = root.join("backups-v1");
         let backup_roots = test_backup_roots(&backup_root);
@@ -3650,7 +4599,7 @@ mod tests {
         backup_existing_file_at(
             &backup_roots,
             &source,
-            RequestedBackupKind::Manual,
+            RequestedBackupKind::Automatic,
             UNIX_EPOCH + Duration::from_secs(2_000),
             &test_backup_settings(),
         )
@@ -3658,12 +4607,8 @@ mod tests {
         std::fs::remove_file(&source).unwrap();
         let bucket = central_backup_dir_for_source(&backup_root, &source);
 
-        super::maintain_orphaned_backup_histories(
-            &backup_roots,
-            1_000,
-            &test_backup_settings(),
-        )
-        .unwrap();
+        super::maintain_orphaned_backup_histories(&backup_roots, 1_000, &test_backup_settings())
+            .unwrap();
         super::maintain_orphaned_backup_histories(
             &backup_roots,
             1_000 + 364 * 24 * 60 * 60 * 1_000,
@@ -3673,7 +4618,7 @@ mod tests {
 
         let backups = scan_central_backup_dir(&bucket).unwrap();
         assert_eq!(backups.len(), 1);
-        assert_eq!(backups[0].kind, BackupKind::Manual);
+        assert_eq!(backups[0].kind, BackupKind::Rolling);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3755,26 +4700,19 @@ mod tests {
         .unwrap();
         let mut histories = std::collections::HashMap::new();
 
-        super::append_backup_histories_with_probe(
-            &backup_root,
-            &mut histories,
-            &mut |_path| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "simulated unavailable source",
-                ))
-            },
-        )
+        super::append_backup_histories_with_probe(&backup_root, &mut histories, &mut |_path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "simulated unavailable source",
+            ))
+        })
         .unwrap();
 
         assert_eq!(histories.len(), 1);
         assert!(histories.into_values().next().unwrap().source_exists);
         assert_eq!(
             super::source_path_state_with_probe(&source, |_path| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "missing",
-                ))
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
             }),
             super::SourcePathState::Unavailable
         );
@@ -3791,7 +4729,7 @@ mod tests {
         std::fs::create_dir_all(&bucket).unwrap();
         std::fs::write(&source, "checkpoint").unwrap();
         for (kind, created_seconds) in [
-            (BackupKind::Previous, 100),
+            (BackupKind::Rolling, 100),
             (BackupKind::Automatic, 200),
             (BackupKind::Manual, 300),
         ] {
@@ -3812,12 +4750,8 @@ mod tests {
             "partial",
         )
         .unwrap();
-        super::write_source_metadata(
-            &bucket,
-            &source,
-            UNIX_EPOCH + Duration::from_secs(500),
-        )
-        .unwrap();
+        super::write_source_metadata(&bucket, &source, UNIX_EPOCH + Duration::from_secs(500))
+            .unwrap();
         std::fs::remove_file(&source).unwrap();
         let mut metadata = super::read_source_metadata(&bucket).unwrap();
         metadata.orphaned_since_ms = Some(1_000);
@@ -3894,12 +4828,8 @@ mod tests {
         .unwrap();
         std::fs::remove_file(&source).unwrap();
         let bucket = central_backup_dir_for_source(&backup_root, &source);
-        super::maintain_orphaned_backup_histories(
-            &backup_roots,
-            5_000,
-            &test_backup_settings(),
-        )
-        .unwrap();
+        super::maintain_orphaned_backup_histories(&backup_roots, 5_000, &test_backup_settings())
+            .unwrap();
         assert_eq!(
             super::read_source_metadata(&bucket)
                 .unwrap()
@@ -3908,12 +4838,8 @@ mod tests {
         );
 
         std::fs::write(&source, "restored").unwrap();
-        super::maintain_orphaned_backup_histories(
-            &backup_roots,
-            6_000,
-            &test_backup_settings(),
-        )
-        .unwrap();
+        super::maintain_orphaned_backup_histories(&backup_roots, 6_000, &test_backup_settings())
+            .unwrap();
 
         assert_eq!(
             super::read_source_metadata(&bucket)
@@ -3962,14 +4888,76 @@ mod tests {
         let legacy_dir = legacy_backup_dir_for_source(&source);
         std::fs::create_dir_all(&legacy_dir).unwrap();
         let legacy_backup = legacy_dir.join("Draft.md.manual.1.bak");
+        let second_legacy_backup = legacy_dir.join("Draft.md.manual.2.bak");
+        let unrelated_legacy_backup = legacy_dir.join("Other.md.manual.1.bak");
+        let unknown_file = legacy_dir.join("keep.txt");
         std::fs::write(&legacy_backup, "legacy").unwrap();
+        std::fs::write(&second_legacy_backup, "legacy 2").unwrap();
+        std::fs::write(&unrelated_legacy_backup, "other legacy").unwrap();
+        std::fs::write(&unknown_file, "unknown").unwrap();
 
         super::delete_backup_history_in_roots(&backup_roots, &source).unwrap();
 
         assert!(!central_backup_dir_for_source(&active_root, &source).exists());
         assert!(!central_backup_dir_for_source(&previous_root, &source).exists());
         assert!(unrelated_bucket.exists());
-        assert!(legacy_backup.exists());
+        assert!(!legacy_backup.exists());
+        assert!(!second_legacy_backup.exists());
+        assert!(unrelated_legacy_backup.exists());
+        assert!(unknown_file.exists());
+        assert!(legacy_dir.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_history_deletion_rejects_a_changed_target_set_before_removing_files() {
+        let root = temporary_test_dir("legacy-history-delete-race");
+        let source = root.join("Draft.md");
+        std::fs::write(&source, "current").unwrap();
+        let legacy_dir = legacy_backup_dir_for_source(&source);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let first = legacy_dir.join("Draft.md.manual.1.bak");
+        std::fs::write(&first, "first").unwrap();
+        let (validated_dir, validated_files) = super::validate_legacy_backups_for_removal(&source)
+            .unwrap()
+            .unwrap();
+        let added = legacy_dir.join("Draft.md.manual.2.bak");
+        std::fs::write(&added, "added after validation").unwrap();
+
+        let error =
+            super::remove_validated_legacy_backups(&source, &validated_dir, &validated_files)
+                .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(first.exists());
+        assert!(added.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_history_deletion_rejects_matching_non_files_before_central_deletion() {
+        let root = temporary_test_dir("legacy-history-delete-invalid-target");
+        let backup_root = root.join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        std::fs::write(&source, "central").unwrap();
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(100),
+            &test_backup_settings(),
+        )
+        .unwrap();
+        let bucket = central_backup_dir_for_source(&backup_root, &source);
+        let legacy_dir = legacy_backup_dir_for_source(&source);
+        std::fs::create_dir_all(legacy_dir.join("Draft.md.manual.1.bak")).unwrap();
+
+        let error = super::delete_backup_history_in_roots(&backup_roots, &source).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(bucket.exists());
+        assert_eq!(scan_central_backup_dir(&bucket).unwrap().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -4100,7 +5088,9 @@ mod tests {
             &settings,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("exceeding the configured maximum"));
+        assert!(error
+            .to_string()
+            .contains("exceeding the configured maximum"));
         assert!(!backup_root.exists());
         assert_eq!(std::fs::read_to_string(&source).unwrap(), "too large");
 
@@ -4161,7 +5151,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_backups_keep_one_previous_version_between_checkpoints() {
+    fn ordinary_saves_share_one_rolling_version_until_the_interval_elapses() {
         let root = temporary_test_dir("automatic-backup-throttle");
         let backup_root = root.join("app-data").join("backups-v1");
         let backup_roots = test_backup_roots(&backup_root);
@@ -4180,10 +5170,10 @@ mod tests {
         .unwrap()
         .unwrap();
         std::fs::write(&source, "version two").unwrap();
-        let manual = backup_existing_file_at(
+        let automatic = backup_existing_file_at(
             &backup_roots,
             &source,
-            RequestedBackupKind::Manual,
+            RequestedBackupKind::Automatic,
             start + Duration::from_secs(60),
             &settings,
         )
@@ -4200,14 +5190,14 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_ne!(previous, manual);
+        assert_ne!(previous, automatic);
         assert_eq!(std::fs::read_to_string(&previous).unwrap(), "version three");
         let backups = scan_central_backup_dir(first.parent().unwrap()).unwrap();
-        assert_eq!(backups.len(), 3);
+        assert_eq!(backups.len(), 1);
         assert_eq!(
             backups
                 .iter()
-                .filter(|backup| backup.kind == BackupKind::Previous)
+                .filter(|backup| backup.kind == BackupKind::Rolling)
                 .count(),
             1
         );
@@ -4225,17 +5215,418 @@ mod tests {
         assert_ne!(checkpoint, first);
         assert_eq!(std::fs::read_to_string(checkpoint).unwrap(), "version four");
         let backups = scan_central_backup_dir(first.parent().unwrap()).unwrap();
-        assert_eq!(backups.len(), 3);
+        assert_eq!(backups.len(), 2);
         assert_eq!(
             backups
                 .iter()
                 .filter(|backup| backup.kind == BackupKind::Automatic)
                 .count(),
-            2
+            1
+        );
+        assert_eq!(
+            backups
+                .iter()
+                .filter(|backup| backup.kind == BackupKind::Rolling)
+                .count(),
+            1
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rolling_checkpoint_keeps_its_start_time_while_its_content_updates() {
+        let root = temporary_test_dir("rolling-started-at");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let start = UNIX_EPOCH + Duration::from_secs(1_100_000);
+        std::fs::write(&source, "one").unwrap();
+
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Automatic,
+            start,
+            &test_backup_settings(),
+        )
+        .unwrap();
+        let first = scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source))
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        std::fs::write(&source, "two").unwrap();
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Automatic,
+            start + Duration::from_secs(60),
+            &test_backup_settings(),
+        )
+        .unwrap();
+        let rolling =
+            scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source))
+                .unwrap()
+                .into_iter()
+                .find(|backup| backup.kind == BackupKind::Rolling)
+                .unwrap();
+
+        assert_eq!(rolling.started_ns, first.started_ns);
+        assert_eq!(
+            rolling.updated_ns,
+            system_time_nanoseconds(start + Duration::from_secs(60))
+        );
+        assert_eq!(std::fs::read_to_string(&rolling.path).unwrap(), "two");
+        assert!(!first.path.exists());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sealing_a_rolling_checkpoint_turns_it_into_an_automatic_checkpoint() {
+        let root = temporary_test_dir("seal-rolling");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        std::fs::write(&source, "rolling content").unwrap();
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Automatic,
+            UNIX_EPOCH + Duration::from_secs(1_200_000),
+            &test_backup_settings(),
+        )
+        .unwrap();
+
+        let sealed = seal_latest_rolling_backup(&backup_roots, &source)
+            .unwrap()
+            .unwrap();
+        let backups =
+            scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].kind, BackupKind::Automatic);
+        assert_eq!(backups[0].path, sealed);
+        assert_eq!(std::fs::read_to_string(&sealed).unwrap(), "rolling content");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn safety_backup_seals_the_current_rolling_checkpoint() {
+        let root = temporary_test_dir("safety-backup");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let start = UNIX_EPOCH + Duration::from_secs(1_300_000);
+        std::fs::write(&source, "before external overwrite").unwrap();
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Automatic,
+            start,
+            &test_backup_settings(),
+        )
+        .unwrap();
+        std::fs::write(&source, "external disk version").unwrap();
+
+        let safety = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Safety,
+            start + Duration::from_secs(60),
+            &test_backup_settings(),
+        )
+        .unwrap()
+        .unwrap();
+        let backups =
+            scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
+
+        assert_eq!(
+            backups
+                .iter()
+                .filter(|backup| backup.kind == BackupKind::Automatic)
+                .count(),
+            1
+        );
+        assert_eq!(
+            backups
+                .iter()
+                .filter(|backup| backup.kind == BackupKind::Safety)
+                .count(),
+            1
         );
         assert!(backups
             .iter()
-            .all(|backup| backup.kind != BackupKind::Previous));
+            .all(|backup| backup.kind != BackupKind::Rolling));
+        assert_eq!(
+            std::fs::read_to_string(safety).unwrap(),
+            "external disk version"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fixed_checkpoints_upgrade_equal_content_without_creating_copies() {
+        let root = temporary_test_dir("fixed-backup-content-upgrade");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let start = UNIX_EPOCH + Duration::from_secs(1_400_000);
+        let settings = test_backup_settings();
+        std::fs::write(&source, "same content").unwrap();
+
+        backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Automatic,
+            start,
+            &settings,
+        )
+        .unwrap();
+        let automatic = seal_latest_rolling_backup(&backup_roots, &source)
+            .unwrap()
+            .unwrap();
+        let safety = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Safety,
+            start + Duration::from_secs(1),
+            &settings,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!automatic.exists());
+        assert_ne!(safety, automatic);
+
+        let manual = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            start + Duration::from_secs(2),
+            &settings,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!safety.exists());
+        let backups =
+            scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].kind, BackupKind::Manual);
+        assert_eq!(backups[0].path, manual);
+
+        let safety_request = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Safety,
+            start + Duration::from_secs(3),
+            &settings,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(safety_request, manual);
+        assert_eq!(
+            scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_saves_reuse_equal_content_from_fixed_checkpoints() {
+        let root = temporary_test_dir("ordinary-save-fixed-deduplication");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let manual = seed_central_backup_kind(
+            &backup_root,
+            &source,
+            BackupKind::Manual,
+            100,
+            "same content",
+        );
+        let mut settings = test_backup_settings();
+        settings.checkpoint_interval = Duration::ZERO;
+
+        let reused = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Automatic,
+            UNIX_EPOCH + Duration::from_secs(200),
+            &settings,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(reused, manual);
+        let backups =
+            scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].kind, BackupKind::Manual);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_save_seals_different_rolling_content_before_reusing_a_fixed_checkpoint() {
+        let root = temporary_test_dir("ordinary-save-seals-before-fixed-deduplication");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let manual = seed_central_backup_kind(
+            &backup_root,
+            &source,
+            BackupKind::Manual,
+            100,
+            "fixed content",
+        );
+        let rolling = seed_central_backup_kind(
+            &backup_root,
+            &source,
+            BackupKind::Rolling,
+            200,
+            "rolling content",
+        );
+        std::fs::write(&source, "fixed content").unwrap();
+
+        let reused = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Automatic,
+            UNIX_EPOCH + Duration::from_secs(300),
+            &test_backup_settings(),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(reused, manual);
+        assert!(!rolling.exists());
+        let backups =
+            scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
+        assert_eq!(backups.len(), 2);
+        assert!(backups.iter().any(|backup| {
+            backup.kind == BackupKind::Automatic
+                && std::fs::read_to_string(&backup.path).unwrap() == "rolling content"
+        }));
+        assert!(backups.iter().any(|backup| backup.path == manual));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sealing_rolling_content_reuses_an_equal_higher_category_checkpoint() {
+        let root = temporary_test_dir("seal-rolling-fixed-deduplication");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let manual = seed_central_backup_kind(
+            &backup_root,
+            &source,
+            BackupKind::Manual,
+            100,
+            "same content",
+        );
+        let rolling = seed_central_backup_kind(
+            &backup_root,
+            &source,
+            BackupKind::Rolling,
+            200,
+            "same content",
+        );
+
+        let sealed = seal_latest_rolling_backup(&backup_roots, &source)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(sealed, manual);
+        assert!(!rolling.exists());
+        let backups =
+            scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].kind, BackupKind::Manual);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fixed_backup_deduplication_upgrades_lower_retention_categories() {
+        let root = temporary_test_dir("fixed-backup-category-upgrade");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let settings = test_backup_settings();
+        std::fs::write(&source, "same content").unwrap();
+        let automatic = seed_central_backup_kind(
+            &backup_root,
+            &source,
+            BackupKind::Automatic,
+            100,
+            "same content",
+        );
+
+        let safety = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Safety,
+            UNIX_EPOCH + Duration::from_secs(200),
+            &settings,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!automatic.exists());
+        assert!(safety.exists());
+
+        let manual = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(300),
+            &settings,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!safety.exists());
+        assert!(manual.exists());
+        let backups = scan_central_backup_dir(manual.parent().unwrap()).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].kind, BackupKind::Manual);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fixed_backup_deduplication_never_downgrades_manual_content() {
+        let root = temporary_test_dir("fixed-backup-no-downgrade");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let settings = test_backup_settings();
+        std::fs::write(&source, "same content").unwrap();
+        let manual = seed_central_backup_kind(
+            &backup_root,
+            &source,
+            BackupKind::Manual,
+            100,
+            "same content",
+        );
+
+        let reused = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Safety,
+            UNIX_EPOCH + Duration::from_secs(200),
+            &settings,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(reused, manual);
+        let backups = scan_central_backup_dir(reused.parent().unwrap()).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].kind, BackupKind::Manual);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4250,7 +5641,7 @@ mod tests {
         let old_previous = seed_central_backup_kind(
             &backup_root,
             &source,
-            BackupKind::Previous,
+            BackupKind::Rolling,
             start,
             "old previous",
         );
@@ -4278,8 +5669,12 @@ mod tests {
         assert!(!old_previous.exists());
         assert!(automatic.exists());
         assert!(new_previous.exists());
-        assert_eq!(std::fs::read_to_string(&new_previous).unwrap(), "new previous");
-        let backups = scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&new_previous).unwrap(),
+            "new previous"
+        );
+        let backups =
+            scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
         assert_eq!(backups.len(), 2);
         assert_eq!(
             backups
@@ -4291,7 +5686,7 @@ mod tests {
         assert_eq!(
             backups
                 .iter()
-                .filter(|backup| backup.kind == BackupKind::Previous)
+                .filter(|backup| backup.kind == BackupKind::Rolling)
                 .count(),
             1
         );
@@ -4300,7 +5695,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_capacity_failure_preserves_all_backups_without_partial_cleanup() {
+    fn capacity_failure_preserves_manual_versions_without_partial_cleanup() {
         let root = temporary_test_dir("automatic-capacity-no-partial-cleanup");
         let backup_root = root.join("app-data").join("backups-v1");
         let backup_roots = test_backup_roots(&backup_root);
@@ -4320,7 +5715,6 @@ mod tests {
         );
         let source = root.join("New.md");
         std::fs::write(&source, "new automatic").unwrap();
-        let new_bucket = central_backup_dir_for_source(&backup_root, &source);
         let mut settings = test_backup_settings();
         settings.max_total_files = 1;
 
@@ -4336,7 +5730,6 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
         assert!(manual.exists());
         assert!(automatic.exists());
-        assert!(!new_bucket.exists());
         assert_eq!(scan_all_central_backups(&backup_root).unwrap().len(), 2);
         assert_eq!(std::fs::read_to_string(&source).unwrap(), "new automatic");
 
@@ -4344,7 +5737,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_byte_capacity_failure_preserves_backups_without_partial_cleanup() {
+    fn byte_capacity_failure_preserves_manual_versions_without_partial_cleanup() {
         let root = temporary_test_dir("automatic-byte-capacity-no-partial-cleanup");
         let backup_root = root.join("app-data").join("backups-v1");
         let backup_roots = test_backup_roots(&backup_root);
@@ -4364,7 +5757,6 @@ mod tests {
         );
         let source = root.join("New.md");
         std::fs::write(&source, "12345").unwrap();
-        let new_bucket = central_backup_dir_for_source(&backup_root, &source);
         let mut settings = test_backup_settings();
         settings.max_total_files = 10;
         settings.max_total_bytes = 10;
@@ -4381,7 +5773,6 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
         assert!(manual.exists());
         assert!(automatic.exists());
-        assert!(!new_bucket.exists());
         assert_eq!(scan_all_central_backups(&backup_root).unwrap().len(), 2);
 
         std::fs::remove_dir_all(root).unwrap();
@@ -4474,7 +5865,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_capacity_preflight_can_rotate_manual_backups() {
+    fn manual_checkpoints_fail_when_manual_history_fills_capacity() {
         let root = temporary_test_dir("manual-capacity-rotation");
         let backup_root = root.join("app-data").join("backups-v1");
         let backup_roots = test_backup_roots(&backup_root);
@@ -4490,25 +5881,56 @@ mod tests {
         let mut settings = test_backup_settings();
         settings.max_total_files = 1;
 
-        let new_manual = backup_existing_file_at(
+        let error = backup_existing_file_at(
             &backup_roots,
             &source,
             RequestedBackupKind::Manual,
             UNIX_EPOCH + Duration::from_secs(200),
             &settings,
         )
-        .unwrap()
-        .unwrap();
+        .unwrap_err();
 
-        assert!(!old_manual.exists());
-        assert!(new_manual.exists());
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+        assert!(old_manual.exists());
         assert_eq!(scan_all_central_backups(&backup_root).unwrap().len(), 1);
 
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn automatic_request_does_not_apply_tightened_manual_per_source_limit() {
+    fn manual_checkpoints_fail_at_the_per_file_limit_without_deleting_existing_entries() {
+        let root = temporary_test_dir("manual-per-file-limit");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let old_manual =
+            seed_central_backup_kind(&backup_root, &source, BackupKind::Manual, 100, "old manual");
+        std::fs::write(&source, "new manual").unwrap();
+        let mut settings = test_backup_settings();
+        settings.manual_versions_per_file = 1;
+
+        let error = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(200),
+            &settings,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+        assert!(error.to_string().contains("manual checkpoint limit"));
+        assert!(old_manual.exists());
+        let backups =
+            scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].kind, BackupKind::Manual);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_saves_do_not_evict_manual_pool_versions() {
         let root = temporary_test_dir("automatic-keeps-manual-source-pool");
         let backup_root = root.join("app-data").join("backups-v1");
         let backup_roots = test_backup_roots(&backup_root);
@@ -4543,7 +5965,8 @@ mod tests {
 
         assert!(first_manual.exists());
         assert!(second_manual.exists());
-        let backups = scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
+        let backups =
+            scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
         assert_eq!(
             backups
                 .iter()
@@ -4556,7 +5979,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_backups_are_never_throttled() {
+    fn manual_checkpoints_seal_rolling_versions_and_stay_fixed() {
         let root = temporary_test_dir("manual-backups");
         let backup_root = root.join("app-data").join("backups-v1");
         let backup_roots = test_backup_roots(&backup_root);
@@ -4565,50 +5988,64 @@ mod tests {
         let settings = test_backup_settings();
         std::fs::write(&source, "first").unwrap();
 
-        let first = backup_existing_file_at(
+        backup_existing_file_at(
             &backup_roots,
             &source,
-            RequestedBackupKind::Manual,
+            RequestedBackupKind::Automatic,
             now,
             &settings,
         )
         .unwrap()
         .unwrap();
         std::fs::write(&source, "second").unwrap();
-        let second = backup_existing_file_at(
+        let manual = backup_existing_file_at(
             &backup_roots,
             &source,
             RequestedBackupKind::Manual,
-            now,
-            &settings,
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_ne!(first, second);
-        let automatic = backup_existing_file_at(
-            &backup_roots,
-            &source,
-            RequestedBackupKind::Automatic,
             now + Duration::from_secs(1),
             &settings,
         )
         .unwrap()
         .unwrap();
-        assert_ne!(automatic, second);
-        let backups = scan_central_backup_dir(first.parent().unwrap()).unwrap();
-        assert_eq!(backups.len(), 3);
+
+        assert_eq!(std::fs::read_to_string(&manual).unwrap(), "second");
+        let backups = scan_central_backup_dir(manual.parent().unwrap()).unwrap();
+        assert_eq!(backups.len(), 2);
+        assert_eq!(
+            backups
+                .iter()
+                .filter(|backup| backup.kind == BackupKind::Automatic)
+                .count(),
+            1
+        );
         assert_eq!(
             backups
                 .iter()
                 .filter(|backup| backup.kind == BackupKind::Manual)
                 .count(),
-            2
+            1
         );
+        assert!(backups
+            .iter()
+            .all(|backup| backup.kind != BackupKind::Rolling));
+
+        std::fs::write(&source, "third").unwrap();
+        let rolling = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Automatic,
+            now + Duration::from_secs(2),
+            &settings,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&rolling).unwrap(), "third");
+        let backups = scan_central_backup_dir(rolling.parent().unwrap()).unwrap();
+        assert_eq!(backups.len(), 3);
         assert_eq!(
             backups
                 .iter()
-                .filter(|backup| backup.kind == BackupKind::Automatic)
+                .filter(|backup| backup.kind == BackupKind::Rolling)
                 .count(),
             1
         );
@@ -4617,7 +6054,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_backups_retire_an_older_rolling_previous_version() {
+    fn manual_checkpoint_seals_an_existing_rolling_version() {
         let root = temporary_test_dir("manual-retires-previous");
         let backup_root = root.join("app-data").join("backups-v1");
         let backup_roots = test_backup_roots(&backup_root);
@@ -4655,9 +6092,6 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(&manual).unwrap(), "version three");
         let backups = scan_central_backup_dir(manual.parent().unwrap()).unwrap();
-        assert!(backups
-            .iter()
-            .all(|backup| backup.kind != BackupKind::Previous));
         assert_eq!(
             backups
                 .iter()
@@ -4665,6 +6099,16 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(
+            backups
+                .iter()
+                .filter(|backup| backup.kind == BackupKind::Automatic)
+                .count(),
+            1
+        );
+        assert!(backups
+            .iter()
+            .all(|backup| backup.kind != BackupKind::Rolling));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4685,12 +6129,12 @@ mod tests {
         settings.automatic_retention = Duration::from_secs(10_000);
 
         for (offset, kind) in [
-            RequestedBackupKind::Manual,
             RequestedBackupKind::Automatic,
             RequestedBackupKind::Automatic,
-            RequestedBackupKind::Manual,
             RequestedBackupKind::Automatic,
-            RequestedBackupKind::Manual,
+            RequestedBackupKind::Automatic,
+            RequestedBackupKind::Automatic,
+            RequestedBackupKind::Automatic,
         ]
         .into_iter()
         .enumerate()
@@ -4706,8 +6150,9 @@ mod tests {
             .unwrap();
         }
 
-        let backups = scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
-        assert_eq!(backups.len(), 4);
+        let backups =
+            scan_central_backup_dir(&central_backup_dir_for_source(&backup_root, &source)).unwrap();
+        assert_eq!(backups.len(), 3);
         assert_eq!(
             backups
                 .iter()
@@ -4715,8 +6160,15 @@ mod tests {
                 .count(),
             2
         );
+        assert_eq!(
+            backups
+                .iter()
+                .filter(|backup| backup.kind == BackupKind::Rolling)
+                .count(),
+            1
+        );
         assert!(backups.iter().all(|backup| {
-            backup.created_ns >= system_time_nanoseconds(start + Duration::from_secs(2))
+            backup.updated_ns >= system_time_nanoseconds(start + Duration::from_secs(2))
         }));
 
         std::fs::remove_dir_all(root).unwrap();
@@ -4731,14 +6183,14 @@ mod tests {
         let old_previous = seed_central_backup_kind(
             &active_root,
             &source,
-            BackupKind::Previous,
+            BackupKind::Rolling,
             100,
             "old previous",
         );
         let new_previous = seed_central_backup_kind(
             &previous_root,
             &source,
-            BackupKind::Previous,
+            BackupKind::Rolling,
             200,
             "new previous",
         );
@@ -4756,13 +6208,8 @@ mod tests {
             210,
             "new automatic",
         );
-        let old_manual = seed_central_backup_kind(
-            &active_root,
-            &source,
-            BackupKind::Manual,
-            120,
-            "old manual",
-        );
+        let old_manual =
+            seed_central_backup_kind(&active_root, &source, BackupKind::Manual, 120, "old manual");
         let new_manual = seed_central_backup_kind(
             &previous_root,
             &source,
@@ -4794,7 +6241,7 @@ mod tests {
         assert!(new_previous.exists());
         assert!(!old_automatic.exists());
         assert!(new_automatic.exists());
-        assert!(!old_manual.exists());
+        assert!(old_manual.exists());
         assert!(new_manual.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4809,9 +6256,22 @@ mod tests {
         let middle_source = root.join("middle").join("Draft.md");
         let newest_source = root.join("newest").join("Draft.md");
         let protected = seed_central_backup(&backup_root, &protected_source, 700, "aaa");
-        let old = seed_central_backup(&backup_root, &old_source, 800, "bbb");
-        let middle = seed_central_backup(&backup_root, &middle_source, 950, "ccc");
-        let newest = seed_central_backup(&backup_root, &newest_source, 990, "ddd");
+        let old =
+            seed_central_backup_kind(&backup_root, &old_source, BackupKind::Automatic, 800, "bbb");
+        let middle = seed_central_backup_kind(
+            &backup_root,
+            &middle_source,
+            BackupKind::Automatic,
+            950,
+            "ccc",
+        );
+        let newest = seed_central_backup_kind(
+            &backup_root,
+            &newest_source,
+            BackupKind::Automatic,
+            990,
+            "ddd",
+        );
         let mut settings = test_backup_settings();
         settings.max_total_files = 2;
         settings.max_total_bytes = 6;
@@ -4841,6 +6301,130 @@ mod tests {
     }
 
     #[test]
+    fn configured_manual_retention_expires_manual_checkpoints() {
+        let root = temporary_test_dir("manual-retention");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let manual = seed_central_backup_kind(
+            &backup_root,
+            &source,
+            BackupKind::Manual,
+            100,
+            "manual checkpoint",
+        );
+        let mut settings = test_backup_settings();
+        settings.manual_retention = Some(Duration::from_secs(10));
+
+        cleanup_central_backups(
+            &backup_roots,
+            &source,
+            None,
+            system_time_nanoseconds(UNIX_EPOCH + Duration::from_secs(200)),
+            false,
+            &settings,
+        )
+        .unwrap();
+
+        assert!(!manual.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unlimited_manual_retention_never_expires_manual_checkpoints() {
+        let root = temporary_test_dir("manual-retention-unlimited");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let manual = seed_central_backup_kind(
+            &backup_root,
+            &source,
+            BackupKind::Manual,
+            100,
+            "manual checkpoint",
+        );
+        let settings = test_backup_settings();
+
+        cleanup_central_backups(
+            &backup_roots,
+            &source,
+            None,
+            system_time_nanoseconds(UNIX_EPOCH + Duration::from_secs(10_000_000)),
+            false,
+            &settings,
+        )
+        .unwrap();
+
+        assert!(manual.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn global_capacity_does_not_evict_unexpired_safety_checkpoints() {
+        let root = temporary_test_dir("global-capacity-preserves-safety");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let safety = seed_central_backup_kind(
+            &backup_root,
+            &root.join("Safety.md"),
+            BackupKind::Safety,
+            900,
+            "safety",
+        );
+        let mut settings = test_backup_settings();
+        settings.max_total_files = 1;
+        settings.safety_retention = Duration::from_secs(1_000);
+
+        let error = enforce_global_backup_limits(
+            &backup_roots,
+            1,
+            1,
+            None,
+            system_time_nanoseconds(UNIX_EPOCH + Duration::from_secs(1_000)),
+            false,
+            &settings,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+        assert!(safety.exists());
+        assert_eq!(scan_all_central_backups(&backup_root).unwrap().len(), 1);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn global_capacity_can_evict_expired_safety_checkpoints() {
+        let root = temporary_test_dir("global-capacity-expires-safety");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let safety = seed_central_backup_kind(
+            &backup_root,
+            &root.join("Safety.md"),
+            BackupKind::Safety,
+            100,
+            "safety",
+        );
+        let mut settings = test_backup_settings();
+        settings.max_total_files = 1;
+        settings.safety_retention = Duration::from_secs(100);
+
+        enforce_global_backup_limits(
+            &backup_roots,
+            1,
+            1,
+            None,
+            system_time_nanoseconds(UNIX_EPOCH + Duration::from_secs(1_000)),
+            false,
+            &settings,
+        )
+        .unwrap();
+
+        assert!(!safety.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn global_cleanup_spans_previous_roots_and_removes_manual_versions_last() {
         let root = temporary_test_dir("global-backup-priority");
         let active_root = root.join("active").join("backups-v1");
@@ -4855,7 +6439,7 @@ mod tests {
         let previous = seed_central_backup_kind(
             &previous_root,
             &root.join("previous.md"),
-            BackupKind::Previous,
+            BackupKind::Rolling,
             100,
             "previous",
         );
@@ -4874,7 +6458,16 @@ mod tests {
         settings.max_total_files = 1;
         settings.max_total_bytes = 1_000_000;
 
-        enforce_global_backup_limits(&backup_roots, 0, 0, None, true, &settings).unwrap();
+        enforce_global_backup_limits(
+            &backup_roots,
+            0,
+            0,
+            None,
+            system_time_nanoseconds(UNIX_EPOCH + Duration::from_secs(1_000)),
+            true,
+            &settings,
+        )
+        .unwrap();
 
         assert!(!automatic.exists());
         assert!(!previous.exists());
@@ -4907,7 +6500,9 @@ mod tests {
 
         let listed = list_backups_for_source(&backup_roots, &source).unwrap();
         assert_eq!(listed.len(), 2);
-        assert!(listed.iter().any(|backup| backup.kind == Some(BackupKind::Manual)));
+        assert!(listed
+            .iter()
+            .any(|backup| backup.kind == Some(BackupKind::Manual)));
         assert!(listed.iter().any(|backup| backup.kind.is_none()));
         assert!(validate_backup_path(
             &backup_roots,
@@ -4915,12 +6510,10 @@ mod tests {
             central.to_string_lossy().to_string()
         )
         .is_ok());
-        assert!(validate_backup_path(
-            &backup_roots,
-            &source,
-            legacy.to_string_lossy().to_string()
-        )
-        .is_ok());
+        assert!(
+            validate_backup_path(&backup_roots, &source, legacy.to_string_lossy().to_string())
+                .is_ok()
+        );
 
         let outside = root.join(format!("{}999.bak", backup_prefix_for_source(&source)));
         std::fs::write(&outside, "outside").unwrap();
@@ -4957,6 +6550,125 @@ mod tests {
     }
 
     #[test]
+    fn deleting_central_backups_preserves_nonempty_history_and_removes_empty_bucket() {
+        let root = temporary_test_dir("delete-central-backup");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        let settings = test_backup_settings();
+        std::fs::write(&source, "first").unwrap();
+        let first = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(4_100_000),
+            &settings,
+        )
+        .unwrap()
+        .unwrap();
+        std::fs::write(&source, "second").unwrap();
+        let second = backup_existing_file_at(
+            &backup_roots,
+            &source,
+            RequestedBackupKind::Manual,
+            UNIX_EPOCH + Duration::from_secs(4_100_001),
+            &settings,
+        )
+        .unwrap()
+        .unwrap();
+        let bucket = central_backup_dir_for_source(&backup_root, &source);
+
+        super::delete_backup_in_roots(&backup_roots, &source, first.to_string_lossy().to_string())
+            .unwrap();
+
+        assert!(!first.exists());
+        assert!(second.exists());
+        assert!(bucket.join(super::SOURCE_METADATA_FILE_NAME).exists());
+
+        super::delete_backup_in_roots(&backup_roots, &source, second.to_string_lossy().to_string())
+            .unwrap();
+
+        assert!(!second.exists());
+        assert!(!bucket.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleting_one_legacy_backup_does_not_touch_other_files() {
+        let root = temporary_test_dir("delete-legacy-backup");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("notes").join("Draft.md");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "current").unwrap();
+        let legacy_dir = legacy_backup_dir_for_source(&source);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let target = legacy_dir.join(format!("{}123.bak", backup_prefix_for_source(&source)));
+        let other = legacy_dir.join(format!("{}456.bak", backup_prefix_for_source(&source)));
+        std::fs::write(&target, "target").unwrap();
+        std::fs::write(&other, "other").unwrap();
+
+        super::delete_backup_in_roots(&backup_roots, &source, target.to_string_lossy().to_string())
+            .unwrap();
+
+        assert!(!target.exists());
+        assert!(other.exists());
+        assert!(legacy_dir.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleting_one_backup_rejects_files_outside_the_source_bucket() {
+        let root = temporary_test_dir("delete-backup-rejects-outside");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        std::fs::write(&source, "current").unwrap();
+        let outside = root.join(format!("{}123.bak", backup_prefix_for_source(&source)));
+        std::fs::write(&outside, "outside").unwrap();
+
+        let error = super::delete_backup_in_roots(
+            &backup_roots,
+            &source,
+            outside.to_string_lossy().to_string(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "Backup is outside the current file backup folder.");
+        assert!(outside.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_previous_backups_are_listed_as_rolling_checkpoints() {
+        let root = temporary_test_dir("legacy-previous-kind");
+        let backup_root = root.join("app-data").join("backups-v1");
+        let backup_roots = test_backup_roots(&backup_root);
+        let source = root.join("Draft.md");
+        std::fs::write(&source, "current").unwrap();
+        let bucket = central_backup_dir_for_source(&backup_root, &source);
+        std::fs::create_dir_all(&bucket).unwrap();
+        let previous = bucket.join(format!(
+            "{}previous.123.bak",
+            backup_prefix_for_source(&source)
+        ));
+        std::fs::write(&previous, "old").unwrap();
+
+        let listed = list_backups_for_source(&backup_roots, &source).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].kind, Some(BackupKind::Rolling));
+        assert_eq!(listed[0].started_at_ms, listed[0].updated_at_ms);
+        assert!(validate_backup_path(
+            &backup_roots,
+            &source,
+            previous.to_string_lossy().to_string()
+        )
+        .is_ok());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn merged_backup_listing_keeps_all_legacy_files() {
         let root = temporary_test_dir("backup-list-limit");
         let backup_root = root.join("app-data").join("backups-v1");
@@ -4973,7 +6685,12 @@ mod tests {
             .unwrap();
         }
 
-        assert_eq!(list_backups_for_source(&backup_roots, &source).unwrap().len(), 60);
+        assert_eq!(
+            list_backups_for_source(&backup_roots, &source)
+                .unwrap()
+                .len(),
+            60
+        );
         assert_eq!(std::fs::read_dir(&legacy_dir).unwrap().count(), 60);
 
         std::fs::remove_dir_all(root).unwrap();
@@ -5022,11 +6739,14 @@ mod tests {
             previous_directories: Vec::new(),
             checkpoint_interval: Duration::from_secs(10 * 60),
             automatic_versions_per_file: 48,
+            safety_versions_per_file: 32,
             manual_versions_per_file: 32,
             max_total_files: 2_048,
             max_total_bytes: 2_048 * MIB,
             max_backup_file_bytes: 256 * MIB,
             automatic_retention: Duration::from_secs(180 * 24 * 60 * 60),
+            safety_retention: Duration::from_secs(365 * 24 * 60 * 60),
+            manual_retention: None,
             orphan_retention: Duration::from_secs(365 * 24 * 60 * 60),
         }
     }
@@ -5078,6 +6798,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_build_info,
             create_markdown_file,
+            delete_markdown_backup,
             delete_markdown_backup_history,
             existing_markdown_file_stats,
             initial_markdown_file_paths,
@@ -5094,12 +6815,14 @@ pub fn run() {
             reveal_markdown_file,
             list_markdown_backup_histories,
             list_markdown_backups,
+            markdown_backup_storage_usage,
             list_markdown_workspace,
             manage_file_association,
             stat_markdown_file,
             write_export_file,
             write_app_state_file,
-            write_markdown_file
+            write_markdown_file,
+            seal_markdown_backup_rolling
         ])
         .run(tauri::generate_context!())
         .expect("error while running NyaMarkdownor");

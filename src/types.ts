@@ -24,11 +24,14 @@ export type BackupPreferences = {
   previousDirectories: string[];
   checkpointIntervalMinutes: number;
   automaticVersionsPerFile: number;
+  safetyVersionsPerFile: number;
   manualVersionsPerFile: number;
   maxTotalFiles: number;
   maxTotalSizeMb: number;
   maxBackupFileSizeMb: number;
   automaticRetentionDays: number;
+  safetyRetentionDays: number;
+  manualRetentionDays: number;
   orphanRetentionDays: number;
 };
 

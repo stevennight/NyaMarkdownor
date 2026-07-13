@@ -9,7 +9,7 @@ function environmentValue(name: string): string {
   return processEnvironment?.[name]?.trim() ?? "";
 }
 
-const packageVersion = environmentValue("npm_package_version") || "0.1.0";
+const packageVersion = environmentValue("npm_package_version") || "1.0.0";
 
 const buildInfo = {
   name: "NyaMarkdownor",

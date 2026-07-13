@@ -1,15 +1,44 @@
-import type { MarkdownDocument, MarkdownFileStats, MarkdownLineEnding } from "../types";
+import type { BackupPreferences, MarkdownDocument, MarkdownFileStats, MarkdownLineEnding } from "../types";
 import { queueDesktopStoreTextWrite, readDesktopStoreText } from "./desktopStore";
-import { isMarkdownLineEnding, normalizeMarkdownLineEndings, normalizeMarkdownText } from "./lineEndings";
+import { isMarkdownLineEnding, normalizeMarkdownText } from "./lineEndings";
+import { localPathKey } from "./localPathKeys";
+import { defaultBackupPreferences } from "./preferences";
 
 const SNAPSHOT_STORAGE_KEY = "nya-markdownor-draft-snapshots-v1";
-const MAX_SNAPSHOTS_PER_DOCUMENT = 8;
-const MAX_SNAPSHOTS_TOTAL = 32;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MIB = 1024 * 1024;
 
-export type DraftSnapshotKind = "automatic" | "manual" | "preserved";
+export type BackupVersionCategory = "automatic" | "safety" | "manual";
+
+export type DraftSnapshotKind = "manual" | "safety";
+
+export type DraftSnapshotReason =
+  | "manual"
+  | "reload"
+  | "restore"
+  | "close"
+  | "recovery-discard"
+  | "save-conflict"
+  | "save-as-overwrite"
+  | "window-close"
+  | "legacy-idle"
+  | "legacy-preserved";
+
+export type LegacyDraftSnapshotKind = "automatic" | "preserved";
+
+export type DraftSnapshotCreateReason =
+  | DraftSnapshotKind
+  | DraftSnapshotReason
+  | LegacyDraftSnapshotKind;
+
+export type DraftSnapshotReasonEvent = {
+  reason: DraftSnapshotReason;
+  occurredAt: number;
+};
 
 export type DraftSnapshot = {
   id: string;
+  documentId: string | null;
   fileName: string;
   filePath: string | null;
   markdown: string;
@@ -18,7 +47,10 @@ export type DraftSnapshot = {
   fileStats: MarkdownFileStats | null;
   createdAt: number;
   size: number;
+  contentHash: string;
   kind: DraftSnapshotKind;
+  reason: DraftSnapshotReason;
+  reasons: DraftSnapshotReasonEvent[];
 };
 
 export type DraftSnapshotsRecord = {
@@ -33,66 +65,208 @@ export type DraftSnapshotsUpdate = {
   changed: boolean;
 };
 
+export type BackupRetentionPolicy = {
+  versionsPerFile: number;
+  retentionDays: number;
+};
+
+export type DraftSnapshotRetentionOptions = {
+  now?: number;
+  maxTotalSnapshots?: number;
+  /**
+   * New entries being preflighted. When one cannot be retained because of a
+   * count or byte limit, `capacityExceeded` remains true even if older safety
+   * entries were removed while making room.
+   */
+  candidateSnapshotIds?: readonly string[];
+};
+
+export type DraftSnapshotRetentionResult = {
+  snapshots: DraftSnapshot[];
+  removed: DraftSnapshot[];
+  capacityExceeded: boolean;
+};
+
+export function getBackupRetentionPolicy(
+  preferences: BackupPreferences,
+  category: BackupVersionCategory
+): BackupRetentionPolicy {
+  if (category === "automatic") {
+    return {
+      versionsPerFile: preferences.automaticVersionsPerFile,
+      retentionDays: preferences.automaticRetentionDays
+    };
+  }
+  if (category === "safety") {
+    return {
+      versionsPerFile: preferences.safetyVersionsPerFile,
+      retentionDays: preferences.safetyRetentionDays
+    };
+  }
+  return {
+    versionsPerFile: preferences.manualVersionsPerFile,
+    retentionDays: preferences.manualRetentionDays
+  };
+}
+
 export function createDraftSnapshot(
   document: MarkdownDocument,
   createdAt = Date.now(),
-  kind: DraftSnapshotKind = "preserved"
+  kindOrReason: DraftSnapshotCreateReason = "safety",
+  documentId: string | null = null
 ): DraftSnapshot {
-  const key = document.filePath ?? document.fileName;
+  const { kind, reason } = classifySnapshotReason(kindOrReason);
+  const normalized = normalizeMarkdownText(document.markdown);
+  const key = document.filePath ?? documentId ?? document.fileName;
+  const contentHash = hashString(normalized.markdown);
   return {
-    id: `${createdAt}-${hashString(`${key}\n${document.markdown}`)}`,
+    id: `${createdAt}-${hashString(`${key}\n${normalized.markdown}`)}`,
+    documentId: document.filePath ? null : documentId,
     fileName: document.fileName,
     filePath: document.filePath,
-    markdown: document.markdown,
-    lastSavedMarkdown: document.lastSavedMarkdown,
+    markdown: normalized.markdown,
+    lastSavedMarkdown: normalizeMarkdownText(document.lastSavedMarkdown).markdown,
     lineEnding: document.lineEnding,
     fileStats: document.fileStats ?? null,
     createdAt,
-    size: new Blob([document.markdown]).size,
-    kind
+    size: new Blob([normalized.markdown]).size,
+    contentHash,
+    kind,
+    reason,
+    reasons: [{ reason, occurredAt: createdAt }]
   };
 }
 
-export function rememberDraftSnapshot(snapshots: DraftSnapshot[], snapshot: DraftSnapshot): DraftSnapshot[] {
-  if (!snapshot.markdown.trim()) return snapshots;
-
-  const key = snapshotDocumentKey(snapshot);
-  const latestForDocument = snapshots
-    .filter((current) => snapshotDocumentKey(current) === key)
-    .sort((left, right) => right.createdAt - left.createdAt)[0];
-
-  if (latestForDocument?.markdown === snapshot.markdown) return snapshots;
-
-  const next: DraftSnapshot[] = [];
-  const counts = new Map<string, number>();
-
-  for (const candidate of [snapshot, ...snapshots].sort((left, right) => right.createdAt - left.createdAt)) {
-    const candidateKey = snapshotDocumentKey(candidate);
-    const count = counts.get(candidateKey) ?? 0;
-    if (count >= MAX_SNAPSHOTS_PER_DOCUMENT) continue;
-
-    next.push(candidate);
-    counts.set(candidateKey, count + 1);
-    if (next.length >= MAX_SNAPSHOTS_TOTAL) break;
+export function rememberDraftSnapshot(
+  snapshots: DraftSnapshot[],
+  snapshot: DraftSnapshot,
+  preferences: BackupPreferences = defaultBackupPreferences,
+  options: DraftSnapshotRetentionOptions = {}
+): DraftSnapshot[] {
+  const next = mergeRememberedSnapshot(snapshots, snapshot);
+  const candidateWasAdded = next.includes(snapshot);
+  const candidateSnapshotIds = candidateWasAdded
+    ? [...(options.candidateSnapshotIds ?? []), snapshot.id]
+    : options.candidateSnapshotIds;
+  const retention = applyDraftSnapshotRetention(next, preferences, {
+    ...options,
+    candidateSnapshotIds
+  });
+  if (candidateWasAdded && retention.capacityExceeded) {
+    return snapshots;
   }
-
-  return next;
+  const retained = retention.snapshots;
+  return sameSnapshotArray(retained, snapshots) ? snapshots : retained;
 }
 
-export function rememberDraftSnapshots(snapshots: DraftSnapshot[], nextSnapshots: readonly DraftSnapshot[]): DraftSnapshotsUpdate {
-  let changed = false;
+export function rememberDraftSnapshots(
+  snapshots: DraftSnapshot[],
+  nextSnapshots: readonly DraftSnapshot[],
+  preferences: BackupPreferences = defaultBackupPreferences,
+  options: DraftSnapshotRetentionOptions = {}
+): DraftSnapshotsUpdate {
   let next = snapshots;
-
+  const candidateSnapshotIds = new Set(options.candidateSnapshotIds);
+  const addedCandidateIds = new Set<string>();
   for (const snapshot of nextSnapshots) {
-    const remembered = rememberDraftSnapshot(next, snapshot);
-    if (remembered !== next) changed = true;
-    next = remembered;
+    next = mergeRememberedSnapshot(next, snapshot);
+    if (next.includes(snapshot)) {
+      candidateSnapshotIds.add(snapshot.id);
+      addedCandidateIds.add(snapshot.id);
+    }
   }
 
+  const retention = applyDraftSnapshotRetention(next, preferences, {
+    ...options,
+    candidateSnapshotIds: [...candidateSnapshotIds]
+  });
+  if (retention.capacityExceeded && addedCandidateIds.size > 0) {
+    return { snapshots, changed: false };
+  }
+  const retained = retention.snapshots;
+  const changed = !sameSnapshotArray(retained, snapshots);
   return {
-    snapshots: next,
+    snapshots: changed ? retained : snapshots,
     changed
   };
+}
+
+export function applyDraftSnapshotRetention(
+  snapshots: readonly DraftSnapshot[],
+  preferences: BackupPreferences,
+  options: DraftSnapshotRetentionOptions = {}
+): DraftSnapshotRetentionResult {
+  const now = options.now ?? Date.now();
+  const maxTotalSnapshots = normalizeGlobalLimit(options.maxTotalSnapshots ?? preferences.maxTotalFiles);
+  const maxTotalBytes = megabytesToBytes(preferences.maxTotalSizeMb);
+  const maxSnapshotBytes = Math.min(maxTotalBytes, megabytesToBytes(preferences.maxBackupFileSizeMb));
+  const candidateSnapshotIds = new Set(options.candidateSnapshotIds);
+  const sorted = [...snapshots].sort(compareSnapshotsNewestFirst);
+  const counts = new Map<string, number>();
+  const removed = new Set<DraftSnapshot>();
+  const retained: DraftSnapshot[] = [];
+  let protectedManualLimitExceeded = false;
+  let protectedManualSizeExceeded = false;
+  let candidateRejectedForCapacity = false;
+
+  const removeSnapshot = (snapshot: DraftSnapshot, isCapacityRemoval = false) => {
+    removed.add(snapshot);
+    if (isCapacityRemoval && candidateSnapshotIds.has(snapshot.id)) {
+      candidateRejectedForCapacity = true;
+    }
+  };
+
+  for (const snapshot of sorted) {
+    const policy = getBackupRetentionPolicy(preferences, snapshot.kind);
+    const expired = policy.retentionDays > 0 && snapshot.createdAt < now - policy.retentionDays * DAY_MS;
+    const countKey = `${snapshotDocumentKey(snapshot)}\n${snapshot.kind}`;
+    const count = counts.get(countKey) ?? 0;
+
+    if (expired) {
+      removeSnapshot(snapshot);
+      continue;
+    }
+
+    const size = snapshotByteSize(snapshot);
+    if (size > maxSnapshotBytes && snapshot.kind !== "manual") {
+      removeSnapshot(snapshot, true);
+      continue;
+    }
+
+    if (snapshot.kind !== "manual" && count >= policy.versionsPerFile) {
+      removeSnapshot(snapshot, true);
+      continue;
+    }
+
+    counts.set(countKey, count + 1);
+    if (snapshot.kind === "manual" && count >= policy.versionsPerFile) {
+      protectedManualLimitExceeded = true;
+    }
+    if (snapshot.kind === "manual" && size > maxSnapshotBytes) {
+      protectedManualSizeExceeded = true;
+    }
+    retained.push(snapshot);
+  }
+
+  const finalSnapshots = retained.filter((snapshot) => !removed.has(snapshot));
+  return {
+    snapshots: finalSnapshots,
+    removed: [...removed].sort(compareSnapshotsOldestFirst),
+    capacityExceeded:
+      protectedManualLimitExceeded ||
+      protectedManualSizeExceeded ||
+      candidateRejectedForCapacity ||
+      finalSnapshots.length > maxTotalSnapshots ||
+      totalSnapshotBytes(finalSnapshots) > maxTotalBytes
+  };
+}
+
+export function pruneDraftSnapshots(
+  snapshots: readonly DraftSnapshot[],
+  preferences: BackupPreferences,
+  options: DraftSnapshotRetentionOptions = {}
+): DraftSnapshot[] {
+  return applyDraftSnapshotRetention(snapshots, preferences, options).snapshots;
 }
 
 export function forgetDraftSnapshot(snapshots: DraftSnapshot[], snapshotId: string): DraftSnapshot[] {
@@ -109,7 +283,7 @@ export function prioritizeDraftSnapshots(
     const leftCurrent = snapshotDocumentKey(left) === documentKey;
     const rightCurrent = snapshotDocumentKey(right) === documentKey;
     if (leftCurrent !== rightCurrent) return leftCurrent ? -1 : 1;
-    return right.createdAt - left.createdAt;
+    return compareSnapshotsNewestFirst(left, right);
   });
 }
 
@@ -192,8 +366,13 @@ export function parseDraftSnapshotsRecord(raw: string): DraftSnapshotsRecord | n
   }
 }
 
-export function snapshotDocumentKey(snapshot: Pick<DraftSnapshot, "fileName" | "filePath">): string {
-  return snapshot.filePath ?? `draft:${snapshot.fileName}`;
+export function snapshotDocumentKey(
+  snapshot: Pick<DraftSnapshot, "fileName" | "filePath"> & Partial<Pick<DraftSnapshot, "documentId" | "id">>
+): string {
+  if (snapshot.filePath) return `path:${localPathKey(snapshot.filePath)}`;
+  if (snapshot.documentId) return `draft:${snapshot.documentId}`;
+  if (snapshot.id) return `legacy-snapshot:${snapshot.id}`;
+  return `legacy-draft:${snapshot.fileName}`;
 }
 
 function normalizeDraftSnapshotsRecord(value: unknown): DraftSnapshotsRecord | null {
@@ -211,15 +390,26 @@ function normalizeDraftSnapshotsRecord(value: unknown): DraftSnapshotsRecord | n
 }
 
 function normalizeDraftSnapshots(value: unknown[], migrateLegacyTableCellBreaks = false): DraftSnapshot[] {
-  return value
+  const normalized = value
     .map((snapshot) => normalizeDraftSnapshot(snapshot, migrateLegacyTableCellBreaks))
     .filter((snapshot): snapshot is DraftSnapshot => snapshot !== null)
-    .sort((left, right) => right.createdAt - left.createdAt);
+    .sort(compareSnapshotsNewestFirst);
+
+  const deduplicated: DraftSnapshot[] = [];
+  for (const snapshot of normalized) {
+    const duplicateIndex = findDuplicateSnapshotIndex(deduplicated, snapshot);
+    if (duplicateIndex < 0) {
+      deduplicated.push(snapshot);
+      continue;
+    }
+    deduplicated[duplicateIndex] = mergeDuplicateSnapshot(deduplicated[duplicateIndex], snapshot, false);
+  }
+  return deduplicated.sort(compareSnapshotsNewestFirst);
 }
 
 function normalizeDraftSnapshot(value: unknown, migrateLegacyTableCellBreaks = false): DraftSnapshot | null {
   if (!value || typeof value !== "object") return null;
-  const snapshot = value as Partial<DraftSnapshot>;
+  const snapshot = value as Partial<DraftSnapshot> & { kind?: unknown; reason?: unknown; reasons?: unknown };
   if (
     typeof snapshot.id !== "string" ||
     typeof snapshot.fileName !== "string" ||
@@ -234,8 +424,20 @@ function normalizeDraftSnapshot(value: unknown, migrateLegacyTableCellBreaks = f
   ) return null;
 
   const normalized = normalizeMarkdownText(snapshot.markdown, { migrateLegacyTableCellBreaks });
+  const classification = classifyStoredSnapshot(snapshot.kind, snapshot.reason);
+  const parsedReasons = normalizeSnapshotReasons(snapshot.reasons, classification.reason, snapshot.createdAt);
+  const kind: DraftSnapshotKind = classification.kind === "manual" || parsedReasons.some((event) => event.reason === "manual")
+    ? "manual"
+    : "safety";
+  const reason: DraftSnapshotReason = kind === "manual" ? "manual" : classification.reason;
+  const documentId = snapshot.filePath
+    ? null
+    : typeof snapshot.documentId === "string" && snapshot.documentId.trim()
+      ? snapshot.documentId
+      : `legacy:${snapshot.id}`;
   return {
     id: snapshot.id,
+    documentId,
     fileName: snapshot.fileName,
     filePath: snapshot.filePath,
     markdown: normalized.markdown,
@@ -244,18 +446,191 @@ function normalizeDraftSnapshot(value: unknown, migrateLegacyTableCellBreaks = f
     fileStats: snapshot.fileStats,
     createdAt: snapshot.createdAt,
     size: new Blob([normalized.markdown]).size,
-    kind: isDraftSnapshotKind(snapshot.kind) ? snapshot.kind : "preserved"
+    contentHash: hashString(normalized.markdown),
+    kind,
+    reason,
+    reasons: mergeReasonEvents(
+      preferredReasonEvent(reason, snapshot.createdAt, parsedReasons),
+      parsedReasons
+    )
   };
 }
 
-function isDraftSnapshotKind(value: unknown): value is DraftSnapshotKind {
-  return value === "automatic" || value === "manual" || value === "preserved";
+function mergeRememberedSnapshot(snapshots: DraftSnapshot[], snapshot: DraftSnapshot): DraftSnapshot[] {
+  const duplicateIndex = findDuplicateSnapshotIndex(snapshots, snapshot);
+  if (duplicateIndex < 0) return [snapshot, ...snapshots];
+
+  const merged = mergeDuplicateSnapshot(snapshots[duplicateIndex], snapshot, true);
+  if (sameSnapshotMetadata(merged, snapshots[duplicateIndex])) return snapshots;
+
+  const next = [...snapshots];
+  next[duplicateIndex] = merged;
+  return next;
+}
+
+function findDuplicateSnapshotIndex(snapshots: readonly DraftSnapshot[], snapshot: DraftSnapshot): number {
+  const documentKey = snapshotDocumentKey(snapshot);
+  return snapshots.findIndex((candidate) => (
+    snapshotDocumentKey(candidate) === documentKey &&
+    candidate.contentHash === snapshot.contentHash &&
+    candidate.markdown === snapshot.markdown
+  ));
+}
+
+function mergeDuplicateSnapshot(
+  existing: DraftSnapshot,
+  incoming: DraftSnapshot,
+  preferIncomingReason: boolean
+): DraftSnapshot {
+  const kind: DraftSnapshotKind = existing.kind === "manual" || incoming.kind === "manual" ? "manual" : "safety";
+  const reason = kind === "manual"
+    ? "manual"
+    : preferIncomingReason
+      ? incoming.reason
+      : existing.reason;
+  const shouldPreferIncomingEvent = preferIncomingReason && (
+    incoming.reason !== existing.reason || incoming.kind !== existing.kind
+  );
+  const preferredSnapshots = shouldPreferIncomingEvent ? [incoming, existing] : [existing, incoming];
+  const primaryEvent = preferredSnapshots
+    .flatMap((snapshot) => snapshot.reasons)
+    .find((event) => event.reason === reason) ?? { reason, occurredAt: existing.createdAt };
+  const reasons = mergeReasonEvents(
+    primaryEvent,
+    ...(preferIncomingReason
+      ? [incoming.reasons, existing.reasons]
+      : [existing.reasons, incoming.reasons])
+  );
+
+  if (existing.kind === kind && existing.reason === reason && sameReasonEvents(existing.reasons, reasons)) return existing;
+  return {
+    ...existing,
+    kind,
+    reason,
+    reasons
+  };
+}
+
+function classifySnapshotReason(value: DraftSnapshotCreateReason): Pick<DraftSnapshot, "kind" | "reason"> {
+  if (value === "manual") return { kind: "manual", reason: "manual" };
+  if (value === "automatic") return { kind: "safety", reason: "legacy-idle" };
+  if (value === "preserved" || value === "safety") return { kind: "safety", reason: "legacy-preserved" };
+  return { kind: "safety", reason: value };
+}
+
+function classifyStoredSnapshot(kind: unknown, reason: unknown): Pick<DraftSnapshot, "kind" | "reason"> {
+  if (kind === "manual" || reason === "manual") return { kind: "manual", reason: "manual" };
+  if (isDraftSnapshotReason(reason)) return { kind: "safety", reason };
+  if (kind === "automatic") return { kind: "safety", reason: "legacy-idle" };
+  return { kind: "safety", reason: "legacy-preserved" };
+}
+
+function normalizeSnapshotReasons(
+  value: unknown,
+  fallback: DraftSnapshotReason,
+  fallbackOccurredAt: number
+): DraftSnapshotReasonEvent[] {
+  if (!Array.isArray(value)) return [{ reason: fallback, occurredAt: fallbackOccurredAt }];
+  const reasons = value
+    .map((event): DraftSnapshotReasonEvent | null => {
+      if (isDraftSnapshotReason(event)) {
+        return { reason: event, occurredAt: fallbackOccurredAt };
+      }
+      if (!event || typeof event !== "object") return null;
+      const candidate = event as Partial<DraftSnapshotReasonEvent>;
+      if (!isDraftSnapshotReason(candidate.reason)) return null;
+      if (typeof candidate.occurredAt !== "number" || !Number.isFinite(candidate.occurredAt)) return null;
+      return { reason: candidate.reason, occurredAt: candidate.occurredAt };
+    })
+    .filter((event): event is DraftSnapshotReasonEvent => event !== null);
+  return mergeReasonEvents(
+    preferredReasonEvent(fallback, fallbackOccurredAt, reasons),
+    reasons
+  );
+}
+
+function preferredReasonEvent(
+  reason: DraftSnapshotReason,
+  occurredAt: number,
+  events: readonly DraftSnapshotReasonEvent[]
+): DraftSnapshotReasonEvent {
+  return events.find((event) => event.reason === reason) ?? { reason, occurredAt };
+}
+
+function mergeReasonEvents(
+  primary: DraftSnapshotReasonEvent,
+  ...collections: readonly (readonly DraftSnapshotReasonEvent[])[]
+): DraftSnapshotReasonEvent[] {
+  const reasons = [primary];
+  const seen = new Set<DraftSnapshotReason>([primary.reason]);
+  for (const collection of collections) {
+    for (const event of collection) {
+      if (seen.has(event.reason)) continue;
+      seen.add(event.reason);
+      reasons.push(event);
+    }
+  }
+  return reasons;
+}
+
+function isDraftSnapshotReason(value: unknown): value is DraftSnapshotReason {
+  return value === "manual" ||
+    value === "reload" ||
+    value === "restore" ||
+    value === "close" ||
+    value === "recovery-discard" ||
+    value === "save-conflict" ||
+    value === "save-as-overwrite" ||
+    value === "window-close" ||
+    value === "legacy-idle" ||
+    value === "legacy-preserved";
 }
 
 function isFileStats(value: unknown): value is MarkdownFileStats {
   if (!value || typeof value !== "object") return false;
   const stats = value as Partial<MarkdownFileStats>;
   return typeof stats.modifiedMs === "number" && typeof stats.size === "number";
+}
+
+function normalizeGlobalLimit(value: number): number {
+  if (!Number.isFinite(value)) return Number.MAX_SAFE_INTEGER;
+  return Math.max(0, Math.floor(value));
+}
+
+function megabytesToBytes(value: number): number {
+  if (!Number.isFinite(value)) return Number.MAX_SAFE_INTEGER;
+  return Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(value * MIB)));
+}
+
+function snapshotByteSize(snapshot: Pick<DraftSnapshot, "size">): number {
+  if (!Number.isFinite(snapshot.size)) return 0;
+  return Math.max(0, Math.floor(snapshot.size));
+}
+
+function totalSnapshotBytes(snapshots: readonly DraftSnapshot[]): number {
+  return snapshots.reduce((total, snapshot) => total + snapshotByteSize(snapshot), 0);
+}
+
+function compareSnapshotsNewestFirst(left: DraftSnapshot, right: DraftSnapshot): number {
+  return right.createdAt - left.createdAt;
+}
+
+function compareSnapshotsOldestFirst(left: DraftSnapshot, right: DraftSnapshot): number {
+  return left.createdAt - right.createdAt;
+}
+
+function sameSnapshotArray(left: readonly DraftSnapshot[], right: readonly DraftSnapshot[]): boolean {
+  return left.length === right.length && left.every((snapshot, index) => snapshot === right[index]);
+}
+
+function sameSnapshotMetadata(left: DraftSnapshot, right: DraftSnapshot): boolean {
+  return left.kind === right.kind && left.reason === right.reason && sameReasonEvents(left.reasons, right.reasons);
+}
+
+function sameReasonEvents(left: readonly DraftSnapshotReasonEvent[], right: readonly DraftSnapshotReasonEvent[]): boolean {
+  return left.length === right.length && left.every((event, index) => (
+    event.reason === right[index]?.reason && event.occurredAt === right[index]?.occurredAt
+  ));
 }
 
 function hashString(value: string): string {

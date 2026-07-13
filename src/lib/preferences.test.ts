@@ -51,11 +51,14 @@ describe("preferences", () => {
         previousDirectories: ["", "  D:/one  ", "D:/one", "D:/two", null, "D:/three", "D:/four", "D:/five", "D:/six", "D:/seven", "D:/eight", "D:/nine"],
         checkpointIntervalMinutes: 0,
         automaticVersionsPerFile: 999,
+        safetyVersionsPerFile: 999,
         manualVersionsPerFile: -1,
         maxTotalFiles: 24,
         maxTotalSizeMb: 99999,
         maxBackupFileSizeMb: 1,
         automaticRetentionDays: 99999,
+        safetyRetentionDays: 0,
+        manualRetentionDays: -1,
         orphanRetentionDays: 0
       } as never
     });
@@ -65,13 +68,25 @@ describe("preferences", () => {
       previousDirectories: ["D:/one", "D:/two", "D:/three", "D:/four", "D:/five", "D:/six", "D:/seven", "D:/eight"],
       checkpointIntervalMinutes: 1,
       automaticVersionsPerFile: 256,
+      safetyVersionsPerFile: 256,
       manualVersionsPerFile: 1,
       maxTotalFiles: 128,
       maxTotalSizeMb: 32768,
       maxBackupFileSizeMb: 16,
       automaticRetentionDays: 3650,
+      safetyRetentionDays: 7,
+      manualRetentionDays: 0,
       orphanRetentionDays: 7
     });
+  });
+
+  it("keeps zero manual retention as never expiring by age", () => {
+    expect(normalizePreferences({
+      backup: {
+        ...defaultBackupPreferences,
+        manualRetentionDays: 0
+      }
+    }).backup.manualRetentionDays).toBe(0);
   });
 
   it("keeps valid custom backup preferences and rounds numeric values", () => {

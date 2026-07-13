@@ -32,6 +32,7 @@ import {
   Bold,
   ClipboardCopy,
   ChevronDown,
+  ChevronRight,
   Check,
   Command,
   Columns2,
@@ -112,8 +113,11 @@ import {
 } from "../lib/tables";
 import {
   deleteMarkdownBackupHistory,
+  deleteMarkdownBackup,
+  existingMarkdownFileStats,
   listMarkdownBackups,
   listMarkdownBackupHistories,
+  markdownBackupStorageUsage,
   listMarkdownWorkspace,
   initialMarkdownFilePaths,
   importMarkdownFilesAsDrafts,
@@ -127,6 +131,7 @@ import {
   readMarkdownPath,
   saveHtmlExport,
   saveMarkdownFile,
+  sealMarkdownBackupRolling,
   openMarkdownFilesToastWithFailures,
   openedFileHasLocalBinding,
   manageFileAssociation,
@@ -169,13 +174,13 @@ import {
 } from "../lib/tableDocumentCommands";
 import { forgetRecentFile, loadDesktopRecentFilesRecord, loadRecentFiles, loadRecentFilesRecord, rememberRecentFile, rememberRecentFiles, saveRecentFiles } from "../lib/recentFiles";
 import {
+  applyDraftSnapshotRetention,
   createDraftSnapshot,
   forgetDraftSnapshot,
   loadDesktopDraftSnapshotsRecord,
   loadDraftSnapshots,
   loadDraftSnapshotsRecord,
   rememberDraftSnapshot,
-  rememberDraftSnapshots,
   saveDraftSnapshots,
   saveDraftSnapshotsImmediately,
   snapshotDocumentKey,
@@ -235,7 +240,14 @@ import {
 } from "../lib/diskReview";
 import { getTabNavigationShortcut, getTableSelectionShortcut, type TabNavigationShortcut, type TableSelectionShortcut } from "../lib/appShortcuts";
 import { documentWindowTitle } from "../lib/windowTitle";
-import { sameLocalPath } from "../lib/localPathKeys";
+import { localPathKey, sameLocalPath } from "../lib/localPathKeys";
+import {
+  buildFileHistoryDocuments,
+  fileHistoryDocumentKey,
+  removeSnapshotsForDocument,
+  type FileHistoryDocument,
+  type FileHistorySourceStates
+} from "../lib/fileHistory";
 import { queueKeyedTask } from "../lib/keyedTaskQueue";
 import {
   activeDocumentTabIdAfterClosing,
@@ -270,6 +282,7 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useMarkdownWorker } from "../hooks/useMarkdownWorker";
 import { CommandPalette } from "./CommandPalette";
 import { SettingsDialog } from "./SettingsDialog";
+import { FileHistoryManagerDialog } from "./FileHistoryManagerDialog";
 import { BackupCompareDialog } from "./BackupCompareDialog";
 import { FindReplacePanel } from "./FindReplacePanel";
 import { InsertTableDialog, type TableSizeDraft } from "./InsertTableDialog";
@@ -322,8 +335,9 @@ A local-first Markdown editor aiming for a polished desktop writing experience.
 - Modern visual system for long writing sessions.
 `;
 
-const DRAFT_SNAPSHOT_IDLE_MS = 20000;
 const AUTO_SAVE_IDLE_MS = 1600;
+const WORK_RECOVERY_IDLE_MS = 500;
+const WORK_RECOVERY_MAX_DELAY_MS = 5000;
 const BACKUP_HISTORY_REFRESH_MS = 30000;
 const MAX_INTERACTIVE_BACKUP_COMPARE_BYTES = 16 * 1024 * 1024;
 const TAB_DRAG_MIME = "application/x-nya-markdownor-tab";
@@ -335,13 +349,18 @@ type ConfirmationState = {
   message: string;
   confirmLabel: string;
   cancelLabel: string;
+  alternateLabel?: string;
+  onAlternate?: () => void;
   tone?: "default" | "danger";
 };
 
 type WorkspaceSortMode = "path" | "modified";
 type DocumentTab = DocumentTabState;
 type SaveDocumentResult = "saved" | "canceled" | "downloaded";
-type SaveDiskCheck = MarkdownFileStats | null | false;
+type SaveDiskCheck = {
+  expectedStats: MarkdownFileStats | null;
+  overwriteExternal: boolean;
+} | false;
 const EMPTY_SELECTION_SUMMARY: SelectionSummary = { rangeCount: 0, charCount: 0 };
 type OpenFileInTabAction = "opened" | "switched" | "refreshed" | "opened-disk-version";
 
@@ -388,10 +407,23 @@ type BackupComparisonState = {
   restoreDisabled?: boolean;
 };
 
+type CurrentDocumentCheckpoint =
+  | {
+    source: "disk";
+    timestamp: number;
+    backup: MarkdownBackup;
+  }
+  | {
+    source: "local";
+    timestamp: number;
+    snapshot: DraftSnapshot;
+  };
+
 type ExternalDiskReviewState = {
   tabId: string;
   filePath: string;
   diskFile: OpenedFile;
+  replacementReason?: "reload" | "recovery-discard";
 };
 
 type EditorSelectionState = TextRange & {
@@ -443,6 +475,10 @@ export function App() {
   const [backups, setBackups] = useState<MarkdownBackup[]>([]);
   const [showAllBackups, setShowAllBackups] = useState(false);
   const [backupHistories, setBackupHistories] = useState<MarkdownBackupHistory[]>([]);
+  const [backupHistoriesLoading, setBackupHistoriesLoading] = useState(false);
+  const [historyManagerOpen, setHistoryManagerOpen] = useState(false);
+  const [historySourceStates, setHistorySourceStates] = useState<FileHistorySourceStates>(new Map());
+  const [historySourceStatesLoading, setHistorySourceStatesLoading] = useState(false);
   const [backupComparison, setBackupComparison] = useState<BackupComparisonState | null>(null);
   const [externalDiskReview, setExternalDiskReview] = useState<ExternalDiskReviewState | null>(null);
   const [draftSnapshots, setDraftSnapshots] = useState(loadDraftSnapshots);
@@ -503,7 +539,6 @@ export function App() {
   const pendingEditorFocusTabIdRef = useRef<string | null>(null);
   const autoSaveInFlightTabIdsRef = useRef(new Set<string>());
   const autoSaveAttemptedMarkdownRef = useRef(new Map<string, string>());
-  const autoSaveBackupWarningTabIdsRef = useRef(new Set<string>());
   const documentSaveQueueRef = useRef(new Map<string, Promise<void>>());
   const editorStateSnapshotsRef = useRef(new Map<string, EditorStateSnapshot>());
   const sourceScrollProgressRef = useRef(new Map<string, number>());
@@ -516,6 +551,8 @@ export function App() {
   const queuedSecondaryInstancePathsRef = useRef<string[][]>([]);
   const inactiveDiskReviewCursorRef = useRef(0);
   const promptedExternalDiskVersionsRef = useRef(new Map<string, string>());
+  const lastWorkRecoveryPersistedAtRef = useRef(0);
+  const backupUsageWarningShownRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -601,14 +638,15 @@ export function App() {
     tabId: string,
     filePath: string,
     diskFile: OpenedFile,
-    stats: MarkdownFileStats | null
+    stats: MarkdownFileStats | null,
+    replacementReason: ExternalDiskReviewState["replacementReason"] = "reload"
   ) {
     if (!shouldPromptForDiskReview(promptedExternalDiskVersionsRef.current.get(tabId), tabId, stats)) return;
     const versionKey = diskReviewVersionKey(tabId, stats);
     if (!versionKey) return;
 
     promptedExternalDiskVersionsRef.current.set(tabId, versionKey);
-    setExternalDiskReview({ tabId, filePath, diskFile });
+    setExternalDiskReview({ tabId, filePath, diskFile, replacementReason });
   }
 
   function updateDocumentTab(tabId: string, update: SetStateAction<MarkdownDocument>) {
@@ -657,24 +695,53 @@ export function App() {
     [documentState.markdown, selection.from, viewMode]
   );
   const activeTable = sourceActiveTable;
-  const visibleBackups = showAllBackups ? backups : backups.slice(0, 6);
-  const hiddenBackupCount = backups.length - visibleBackups.length;
-  const orphanedBackupHistories = useMemo(
-    () => backupHistories.filter((history) => !history.sourceExists),
-    [backupHistories]
-  );
   const currentDocumentSnapshotKey = useMemo(
-    () => snapshotDocumentKey(documentState),
-    [documentState.fileName, documentState.filePath]
+    () => fileHistoryDocumentKey({ ...documentState, documentId: activeTab.id }),
+    [activeTab.id, documentState.fileName, documentState.filePath]
   );
   const currentDocumentDraftSnapshots = useMemo(
-    () => draftSnapshots.filter((snapshot) => snapshotDocumentKey(snapshot) === currentDocumentSnapshotKey),
+    () => draftSnapshots.filter((snapshot) => fileHistoryDocumentKey(snapshot) === currentDocumentSnapshotKey),
     [currentDocumentSnapshotKey, draftSnapshots]
   );
-  const otherDraftSnapshots = useMemo(
-    () => draftSnapshots.filter((snapshot) => snapshotDocumentKey(snapshot) !== currentDocumentSnapshotKey),
-    [currentDocumentSnapshotKey, draftSnapshots]
+  const currentDocumentCheckpoints = useMemo<CurrentDocumentCheckpoint[]>(
+    () => [
+      ...backups.map((backup) => ({
+        source: "disk" as const,
+        timestamp: backup.updatedAtMs ?? backup.modifiedMs,
+        backup
+      })),
+      ...currentDocumentDraftSnapshots.map((snapshot) => ({
+        source: "local" as const,
+        timestamp: snapshot.createdAt,
+        snapshot
+      }))
+    ].sort((left, right) => right.timestamp - left.timestamp),
+    [backups, currentDocumentDraftSnapshots]
   );
+  const visibleCheckpoints = showAllBackups
+    ? currentDocumentCheckpoints
+    : currentDocumentCheckpoints.slice(0, 6);
+  const hiddenCheckpointCount = currentDocumentCheckpoints.length - visibleCheckpoints.length;
+  const historyDocuments = useMemo(
+    () => buildFileHistoryDocuments(backupHistories, draftSnapshots, historySourceStates),
+    [backupHistories, draftSnapshots, historySourceStates]
+  );
+  const historyKnownSourcePathsKey = [
+    ...tabs.map((tab) => tab.document.filePath),
+    ...recentFiles.map((file) => file.path),
+    ...draftSnapshots.map((snapshot) => snapshot.filePath)
+  ].filter((path): path is string => Boolean(path)).map(localPathKey).sort().join("\n");
+  const historyKnownSourcePaths = useMemo(() => {
+    const paths = new Map<string, string>();
+    for (const path of [
+      ...tabs.map((tab) => tab.document.filePath),
+      ...recentFiles.map((file) => file.path),
+      ...draftSnapshots.map((snapshot) => snapshot.filePath)
+    ]) {
+      if (path && !paths.has(localPathKey(path))) paths.set(localPathKey(path), path);
+    }
+    return [...paths.values()];
+  }, [historyKnownSourcePathsKey]);
   const workspaceFileView = useMemo(
     () => {
       if (!workspace) return limitWorkspaceFilesForSidebar([]);
@@ -685,13 +752,6 @@ export function App() {
     [workspace, workspaceQuery, workspaceSortMode]
   );
   const dirty = isDocumentDirty(documentState);
-  const hasRecoveryContent = Boolean(
-    documentState.filePath
-    || backups.length > 0
-    || orphanedBackupHistories.length > 0
-    || draftSnapshots.length > 0
-    || dirty
-  );
   const dirtyTabsCount = useMemo(() => dirtyDocuments(tabs).length, [tabs]);
   const hasDirtyTabs = dirtyTabsCount > 0;
   const windowTitle = useMemo(
@@ -976,6 +1036,92 @@ export function App() {
     const initialLocalTabsRecord = loadDocumentTabsRecord();
     const initialLocalSnapshotsRecord = loadDraftSnapshotsRecord();
 
+    type RecoveredTabReconciliation = {
+      tabs: DocumentTab[];
+      externalTabIds: string[];
+      activeReview: ExternalDiskReviewState | null;
+    };
+
+    async function reconcileRecoveredTabs(
+      recoveredTabStates: DocumentTab[],
+      recoveredActiveTabId: string
+    ): Promise<RecoveredTabReconciliation> {
+      const reconciled = await Promise.all(recoveredTabStates.map(async (tab) => {
+        const document = tab.document;
+        const filePath = document.filePath;
+        if (!filePath) return { tab, externalReview: null as ExternalDiskReviewState | null, hasExternalChange: false };
+
+        try {
+          const diskFile = await readMarkdownPath(filePath);
+          if (!diskFile.fileStats) {
+            return { tab, externalReview: null as ExternalDiskReviewState | null, hasExternalChange: true };
+          }
+
+          if (diskFile.markdown === document.markdown) {
+            return {
+              tab: {
+                ...tab,
+                document: {
+                  ...document,
+                  lastSavedMarkdown: diskFile.markdown,
+                  lineEnding: diskFile.lineEnding,
+                  fileStats: diskFile.fileStats
+                }
+              },
+              externalReview: null as ExternalDiskReviewState | null,
+              hasExternalChange: false
+            };
+          }
+
+          if (diskFile.markdown === document.lastSavedMarkdown) {
+            return {
+              tab: {
+                ...tab,
+                document: {
+                  ...document,
+                  lineEnding: diskFile.lineEnding,
+                  fileStats: diskFile.fileStats
+                }
+              },
+              externalReview: null as ExternalDiskReviewState | null,
+              hasExternalChange: false
+            };
+          }
+
+          return {
+            tab,
+            externalReview: { tabId: tab.id, filePath, diskFile },
+            hasExternalChange: true
+          };
+        } catch (error) {
+          console.warn(error);
+          return { tab, externalReview: null as ExternalDiskReviewState | null, hasExternalChange: true };
+        }
+      }));
+
+      const externalReviews = reconciled.flatMap((entry) => entry.externalReview ? [entry.externalReview] : []);
+      return {
+        tabs: reconciled.map((entry) => entry.tab),
+        externalTabIds: reconciled.filter((entry) => entry.hasExternalChange).map((entry) => entry.tab.id),
+        activeReview: externalReviews.find((review) => review.tabId === recoveredActiveTabId) ?? null
+      };
+    }
+
+    function restoreRecoveredExternalChangeState(reconciliation: RecoveredTabReconciliation) {
+      clearExternalChangeState();
+      for (const tabId of reconciliation.externalTabIds) setDocumentTabExternalChange(tabId, true);
+      if (reconciliation.activeReview) {
+        const review = reconciliation.activeReview;
+        promptForExternalDiskReview(
+          review.tabId,
+          review.filePath,
+          review.diskFile,
+          review.diskFile.fileStats ?? null,
+          "recovery-discard"
+        );
+      }
+    }
+
     async function hydrateDesktopRecovery() {
       try {
         const [desktopTabsRecord, desktopDraftRecord, desktopSnapshotsRecord] = await Promise.all([
@@ -995,17 +1141,67 @@ export function App() {
         let recoveredTabs = false;
 
         if (
+          initialLocalTabsRecord
+          && (!desktopTabsRecord || desktopTabsRecord.savedAt <= initialLocalTabsRecord.savedAt)
+          && currentSessionIsInitial
+        ) {
+          const localReconciliation = await reconcileRecoveredTabs(
+            initialLocalTabsRecord.tabs,
+            initialLocalTabsRecord.activeTabId
+          );
+          if (cancelled) return;
+          if (!sameDocumentTabSession(
+            tabsRef.current,
+            activeTabIdRef.current,
+            initialTabSessionRef.current.tabs,
+            initialTabSessionRef.current.activeTabId
+          )) return;
+
+          restoreRecoveredExternalChangeState(localReconciliation);
+          commitDocumentTabSession(localReconciliation.tabs, initialLocalTabsRecord.activeTabId, { focusEditor: false });
+          recoveredTabs = true;
+        }
+
+        if (
           desktopTabsRecord
           && desktopTabsRecord.tabs.length > 0
           && (!initialLocalTabsRecord || desktopTabsRecord.savedAt > initialLocalTabsRecord.savedAt)
           && currentSessionIsInitial
         ) {
-          commitDocumentTabSession(desktopTabsRecord.tabs, desktopTabsRecord.activeTabId, { focusEditor: false });
-          saveDocumentTabsRecord(desktopTabsRecord.tabs, desktopTabsRecord.activeTabId);
-          saveDraftDocument(activeDocumentFromSession(desktopTabsRecord) ?? desktopTabsRecord.tabs[0].document);
+          const reconciliation = await reconcileRecoveredTabs(desktopTabsRecord.tabs, desktopTabsRecord.activeTabId);
+          if (cancelled) return;
+          if (!sameDocumentTabSession(
+            tabsRef.current,
+            activeTabIdRef.current,
+            initialTabSessionRef.current.tabs,
+            initialTabSessionRef.current.activeTabId
+          )) return;
+
+          restoreRecoveredExternalChangeState(reconciliation);
+          commitDocumentTabSession(reconciliation.tabs, desktopTabsRecord.activeTabId, { focusEditor: false });
+          saveDocumentTabsRecord(reconciliation.tabs, desktopTabsRecord.activeTabId);
+          saveDraftDocument(activeDocumentFromSession({ tabs: reconciliation.tabs, activeTabId: desktopTabsRecord.activeTabId }) ?? reconciliation.tabs[0].document);
           clearManualPreviewSnapshot();
-          clearExternalChangeState();
           showToast(desktopTabsRecord.tabs.length > 1 ? "Recovered desktop tabs" : "Recovered desktop draft");
+          recoveredTabs = true;
+        }
+
+        if (
+          !recoveredTabs
+          && initialLocalDraftRecord
+          && (!desktopDraftRecord || desktopDraftRecord.savedAt <= initialLocalDraftRecord.savedAt)
+          && currentSessionIsInitial
+          && sameMarkdownDocument(documentStateRef.current, initialDocumentRef.current)
+        ) {
+          const currentTab = tabsRef.current.find((tab) => tab.id === activeTabIdRef.current) ?? tabsRef.current[0];
+          if (!currentTab) return;
+          const localReconciliation = await reconcileRecoveredTabs([{
+            ...currentTab,
+            document: initialLocalDraftRecord.document
+          }], currentTab.id);
+          if (cancelled) return;
+          restoreRecoveredExternalChangeState(localReconciliation);
+          setDocumentState(localReconciliation.tabs[0].document);
           recoveredTabs = true;
         }
 
@@ -1016,9 +1212,25 @@ export function App() {
           && (!initialLocalDraftRecord || desktopDraftRecord.savedAt > initialLocalDraftRecord.savedAt)
           && sameMarkdownDocument(documentStateRef.current, initialDocumentRef.current)
         ) {
-          setDocumentState(desktopDraftRecord.document);
+          const currentTab = tabsRef.current.find((tab) => tab.id === activeTabIdRef.current) ?? tabsRef.current[0];
+          if (!currentTab) return;
+          const reconciliation = await reconcileRecoveredTabs([
+            {
+              ...currentTab,
+              document: desktopDraftRecord.document
+            }
+          ], currentTab.id);
+          if (cancelled) return;
+          if (!sameDocumentTabSession(
+            tabsRef.current,
+            activeTabIdRef.current,
+            initialTabSessionRef.current.tabs,
+            initialTabSessionRef.current.activeTabId
+          )) return;
+
+          restoreRecoveredExternalChangeState(reconciliation);
+          setDocumentState(reconciliation.tabs[0].document);
           clearManualPreviewSnapshot();
-          clearExternalChangeState();
           showToast("Recovered desktop draft");
         }
 
@@ -1094,33 +1306,17 @@ export function App() {
   useEffect(() => {
     if (!desktopRecoveryReady) return undefined;
 
+    const elapsed = Date.now() - lastWorkRecoveryPersistedAtRef.current;
+    const delay = elapsed >= WORK_RECOVERY_MAX_DELAY_MS ? 0 : WORK_RECOVERY_IDLE_MS;
     const timer = window.setTimeout(() => {
       const { tabs: currentTabs, activeTabId: currentActiveTabId } = currentTabSessionForRecovery();
       saveDocumentTabsRecord(currentTabs, currentActiveTabId);
       saveDraftDocument(activeDocumentFromSession({ tabs: currentTabs, activeTabId: currentActiveTabId }) ?? documentState);
-    }, 450);
+      lastWorkRecoveryPersistedAtRef.current = Date.now();
+    }, delay);
 
     return () => window.clearTimeout(timer);
   }, [desktopRecoveryReady, tabs, activeTabId, documentState]);
-
-  useEffect(() => {
-    if (!documentState.markdown.trim()) return undefined;
-    if (documentState.filePath && !dirty) return undefined;
-
-    const timer = window.setTimeout(() => {
-      createAutomaticDraftSnapshot();
-    }, DRAFT_SNAPSHOT_IDLE_MS);
-
-    return () => window.clearTimeout(timer);
-  }, [
-    dirty,
-    documentState.fileName,
-    documentState.filePath,
-    documentState.markdown,
-    documentState.lastSavedMarkdown,
-    documentState.fileStats?.modifiedMs,
-    documentState.fileStats?.size
-  ]);
 
   useEffect(() => {
     if (!desktopRuntime || !desktopProfileReady) return undefined;
@@ -1165,28 +1361,93 @@ export function App() {
   }, [backupPreferences, documentState.filePath, documentState.lastBackupPath]);
 
   useEffect(() => {
-    if (!desktopRuntime || sidebarPage !== "recovery") return undefined;
+    if (!desktopRuntime || (sidebarPage !== "recovery" && !historyManagerOpen)) return undefined;
     let cancelled = false;
 
-    function loadHistories() {
-      void listMarkdownBackupHistories(backupPreferences)
+    function loadHistories(showLoading = false) {
+      if (showLoading) setBackupHistoriesLoading(true);
+      void listMarkdownBackupHistories(backupPreferences, historyKnownSourcePaths)
         .then((histories) => {
           if (!cancelled) setBackupHistories(histories);
         })
         .catch((error) => {
           console.warn(error);
           if (!cancelled) setBackupHistories([]);
+        })
+        .finally(() => {
+          if (!cancelled) setBackupHistoriesLoading(false);
         });
     }
 
-    loadHistories();
-    const refreshTimer = window.setInterval(loadHistories, BACKUP_HISTORY_REFRESH_MS);
+    loadHistories(historyManagerOpen);
+    const refreshTimer = window.setInterval(() => loadHistories(false), BACKUP_HISTORY_REFRESH_MS);
 
     return () => {
       cancelled = true;
       window.clearInterval(refreshTimer);
     };
-  }, [backupPreferences, desktopRuntime, documentState.lastBackupPath, externalChange, sidebarPage]);
+  }, [backupPreferences, desktopRuntime, documentState.lastBackupPath, externalChange, historyKnownSourcePaths, historyManagerOpen, sidebarPage]);
+
+  useEffect(() => {
+    if (!historyManagerOpen || !desktopRuntime) {
+      setHistorySourceStatesLoading(false);
+      return undefined;
+    }
+
+    const paths = new Map<string, string>();
+    for (const snapshot of draftSnapshots) {
+      if (!snapshot.filePath) continue;
+      const key = localPathKey(snapshot.filePath);
+      if (!paths.has(key)) paths.set(key, snapshot.filePath);
+    }
+    if (paths.size === 0) {
+      setHistorySourceStates(new Map());
+      setHistorySourceStatesLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setHistorySourceStatesLoading(true);
+    void Promise.all([...paths].map(async ([key, path]) => {
+      try {
+        const stats = await existingMarkdownFileStats(path);
+        return [key, stats ? "available" : "missing"] as const;
+      } catch (error) {
+        console.warn(error);
+        return [key, "unknown"] as const;
+      }
+    })).then((entries) => {
+      if (!cancelled) setHistorySourceStates(new Map(entries));
+    }).finally(() => {
+      if (!cancelled) setHistorySourceStatesLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [desktopRuntime, draftSnapshots, historyManagerOpen]);
+
+  useEffect(() => {
+    if (!desktopRuntime || !desktopProfileReady) return undefined;
+    let cancelled = false;
+
+    void markdownBackupStorageUsage(backupPreferences)
+      .then((usage) => {
+        if (cancelled || !usage) return;
+        if (!usage.warning) {
+          backupUsageWarningShownRef.current = false;
+          return;
+        }
+        if (backupUsageWarningShownRef.current) return;
+        backupUsageWarningShownRef.current = true;
+        showToast("Version history storage is over 80% full; open Version History to review it");
+      })
+      .catch((error) => console.warn(error));
+
+    return () => {
+      cancelled = true;
+    };
+  }, [backupPreferences, desktopProfileReady, desktopRuntime, documentState.lastBackupPath]);
 
   useEffect(() => {
     const path = documentState.filePath;
@@ -1370,8 +1631,8 @@ export function App() {
         const confirmed = dirtyTabs.length === 0 || await requestConfirmation({
           title: "Close NyaMarkdownor?",
           message: dirtyTabs.length === 1
-            ? "One tab has unsaved changes. A local recovery snapshot will be written before the window closes."
-            : `${dirtyTabs.length} tabs have unsaved changes. Local recovery snapshots will be written before the window closes.`,
+            ? "One tab has unsaved changes. Its current working state will be restored the next time NyaMarkdownor starts."
+            : `${dirtyTabs.length} tabs have unsaved changes. Their current working states will be restored the next time NyaMarkdownor starts.`,
           confirmLabel: "Close window",
           cancelLabel: "Keep editing",
           tone: "danger"
@@ -1473,6 +1734,28 @@ export function App() {
     confirmationResolverRef.current = null;
     setConfirmation(null);
     resolve?.(accepted);
+  }
+
+  function runConfirmationAlternate() {
+    const action = confirmation?.onAlternate;
+    settleConfirmation(false);
+    action?.();
+  }
+
+  function openVersionHistoryManagement() {
+    setHistoryManagerOpen(true);
+  }
+
+  async function requestHistoryCleanup(title: string, message: string): Promise<void> {
+    await requestConfirmation({
+      title,
+      message,
+      confirmLabel: "Open Version History",
+      cancelLabel: "Cancel",
+      tone: "danger"
+    }).then((openHistory) => {
+      if (openHistory) openVersionHistoryManagement();
+    });
   }
 
   function focusEditorSoon() {
@@ -1769,13 +2052,13 @@ export function App() {
     const tabDirty = isDocumentDirty(tab.document);
     if (tabDirty && !await requestConfirmation({
       title: `Close ${displayMarkdownDocumentName(tab.document)}?`,
-      message: "This tab has unsaved changes. NyaMarkdownor will keep a local recovery snapshot before closing it.",
+      message: "This tab has unsaved changes. NyaMarkdownor will create a safety checkpoint before closing it.",
       confirmLabel: "Close tab",
       cancelLabel: "Keep tab",
       tone: "danger"
     })) return;
 
-    closeDocumentTabsById(new Set([tabId]), "Tab closed");
+    await closeDocumentTabsById(new Set([tabId]), "Tab closed");
   }
 
   async function closeOtherDocumentTabs() {
@@ -1783,7 +2066,7 @@ export function App() {
     const targetIds = new Set(currentTabs.filter((tab) => tab.id !== currentActiveTabId).map((tab) => tab.id));
     await closeDocumentTabsWithConfirmation(targetIds, {
       title: "Close other tabs?",
-      message: "Dirty tabs will be kept as local recovery snapshots before closing.",
+      message: "Dirty tabs will get safety checkpoints before closing.",
       confirmLabel: "Close other tabs",
       doneLabel: "Other tabs closed",
       emptyLabel: "No other tabs to close",
@@ -1796,7 +2079,7 @@ export function App() {
     const targetIds = new Set(documentTabIdsAfter(currentTabs.map((tab) => tab.id), currentActiveTabId));
     await closeDocumentTabsWithConfirmation(targetIds, {
       title: "Close tabs to the right?",
-      message: "Dirty tabs to the right will be kept as local recovery snapshots before closing.",
+      message: "Dirty tabs to the right will get safety checkpoints before closing.",
       confirmLabel: "Close right tabs",
       doneLabel: "Right tabs closed",
       emptyLabel: "No tabs to the right",
@@ -1821,7 +2104,7 @@ export function App() {
     const { tabs: currentTabs } = currentTabSessionForRecovery();
     await closeDocumentTabsWithConfirmation(new Set(currentTabs.map((tab) => tab.id)), {
       title: "Close all tabs?",
-      message: "Dirty tabs will be kept as local recovery snapshots before closing. A new blank document will open afterward.",
+      message: "Dirty tabs will get safety checkpoints before closing. A new blank document will open afterward.",
       confirmLabel: "Close all tabs",
       doneLabel: "All tabs closed",
       emptyLabel: "No tabs to close",
@@ -1853,7 +2136,7 @@ export function App() {
       && !await requestConfirmation({
         title: options.title,
         message: dirtyTargets.length > 0
-          ? `${options.message} ${dirtyTargets.length} dirty ${dirtyTargets.length === 1 ? "tab" : "tabs"} will get recovery snapshots.`
+          ? `${options.message} ${dirtyTargets.length} dirty ${dirtyTargets.length === 1 ? "tab" : "tabs"} will get safety checkpoints.`
           : options.message,
         confirmLabel: options.confirmLabel,
         cancelLabel: "Keep tabs",
@@ -1861,15 +2144,23 @@ export function App() {
       })
     ) return;
 
-    closeDocumentTabsById(targetIds, options.doneLabel);
+    await closeDocumentTabsById(targetIds, options.doneLabel);
   }
 
-  function closeDocumentTabsById(targetIds: Set<string>, toastLabel: string) {
+  async function closeDocumentTabsById(targetIds: Set<string>, toastLabel: string) {
     const { tabs: currentTabs, activeTabId: currentActiveTabId } = currentTabSessionForRecovery();
     const targetTabs = currentTabs.filter((tab) => targetIds.has(tab.id));
     if (!targetTabs.length) return;
 
-    preserveDocumentDraftSnapshots(targetTabs.filter((tab) => isDocumentDirty(tab.document)).map((tab) => tab.document));
+    for (const target of targetTabs) {
+      if (!isDocumentDirty(target.document)) continue;
+      if (await preserveDocumentSafetyCheckpoint(target.document, "close", target.id)) continue;
+      await requestHistoryCleanup(
+        "Close canceled",
+        "The required safety checkpoint could not be created. Open Version History to free space, then try again."
+      );
+      return;
+    }
     setClosedTabs((current) => rememberClosedDocumentTabs(current, targetTabs));
     for (const tab of targetTabs) forgetEditorStateSnapshot(tab.id);
 
@@ -2591,7 +2882,6 @@ export function App() {
   function setAutoSave(value: boolean) {
     if (value) {
       autoSaveAttemptedMarkdownRef.current.clear();
-      autoSaveBackupWarningTabIdsRef.current.clear();
     }
     setAutoSaveState(value);
   }
@@ -3598,7 +3888,12 @@ export function App() {
     showToast("Removed from recent files");
   }
 
-  function applyDiskFileToDocumentTab(tabId: string, expectedPath: string, opened: OpenedFile): boolean {
+  async function applyDiskFileToDocumentTab(
+    tabId: string,
+    expectedPath: string,
+    opened: OpenedFile,
+    replacementReason: "reload" | "recovery-discard" = "reload"
+  ): Promise<boolean> {
     const session = currentTabSessionForRecovery();
     const liveTab = session.tabs.find((candidate) => candidate.id === tabId);
     if (
@@ -3610,7 +3905,20 @@ export function App() {
       return false;
     }
 
-    preserveDirtyDraftSnapshotBeforeReplace(liveTab.document);
+    const mustPreserveRecoveryContent = replacementReason === "recovery-discard"
+      && liveTab.document.markdown !== opened.markdown;
+    if (!await preserveDirtyDraftSnapshotBeforeReplace(
+      liveTab.document,
+      replacementReason,
+      mustPreserveRecoveryContent,
+      liveTab.id
+    )) {
+      await requestHistoryCleanup(
+        "Reload canceled",
+        "The required safety checkpoint could not be created. Open Version History to free space, then try again."
+      );
+      return false;
+    }
     richDocumentHistoriesRef.current.delete(tabId);
     updateDocumentTab(tabId, {
       fileName: opened.name,
@@ -3628,8 +3936,13 @@ export function App() {
     return true;
   }
 
-  function reloadExternalDiskReview(review: ExternalDiskReviewState) {
-    if (applyDiskFileToDocumentTab(review.tabId, review.filePath, review.diskFile)) {
+  async function reloadExternalDiskReview(review: ExternalDiskReviewState) {
+    if (await applyDiskFileToDocumentTab(
+      review.tabId,
+      review.filePath,
+      review.diskFile,
+      review.replacementReason ?? "reload"
+    )) {
       showToast(`Reloaded ${review.diskFile.name}`);
     }
   }
@@ -3654,7 +3967,7 @@ export function App() {
     }
 
     setBackupComparison({
-      restore: () => reloadExternalDiskReview(review),
+      restore: () => void reloadExternalDiskReview(review),
       tabId: review.tabId,
       versionMarkdown: review.diskFile.markdown,
       currentMarkdown: liveTab.document.markdown,
@@ -3723,7 +4036,7 @@ export function App() {
 
     if (isDocumentDirty(document) && !await requestConfirmation({
       title: "Reload from disk?",
-      message: "Reloading will replace the current unsaved editor content with the file currently on disk after keeping a local recovery snapshot.",
+      message: "Reloading will replace the current unsaved editor content with the file currently on disk after creating a safety checkpoint.",
       confirmLabel: "Reload",
       cancelLabel: "Keep editing",
       tone: "danger"
@@ -3731,7 +4044,7 @@ export function App() {
 
     try {
       const opened = await readMarkdownPath(document.filePath);
-      if (applyDiskFileToDocumentTab(tab.id, document.filePath, opened)) showToast(`Reloaded ${opened.name}`);
+      if (await applyDiskFileToDocumentTab(tab.id, document.filePath, opened)) showToast(`Reloaded ${opened.name}`);
     } catch (error) {
       console.warn(error);
       showToast("File could not be reloaded");
@@ -3770,23 +4083,27 @@ export function App() {
 
   async function confirmSaveAgainstDiskVersion(tab: DocumentTab, interactive = true): Promise<SaveDiskCheck> {
     const document = tab.document;
-    if (!document.filePath) return null;
+    if (!document.filePath) return { expectedStats: null, overwriteExternal: false };
     if (!document.fileStats) {
       if (!interactive) {
         setDocumentTabExternalChange(tab.id, true);
         return false;
       }
-      return await requestUnverifiedSaveConfirmation(tab) ? null : false;
+      return await requestUnverifiedSaveConfirmation(tab)
+        ? { expectedStats: null, overwriteExternal: true }
+        : false;
     }
 
     try {
       const currentStats = await readMarkdownFileStats(document.filePath);
       const needsReview = diskNeedsReview(document.fileStats, currentStats);
       setDocumentTabExternalChange(tab.id, needsReview);
-      if (!needsReview) return currentStats;
+      if (!needsReview) return { expectedStats: currentStats, overwriteExternal: false };
       if (!currentStats) {
         if (!interactive) return false;
-        return await requestUnverifiedSaveConfirmation(tab) ? null : false;
+        return await requestUnverifiedSaveConfirmation(tab)
+          ? { expectedStats: null, overwriteExternal: true }
+          : false;
       }
 
       const diskFile = await readMarkdownPath(document.filePath);
@@ -3797,7 +4114,7 @@ export function App() {
           fileStats: confirmedStats
         }));
         setDocumentTabExternalChange(tab.id, false);
-        return confirmedStats;
+        return { expectedStats: confirmedStats, overwriteExternal: false };
       }
 
       if (!interactive) return false;
@@ -3809,14 +4126,16 @@ export function App() {
         confirmLabel: "Save anyway",
         cancelLabel: "Review first",
         tone: "danger"
-      }) ? confirmedStats : false;
+      }) ? { expectedStats: confirmedStats, overwriteExternal: true } : false;
     } catch (error) {
       console.warn(error);
       if (!interactive) {
         setDocumentTabExternalChange(tab.id, true);
         return false;
       }
-      return await requestUnverifiedSaveConfirmation(tab) ? null : false;
+      return await requestUnverifiedSaveConfirmation(tab)
+        ? { expectedStats: null, overwriteExternal: true }
+        : false;
     }
   }
 
@@ -3883,7 +4202,7 @@ export function App() {
       if (candidate.id !== conflict.id) return [candidate];
 
       if (conflictAction === "detach-conflicting-tab") {
-        preserveDocumentDraftSnapshot(conflict.document);
+        preserveDocumentDraftSnapshot(conflict.document, "save-conflict", conflict.id);
         return [{
           ...candidate,
           document: {
@@ -3934,6 +4253,11 @@ export function App() {
     tab: DocumentTab,
     options: { mode: "auto" | "save" | "save-as"; announce: boolean; fromSaveAll?: boolean }
   ): Promise<SaveDocumentResult> {
+    if (options.mode === "save" && tab.document.filePath && !isDocumentDirty(tab.document)) {
+      if (options.announce) showToast("No changes to save");
+      return "saved";
+    }
+
     const needsDiskCheck = options.mode === "save" || options.mode === "auto";
     const saveDiskCheck = needsDiskCheck ? await confirmSaveAgainstDiskVersion(tab, options.mode !== "auto") : null;
     if (saveDiskCheck === false) return "canceled";
@@ -3943,33 +4267,64 @@ export function App() {
     }
 
     const targetPath = options.mode === "save-as" ? null : tab.document.filePath;
+    const backupKind = options.mode === "save-as" || saveDiskCheck?.overwriteExternal ? "safety" : "automatic";
+    const suggestedTarget = options.mode === "save-as"
+      ? suggestedMarkdownSaveAsTarget(tab.document)
+      : displayMarkdownDocumentName(tab.document);
+    const writeFile = (skipBackup = false) => saveMarkdownFile(
+      targetPath,
+      tab.document.markdown,
+      suggestedTarget,
+      saveDiskCheck?.expectedStats ?? null,
+      tab.document.lineEnding,
+      backupKind,
+      backupPreferences,
+      skipBackup
+    );
     let saved: OpenedFile | null = null;
     try {
-      const suggestedTarget = options.mode === "save-as"
-        ? suggestedMarkdownSaveAsTarget(tab.document)
-        : displayMarkdownDocumentName(tab.document);
-      saved = await saveMarkdownFile(
-        targetPath,
-        tab.document.markdown,
-        suggestedTarget,
-        saveDiskCheck,
-        tab.document.lineEnding,
-        options.mode === "auto" ? "automatic" : "manual",
-        backupPreferences
-      );
+      saved = await writeFile();
     } catch (error) {
       console.warn(error);
       if (/file changed on disk before save/i.test(messageFromError(error))) {
         setDocumentTabExternalChange(tab.id, true);
       }
-      const failureLabel = fileWriteFailureLabel(error, "File could not be saved");
-      if (options.mode === "auto" && isPersistentBackupFailure(error)) {
-        if (!autoSaveBackupWarningTabIdsRef.current.has(tab.id)) showToast(failureLabel);
-        autoSaveBackupWarningTabIdsRef.current.add(tab.id);
-      } else if (options.announce) {
-        showToast(failureLabel);
+      if (isPersistentBackupFailure(error)) {
+        if (options.mode === "auto") {
+          showToast("Automatic save paused; version history storage needs attention");
+          return "canceled";
+        }
+
+        activateDocumentTab(tab.id);
+        const saveWithoutHistory = await requestConfirmation({
+          title: "Save without version history?",
+          message: "A recovery version could not be created. Open Version History to free space, save this file once without adding a history version, or cancel.",
+          confirmLabel: "Save without history",
+          cancelLabel: "Cancel save",
+          alternateLabel: "Open Version History",
+          onAlternate: openVersionHistoryManagement,
+          tone: "danger"
+        });
+        if (!saveWithoutHistory) return "canceled";
+
+        try {
+          saved = await writeFile(true);
+        } catch (retryError) {
+          console.warn(retryError);
+          if (/file changed on disk before save/i.test(messageFromError(retryError))) {
+            setDocumentTabExternalChange(tab.id, true);
+          }
+          if (options.announce) {
+            showToast(fileWriteFailureLabel(retryError, "File could not be saved"));
+          }
+          return "canceled";
+        }
+      } else {
+        if (options.announce || options.mode === "auto") {
+          showToast(fileWriteFailureLabel(error, "File could not be saved"));
+        }
+        return "canceled";
       }
-      return "canceled";
     }
 
     if (!saved) return "canceled";
@@ -3981,7 +4336,6 @@ export function App() {
       return "downloaded";
     }
 
-    autoSaveBackupWarningTabIdsRef.current.delete(tab.id);
     const commit = commitSavedFileToTab(tab, saved);
     setDocumentTabExternalChange(tab.id, false);
     setRecentFiles((current) => rememberRecentFile(current, saved.path, saved.name));
@@ -3995,21 +4349,41 @@ export function App() {
 
   async function saveCopyAsDocument() {
     const document = currentActiveDocumentTabForCommand().document;
+    const writeCopy = (skipBackup = false) => saveMarkdownFile(
+      null,
+      document.markdown,
+      suggestedMarkdownCopyTarget(document),
+      null,
+      document.lineEnding,
+      "safety",
+      backupPreferences,
+      skipBackup
+    );
     let saved: OpenedFile | null = null;
     try {
-      saved = await saveMarkdownFile(
-        null,
-        document.markdown,
-        suggestedMarkdownCopyTarget(document),
-        null,
-        document.lineEnding,
-        "manual",
-        backupPreferences
-      );
+      saved = await writeCopy();
     } catch (error) {
       console.warn(error);
-      showToast(fileWriteFailureLabel(error, "Copy could not be saved"));
-      return;
+      if (!isPersistentBackupFailure(error) || !await requestConfirmation({
+        title: "Save copy without version history?",
+        message: "The target's previous content could not be added to version history. Open Version History to free space, overwrite the target once without adding a history version, or cancel.",
+        confirmLabel: "Save without history",
+        cancelLabel: "Cancel save",
+        alternateLabel: "Open Version History",
+        onAlternate: openVersionHistoryManagement,
+        tone: "danger"
+      })) {
+        showToast(fileWriteFailureLabel(error, "Copy could not be saved"));
+        return;
+      }
+
+      try {
+        saved = await writeCopy(true);
+      } catch (retryError) {
+        console.warn(retryError);
+        showToast(fileWriteFailureLabel(retryError, "Copy could not be saved"));
+        return;
+      }
     }
 
     if (!saved) return;
@@ -4037,47 +4411,56 @@ export function App() {
     showToast(`Exported ${saved.name}`);
   }
 
-  function createAutomaticDraftSnapshot() {
-    const snapshot = createDraftSnapshot(currentActiveDocumentTabForCommand().document, Date.now(), "automatic");
-    setDraftSnapshots((current) => {
-      const next = rememberDraftSnapshot(current, snapshot);
-      if (next !== current) {
-        draftSnapshotsRef.current = next;
-        saveDraftSnapshots(next);
-      }
-      return next;
-    });
+  async function preserveDirtyDraftSnapshotBeforeReplace(
+    document = currentActiveDocumentTabForCommand().document,
+    reason: "reload" | "restore" | "recovery-discard" = "restore",
+    force = false,
+    documentId = currentActiveDocumentTabForCommand().id
+  ): Promise<boolean> {
+    if (!force && !isDocumentDirty(document)) return true;
+    return preserveDocumentSafetyCheckpoint(document, reason, documentId);
   }
 
-  function preserveDirtyDraftSnapshotBeforeReplace(document = currentActiveDocumentTabForCommand().document): boolean {
-    if (!isDocumentDirty(document) || !document.markdown.trim()) return false;
-    return preserveDocumentDraftSnapshot(document);
-  }
-
-  function preserveDocumentDraftSnapshot(document: MarkdownDocument, kind: DraftSnapshot["kind"] = "preserved"): boolean {
-    if (!document.markdown.trim()) return false;
-
-    const snapshot = createDraftSnapshot(document, Date.now(), kind);
+  async function preserveDocumentSafetyCheckpoint(
+    document: MarkdownDocument,
+    reason: "close" | "reload" | "restore" | "recovery-discard" | "save-conflict" | "save-as-overwrite",
+    documentId: string | null = null
+  ): Promise<boolean> {
+    try {
+      await sealMarkdownBackupRolling(document.filePath, backupPreferences);
+    } catch (error) {
+      console.warn(error);
+      return false;
+    }
+    const snapshot = createDraftSnapshot(document, Date.now(), reason, documentId);
     const currentSnapshots = draftSnapshotsRef.current;
-    const next = rememberDraftSnapshot(currentSnapshots, snapshot);
+    const duplicate = currentSnapshots.some((candidate) => (
+      snapshotDocumentKey(candidate) === snapshotDocumentKey(snapshot)
+      && candidate.contentHash === snapshot.contentHash
+      && candidate.markdown === snapshot.markdown
+    ));
+    const next = rememberDraftSnapshot(currentSnapshots, snapshot, backupPreferences);
+    if (next === currentSnapshots) return duplicate;
+    if (!duplicate && !next.some((candidate) => candidate.id === snapshot.id)) return false;
+
+    draftSnapshotsRef.current = next;
+    setDraftSnapshots(next);
+    return saveDraftSnapshotsImmediately(next);
+  }
+
+  function preserveDocumentDraftSnapshot(
+    document: MarkdownDocument,
+    reason: DraftSnapshot["reason"] = "save-conflict",
+    documentId: string | null = null
+  ): boolean {
+    const snapshot = createDraftSnapshot(document, Date.now(), reason, documentId);
+    const currentSnapshots = draftSnapshotsRef.current;
+    const next = rememberDraftSnapshot(currentSnapshots, snapshot, backupPreferences);
     if (next === currentSnapshots) return false;
 
     draftSnapshotsRef.current = next;
     setDraftSnapshots(next);
     return saveDraftSnapshots(next);
-  }
-
-  function preserveDocumentDraftSnapshots(documents: MarkdownDocument[]): boolean {
-    const snapshots = documents
-      .filter((document) => document.markdown.trim())
-      .map((document) => createDraftSnapshot(document, Date.now(), "preserved"));
-    if (!snapshots.length) return false;
-
-    const next = rememberDraftSnapshots(draftSnapshotsRef.current, snapshots);
-    if (!next.changed) return false;
-    draftSnapshotsRef.current = next.snapshots;
-    setDraftSnapshots(next.snapshots);
-    return saveDraftSnapshots(next.snapshots);
   }
 
   function currentTabSessionForRecovery(): DocumentTabSession {
@@ -4114,56 +4497,66 @@ export function App() {
   function persistSynchronousUnloadRecovery(): void {
     const { tabs: currentTabs, activeTabId: currentActiveTabId } = currentTabSessionForRecovery();
     const activeDocument = activeDocumentFromSession({ tabs: currentTabs, activeTabId: currentActiveTabId }) ?? documentStateRef.current;
-    const dirtySnapshots = currentTabs
-      .map((tab) => tab.document)
-      .filter((document) => isDocumentDirty(document) && document.markdown.trim())
-      .map((document) => createDraftSnapshot(document));
-
-    const next = rememberDraftSnapshots(draftSnapshotsRef.current, dirtySnapshots);
-    if (next.changed) {
-      draftSnapshotsRef.current = next.snapshots;
-      saveDraftSnapshots(next.snapshots);
-    }
 
     saveDocumentTabsRecord(currentTabs, currentActiveTabId);
     saveDraftDocument(activeDocument);
+    lastWorkRecoveryPersistedAtRef.current = Date.now();
   }
 
   async function persistWindowCloseRecovery(): Promise<void> {
     const { tabs: currentTabs, activeTabId: currentActiveTabId } = currentTabSessionForRecovery();
     const activeDocument = activeDocumentFromSession({ tabs: currentTabs, activeTabId: currentActiveTabId }) ?? documentStateRef.current;
-    const dirtySnapshots = currentTabs
-      .map((tab) => tab.document)
-      .filter((document) => isDocumentDirty(document) && document.markdown.trim())
-      .map((document) => createDraftSnapshot(document));
-
-    const next = rememberDraftSnapshots(draftSnapshotsRef.current, dirtySnapshots);
-    if (next.changed) {
-      draftSnapshotsRef.current = next.snapshots;
-      setDraftSnapshots(next.snapshots);
-    }
 
     await Promise.all([
       saveDocumentTabsRecordImmediately(currentTabs, currentActiveTabId),
-      saveDraftDocumentImmediately(activeDocument),
-      next.changed ? saveDraftSnapshotsImmediately(next.snapshots) : Promise.resolve(true)
+      saveDraftDocumentImmediately(activeDocument)
     ]);
+    lastWorkRecoveryPersistedAtRef.current = Date.now();
   }
 
-  function createLocalSnapshot() {
-    const snapshot = createDraftSnapshot(currentActiveDocumentTabForCommand().document, Date.now(), "manual");
+  async function createLocalSnapshot() {
+    const tab = currentActiveDocumentTabForCommand();
+    const document = tab.document;
+    try {
+      await sealMarkdownBackupRolling(document.filePath, backupPreferences);
+    } catch (error) {
+      console.warn(error);
+      showToast("Checkpoint could not be saved");
+      return;
+    }
+
+    const snapshot = createDraftSnapshot(document, Date.now(), "manual", tab.id);
     const currentSnapshots = draftSnapshotsRef.current;
-    const next = rememberDraftSnapshot(currentSnapshots, snapshot);
+    const duplicate = currentSnapshots.some((candidate) => (
+      snapshotDocumentKey(candidate) === snapshotDocumentKey(snapshot)
+      && candidate.contentHash === snapshot.contentHash
+      && candidate.markdown === snapshot.markdown
+    ));
+    const next = rememberDraftSnapshot(currentSnapshots, snapshot, backupPreferences);
+    const capacityCandidate = duplicate ? next : [...currentSnapshots, snapshot];
+    if (applyDraftSnapshotRetention(capacityCandidate, backupPreferences, {
+      candidateSnapshotIds: duplicate ? [] : [snapshot.id]
+    }).capacityExceeded) {
+      const openHistory = await requestConfirmation({
+        title: "Checkpoint storage needs attention",
+        message: "Manual checkpoints are kept until you remove them. Open Version History to free space before creating another checkpoint.",
+        confirmLabel: "Open Version History",
+        cancelLabel: "Cancel",
+        tone: "danger"
+      });
+      if (openHistory) openVersionHistoryManagement();
+      return;
+    }
 
     if (next === currentSnapshots) {
-      showToast("No new changes to snapshot");
+      showToast("No new changes to checkpoint");
       return;
     }
 
     draftSnapshotsRef.current = next;
     setDraftSnapshots(next);
     const persisted = saveDraftSnapshots(next);
-    showToast(persisted ? "Local snapshot saved" : "Snapshot kept for this session only");
+    showToast(persisted ? "Manual checkpoint saved" : "Checkpoint kept for this session only");
   }
 
   function currentEditorSelection(): { source: string; ranges: TextRange[]; primary: TextRange } {
@@ -4884,7 +5277,7 @@ export function App() {
 
       if (isDocumentDirty(loadedTab.document) && !await requestConfirmation({
         title: "Restore this backup?",
-        message: "Restoring will replace the current unsaved editor content with this local backup after keeping a local recovery snapshot.",
+        message: "Restoring will replace the current unsaved editor content with this version after creating a safety checkpoint.",
         confirmLabel: "Restore backup",
         cancelLabel: "Keep editing",
         tone: "danger"
@@ -4901,7 +5294,13 @@ export function App() {
         return;
       }
 
-      preserveDirtyDraftSnapshotBeforeReplace(finalTab.document);
+      if (!await preserveDirtyDraftSnapshotBeforeReplace(finalTab.document, "restore", false, finalTab.id)) {
+        await requestHistoryCleanup(
+          "Restore canceled",
+          "The required safety checkpoint could not be created. Open Version History to free space, then try again."
+        );
+        return;
+      }
       richDocumentHistoriesRef.current.delete(tab.id);
       updateDocumentTab(tab.id, (current) => ({
         ...current,
@@ -4913,7 +5312,6 @@ export function App() {
         fileStats: restored.fileStats ?? current.fileStats ?? null
       }));
       clearManualPreviewSnapshot(tab.id);
-      setDocumentTabExternalChange(tab.id, false);
       showToast("Backup restored into editor");
     } catch (error) {
       console.warn(error);
@@ -4921,16 +5319,26 @@ export function App() {
     }
   }
 
-  async function openOrphanedBackupHistory(history: MarkdownBackupHistory) {
-    if (!history.latestBackupPath) {
-      showToast("No readable backup found");
-      return;
-    }
-
+  async function refreshFileHistoryDocuments() {
+    if (!desktopRuntime) return;
     try {
-      const restored = await readMarkdownBackup(history.sourcePath, history.latestBackupPath, backupPreferences);
+      setBackupHistories(await listMarkdownBackupHistories(backupPreferences, historyKnownSourcePaths));
+    } catch (error) {
+      console.warn(error);
+    }
+  }
+
+  async function loadManagedFileHistoryVersions(document: FileHistoryDocument): Promise<MarkdownBackup[]> {
+    if (!document.filePath) return [];
+    return listMarkdownBackups(document.filePath, backupPreferences);
+  }
+
+  async function openManagedDiskVersionAsDraft(document: FileHistoryDocument, backup: MarkdownBackup) {
+    if (!document.filePath) return;
+    try {
+      const restored = await readMarkdownBackup(document.filePath, backup.path, backupPreferences);
       addDocumentTab({
-        fileName: history.fileName,
+        fileName: document.fileName,
         filePath: null,
         markdown: restored.markdown,
         lastSavedMarkdown: restored.markdown,
@@ -4938,35 +5346,75 @@ export function App() {
         lastBackupPath: null,
         fileStats: null
       });
-      showToast("Opened latest backup as draft");
+      setHistoryManagerOpen(false);
+      showToast("Opened backup as draft");
     } catch (error) {
       console.warn(error);
       showToast("Backup could not be opened");
     }
   }
 
-  async function deleteOrphanedBackupHistory(history: MarkdownBackupHistory) {
+  function openManagedSnapshotAsDraft(snapshot: DraftSnapshot) {
+    openDraftSnapshotAsNewTab(snapshot);
+    setHistoryManagerOpen(false);
+  }
+
+  async function deleteManagedFileHistory(document: FileHistoryDocument): Promise<boolean> {
     if (!await requestConfirmation({
-      title: "Delete this orphaned history?",
-      message: "This permanently deletes every retained backup version for this source file from all backup locations. This cannot be undone.",
-      confirmLabel: "Delete history",
+      title: "Delete all history for this document?",
+      message: "This permanently deletes every retained disk version and local checkpoint for this document. The source file and current editor content will not change.",
+      confirmLabel: "Delete all history",
       cancelLabel: "Cancel",
       tone: "danger"
-    })) return;
+    })) return false;
 
     try {
-      await deleteMarkdownBackupHistory(history.sourcePath, backupPreferences);
-      setBackupHistories((current) => current.filter((candidate) => !sameLocalPath(candidate.sourcePath, history.sourcePath)));
-      showToast("Orphaned history deleted");
-
-      try {
-        setBackupHistories(await listMarkdownBackupHistories(backupPreferences));
-      } catch (error) {
-        console.warn(error);
+      if (document.filePath && document.diskHistory) {
+        await deleteMarkdownBackupHistory(document.filePath, backupPreferences);
       }
+
+      const nextSnapshots = removeSnapshotsForDocument(draftSnapshotsRef.current, document.key);
+      draftSnapshotsRef.current = nextSnapshots;
+      setDraftSnapshots(nextSnapshots);
+      const persisted = saveDraftSnapshots(nextSnapshots);
+      setBackupHistories((current) => current.filter((history) => (
+        !document.filePath || !sameLocalPath(history.sourcePath, document.filePath)
+      )));
+      if (document.filePath && documentState.filePath && sameLocalPath(document.filePath, documentState.filePath)) {
+        setBackups([]);
+      }
+      await refreshFileHistoryDocuments();
+      showToast(persisted ? "Document history deleted" : "Disk history deleted; local checkpoints were removed for this session only");
+      return true;
     } catch (error) {
       console.warn(error);
-      showToast("Orphaned history could not be deleted");
+      showToast("Document history could not be deleted");
+      return false;
+    }
+  }
+
+  async function deleteManagedDiskVersion(document: FileHistoryDocument, backup: MarkdownBackup): Promise<boolean> {
+    if (!document.filePath) return false;
+    if (!await requestConfirmation({
+      title: "Delete this version?",
+      message: "This permanently deletes the selected retained version. The source file and current editor content will not change.",
+      confirmLabel: "Delete version",
+      cancelLabel: "Cancel",
+      tone: "danger"
+    })) return false;
+
+    try {
+      await deleteMarkdownBackup(document.filePath, backup.path, backupPreferences);
+      if (documentState.filePath && sameLocalPath(document.filePath, documentState.filePath)) {
+        setBackups((current) => current.filter((candidate) => candidate.path !== backup.path));
+      }
+      await refreshFileHistoryDocuments();
+      showToast("Version deleted");
+      return true;
+    } catch (error) {
+      console.warn(error);
+      showToast("Version could not be deleted");
+      return false;
     }
   }
 
@@ -4976,15 +5424,15 @@ export function App() {
     const document = tab.document;
     if (
       (expectedTabId && tab.id !== expectedTabId)
-      || snapshotDocumentKey(document) !== snapshotDocumentKey(snapshot)
+      || snapshotDocumentKey({ ...document, documentId: tab.id }) !== snapshotDocumentKey(snapshot)
     ) {
       showToast("The comparison belongs to another document");
       return;
     }
 
     if (isDocumentDirty(document) && !await requestConfirmation({
-      title: "Restore this local snapshot?",
-      message: "Restoring will replace the current unsaved editor content with the selected local snapshot after keeping a recovery snapshot of the current editor content.",
+      title: "Restore this checkpoint?",
+      message: "Restoring will replace the current unsaved editor content with the selected checkpoint after creating a safety checkpoint of the current editor content.",
       confirmLabel: "Restore snapshot",
       cancelLabel: "Keep editing",
       tone: "danger"
@@ -4995,27 +5443,32 @@ export function App() {
     if (
       finalSession.activeTabId !== tab.id
       || !finalTab
-      || snapshotDocumentKey(finalTab.document) !== snapshotDocumentKey(snapshot)
+      || snapshotDocumentKey({ ...finalTab.document, documentId: finalTab.id }) !== snapshotDocumentKey(snapshot)
     ) {
       showToast("Restore canceled because the active file changed");
       return;
     }
 
-    preserveDirtyDraftSnapshotBeforeReplace(finalTab.document);
+    if (!await preserveDirtyDraftSnapshotBeforeReplace(finalTab.document, "restore", false, finalTab.id)) {
+      await requestHistoryCleanup(
+        "Restore canceled",
+        "The required safety checkpoint could not be created. Open Version History to free space, then try again."
+      );
+      return;
+    }
 
     richDocumentHistoriesRef.current.delete(tab.id);
     updateDocumentTab(tab.id, {
-      fileName: snapshot.fileName,
-      filePath: snapshot.filePath,
+      fileName: finalTab.document.fileName,
+      filePath: finalTab.document.filePath,
       markdown: snapshot.markdown,
-      lastSavedMarkdown: snapshot.lastSavedMarkdown,
+      lastSavedMarkdown: finalTab.document.lastSavedMarkdown,
       lineEnding: snapshot.lineEnding,
       lastBackupPath: null,
-      fileStats: snapshot.fileStats
+      fileStats: finalTab.document.fileStats ?? null
     });
     clearManualPreviewSnapshot(tab.id);
-    setDocumentTabExternalChange(tab.id, false);
-    showToast("Local snapshot restored into editor");
+    showToast("Checkpoint restored into editor");
   }
 
   function compareDraftSnapshot(snapshot: DraftSnapshot) {
@@ -5035,7 +5488,7 @@ export function App() {
       versionMarkdown: snapshot.markdown,
       currentMarkdown: document.markdown,
       currentName: displayMarkdownDocumentName(document),
-      versionLabel: `${formatBackupTime(snapshot.createdAt)} - ${t(draftSnapshotKindMessage(snapshot.kind))}`
+      versionLabel: `${formatBackupTime(snapshot.createdAt)} - ${t(draftSnapshotCheckpointMessage(snapshot))}`
     });
   }
 
@@ -5052,44 +5505,21 @@ export function App() {
     showToast("Opened local checkpoint as draft");
   }
 
-  function compareOtherDraftSnapshot(snapshot: DraftSnapshot) {
-    if (
-      snapshot.size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES
-      || new Blob([snapshot.lastSavedMarkdown]).size > MAX_INTERACTIVE_BACKUP_COMPARE_BYTES
-    ) {
-      showToast("Version is too large for interactive comparison");
-      return;
-    }
-
-    const snapshotDisplayName = displayMarkdownDocumentName(snapshot);
-    setBackupComparison({
-      restore: () => openDraftSnapshotAsNewTab(snapshot),
-      tabId: "",
-      versionMarkdown: snapshot.lastSavedMarkdown,
-      currentMarkdown: snapshot.markdown,
-      currentName: snapshotDisplayName,
-      versionLabel: t("Last saved version"),
-      versionTitle: "Last saved version",
-      currentTitle: "Local checkpoint",
-      actionLabel: "Open checkpoint as draft",
-      actionIcon: "open"
-    });
-  }
-
-  async function deleteDraftSnapshot(snapshot: DraftSnapshot) {
+  async function deleteDraftSnapshot(snapshot: DraftSnapshot): Promise<boolean> {
     if (!await requestConfirmation({
-      title: "Delete this local snapshot?",
-      message: "This removes the recovery point from this device. The current editor content will not change.",
+      title: "Delete this checkpoint?",
+      message: "This removes the checkpoint from this device. The current editor content will not change.",
       confirmLabel: "Delete snapshot",
       cancelLabel: "Cancel",
       tone: "danger"
-    })) return;
+    })) return false;
 
     const next = forgetDraftSnapshot(draftSnapshotsRef.current, snapshot.id);
     draftSnapshotsRef.current = next;
     setDraftSnapshots(next);
     const persisted = saveDraftSnapshots(next);
-    showToast(persisted ? "Local snapshot deleted" : "Snapshot removed for this session only");
+    showToast(persisted ? "Checkpoint deleted" : "Checkpoint removed for this session only");
+    return true;
   }
 
   function replaceActiveTable(nextMarkdown: string, position = activeTable?.position) {
@@ -6477,8 +6907,8 @@ export function App() {
               className={sidebarPage === "recovery" ? "active" : ""}
               type="button"
               onClick={() => setSidebarPage("recovery")}
-              title={t("Recovery")}
-              aria-label={t("Recovery")}
+              title={t("Version history")}
+              aria-label={t("Version history")}
               aria-pressed={sidebarPage === "recovery"}
             >
               <History size={17} />
@@ -6605,205 +7035,86 @@ export function App() {
           )}
           {sidebarPage === "recovery" && (
             <>
-              <div className="pane-kicker"><History size={16} /> {t("Recovery")}</div>
-          {hasRecoveryContent && (
-            <section className="backup-section">
-              {(documentState.filePath || backupLoading || backups.length > 0) && (
+              <div className="pane-kicker"><History size={16} /> {t("Version history")}</div>
+              <section className="backup-section">
+                <button className="backup-item history-manager-entry" type="button" onClick={openVersionHistoryManagement}>
+                  <FileText size={14} />
+                  <span>
+                    <strong>{t("Manage file history")}</strong>
+                    <small>{t("Browse history by document")}</small>
+                  </span>
+                  <ChevronRight size={14} />
+                </button>
                 <section className="recovery-group recovery-file-history">
                   <div className="recovery-group-heading">
-                    <div className="section-label recovery-section-label">{t("Saved file history")}</div>
-                    <p>{t("Versions written beside a disk file before it is overwritten")}</p>
+                    <div className="section-label recovery-section-label">{t("Current document checkpoints")}</div>
+                    <p>{t("Saved and local checkpoints for the current document")}</p>
                   </div>
+                  <button
+                    className="backup-item"
+                    type="button"
+                    onClick={createLocalSnapshot}
+                    disabled={!documentState.markdown.trim()}
+                    title={t("Create checkpoint for the current editor content")}
+                  >
+                    <History size={14} />
+                    <span>
+                      <strong>{t("Create checkpoint")}</strong>
+                      <small>{t("Manual checkpoint")}</small>
+                    </span>
+                  </button>
                   {backupLoading ? (
-                    <div className="backup-empty">{t("Loading backups")}</div>
-                  ) : visibleBackups.map((backup) => (
-                    <div key={backup.path} className="backup-row">
-                      <button className="backup-item snapshot-restore" type="button" onClick={() => restoreBackup(backup)} title={backup.path}>
-                        <RotateCcw size={14} />
-                        <span>
-                          <strong>{formatBackupTime(backup.modifiedMs)}</strong>
-                          <small>{t(backupKindMessage(backup.kind))} - {formatBytes(backup.size)}</small>
-                        </span>
-                      </button>
-                      <button
-                        className="backup-compare"
-                        type="button"
-                        aria-label={t("Compare with current editor")}
-                        title={t("Compare with current editor")}
-                        onClick={() => void compareBackup(backup)}
-                      >
-                        <GitCompareArrows size={14} />
-                      </button>
-                    </div>
-                  ))}
-                  {!backupLoading && documentState.filePath && backups.length === 0 && (
-                    <div className="backup-empty">{t("No saved versions yet")}</div>
-                  )}
-                  {backups.length > 6 && (
-                    <button
-                      className={`backup-more${showAllBackups ? " expanded" : ""}`}
-                      type="button"
-                      aria-expanded={showAllBackups}
-                      onClick={() => setShowAllBackups((current) => !current)}
-                    >
-                      <ChevronDown size={14} />
-                      <span>
-                        {showAllBackups
-                          ? t("Show recent versions")
-                          : t("Show {count} older versions", { count: hiddenBackupCount })}
-                      </span>
-                    </button>
-                  )}
-                </section>
-              )}
-              {orphanedBackupHistories.length > 0 && (
-                <section className="recovery-group recovery-orphaned-history">
-                  <div className="recovery-group-heading">
-                    <div className="section-label recovery-section-label detached-history-label">{t("Detached file history")}</div>
-                    <p>{t("Versions whose original disk file is no longer available")}</p>
-                  </div>
-                  {orphanedBackupHistories.map((history) => (
-                    <div key={history.sourcePath} className="backup-row">
-                      <button
-                        className="backup-item"
-                        type="button"
-                        onClick={() => void openOrphanedBackupHistory(history)}
-                        title={`${t("Open latest version as draft")} - ${history.sourcePath}`}
-                      >
-                        <FileText size={14} />
-                        <span>
-                          <strong>{history.fileName}</strong>
-                          <small>
-                            {t("{count} retained versions", { count: history.backupCount })} - {formatBackupTime(history.latestMs)} - {formatBytes(history.totalSize)}
-                          </small>
-                        </span>
-                      </button>
-                      <button
-                        className="backup-delete"
-                        type="button"
-                        aria-label={t("Delete orphaned history for {name}", { name: history.fileName })}
-                        title={t("Delete orphaned history")}
-                        onClick={() => void deleteOrphanedBackupHistory(history)}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  ))}
-                </section>
-              )}
-              <section className="recovery-group recovery-local-snapshots">
-                <div className="recovery-group-heading">
-                  <div className="section-label recovery-section-label local-snapshot-label">{t("Local recovery checkpoints")}</div>
-                  <p>{t("Editor copies kept on this device after idle edits, before replacement, or when created manually")}</p>
-                </div>
-                <button
-                  className="backup-item"
-                  type="button"
-                  onClick={createLocalSnapshot}
-                  disabled={!documentState.markdown.trim()}
-                  title={t("Save a local recovery point for the current editor content")}
-                >
-                  <History size={14} />
-                  <span>
-                    <strong>{t("Create local checkpoint")}</strong>
-                    <small>{t("Manual recovery point")}</small>
-                  </span>
-                </button>
-                {currentDocumentDraftSnapshots.map((snapshot) => {
-                  const snapshotDisplayName = displayMarkdownDocumentName(snapshot);
-                  return (
-                    <div key={snapshot.id} className="backup-row">
-                      <button
-                        className="backup-item snapshot-restore"
-                        type="button"
-                        onClick={() => restoreDraftSnapshot(snapshot)}
-                        title={snapshot.filePath ?? snapshotDisplayName}
-                      >
-                        <RotateCcw size={14} />
-                        <span>
-                          <strong>{formatBackupTime(snapshot.createdAt)}</strong>
-                          <small>{t(draftSnapshotKindMessage(snapshot.kind))} - {formatBytes(snapshot.size)}</small>
-                        </span>
-                      </button>
-                      <button
-                        className="backup-compare"
-                        type="button"
-                        aria-label={t("Compare with current editor")}
-                        title={t("Compare with current editor")}
-                        onClick={() => compareDraftSnapshot(snapshot)}
-                      >
-                        <GitCompareArrows size={14} />
-                      </button>
-                      <button
-                        className="backup-delete"
-                        type="button"
-                        aria-label={t("Delete {name} snapshot", { name: snapshotDisplayName })}
-                        title={t("Delete local snapshot")}
-                        onClick={() => deleteDraftSnapshot(snapshot)}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </section>
-              {otherDraftSnapshots.length > 0 && (
-                <section className="recovery-group recovery-other-snapshots">
-                  <div className="recovery-group-heading">
-                    <div className="section-label recovery-section-label">{t("Other document checkpoints")}</div>
-                    <p>{t("Open these as independent drafts, or compare each checkpoint with its last saved content")}</p>
-                  </div>
-                  {otherDraftSnapshots.map((snapshot) => {
+                    <div className="backup-empty">{t("Loading checkpoints")}</div>
+                  ) : visibleCheckpoints.map((checkpoint) => {
+                    if (checkpoint.source === "disk") {
+                      const { backup } = checkpoint;
+                      return (
+                        <div key={`disk-${backup.path}`} className="backup-row">
+                          <button className="backup-item snapshot-restore" type="button" onClick={() => restoreBackup(backup)} title={backup.path}>
+                            <RotateCcw size={14} />
+                            <span>
+                              <strong>{formatBackupTime(checkpoint.timestamp)}</strong>
+                              <small>{t(backupKindMessage(backup.kind))} - {formatBytes(backup.size)}</small>
+                            </span>
+                          </button>
+                          <button className="backup-compare" type="button" aria-label={t("Compare with current editor")} title={t("Compare with current editor")} onClick={() => void compareBackup(backup)}>
+                            <GitCompareArrows size={14} />
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    const { snapshot } = checkpoint;
                     const snapshotDisplayName = displayMarkdownDocumentName(snapshot);
                     return (
-                      <div key={snapshot.id} className="backup-row">
-                        <button
-                          className="backup-item"
-                          type="button"
-                          onClick={() => openDraftSnapshotAsNewTab(snapshot)}
-                          title={snapshot.filePath ?? snapshotDisplayName}
-                        >
-                          <FileText size={14} />
+                      <div key={`local-${snapshot.id}`} className="backup-row">
+                        <button className="backup-item snapshot-restore" type="button" onClick={() => restoreDraftSnapshot(snapshot)} title={snapshot.filePath ?? snapshotDisplayName}>
+                          <RotateCcw size={14} />
                           <span>
-                            <strong>{snapshotDisplayName}</strong>
-                            <small>{formatBackupTime(snapshot.createdAt)} - {t(draftSnapshotKindMessage(snapshot.kind))} - {formatBytes(snapshot.size)}</small>
+                            <strong>{formatBackupTime(checkpoint.timestamp)}</strong>
+                            <small>{t(draftSnapshotCheckpointMessage(snapshot))} - {formatBytes(snapshot.size)}</small>
                           </span>
                         </button>
-                        <button
-                          className="backup-compare"
-                          type="button"
-                          aria-label={t("Compare checkpoint with last saved version")}
-                          title={t("Compare checkpoint with last saved version")}
-                          onClick={() => compareOtherDraftSnapshot(snapshot)}
-                        >
+                        <button className="backup-compare" type="button" aria-label={t("Compare with current editor")} title={t("Compare with current editor")} onClick={() => compareDraftSnapshot(snapshot)}>
                           <GitCompareArrows size={14} />
                         </button>
-                        <button
-                          className="backup-delete"
-                          type="button"
-                          aria-label={t("Delete {name} snapshot", { name: snapshotDisplayName })}
-                          title={t("Delete local snapshot")}
-                          onClick={() => deleteDraftSnapshot(snapshot)}
-                        >
+                        <button className="backup-delete" type="button" aria-label={t("Delete {name} checkpoint", { name: snapshotDisplayName })} title={t("Delete checkpoint")} onClick={() => void deleteDraftSnapshot(snapshot)}>
                           <Trash2 size={13} />
                         </button>
                       </div>
                     );
                   })}
+                  {!backupLoading && currentDocumentCheckpoints.length === 0 && (
+                    <div className="backup-empty">{t("No checkpoints yet")}</div>
+                  )}
+                  {currentDocumentCheckpoints.length > 6 && (
+                    <button className={`backup-more${showAllBackups ? " expanded" : ""}`} type="button" aria-expanded={showAllBackups} onClick={() => setShowAllBackups((current) => !current)}>
+                      <ChevronDown size={14} />
+                      <span>{showAllBackups ? t("Show recent versions") : t("Show {count} older versions", { count: hiddenCheckpointCount })}</span>
+                    </button>
+                  )}
                 </section>
-              )}
-              {!backupLoading && backups.length === 0 && draftSnapshots.length === 0 && (
-                <div className="backup-empty">{t("No recovery points yet")}</div>
-              )}
-            </section>
-          )}
-          {!hasRecoveryContent && (
-            <div className="sidebar-empty">
-              <History size={18} />
-              <span>{t("No recovery points yet")}</span>
-              <button type="button" onClick={createLocalSnapshot} disabled={!documentState.markdown.trim()}>{t("Create snapshot")}</button>
-            </div>
-          )}
+              </section>
             </>
           )}
           {sidebarPage === "outline" && (
@@ -7258,7 +7569,7 @@ export function App() {
             <div className="confirm-copy">
               <h2 id="external-disk-review-title">{t("File changed on disk")}</h2>
               <p id="external-disk-review-message">
-                {t("The disk version differs from the editor. Reloading replaces the editor content with the disk version after preserving any unsaved content as a local recovery snapshot.")}
+                {t("The disk version differs from the editor. Reloading replaces the editor content with the disk version after creating a safety checkpoint for any unsaved content.")}
               </p>
             </div>
             <div className="confirm-actions">
@@ -7290,7 +7601,7 @@ export function App() {
                 onClick={() => {
                   const review = externalDiskReview;
                   setExternalDiskReview(null);
-                  reloadExternalDiskReview(review);
+                  void reloadExternalDiskReview(review);
                 }}
               >
                 {t("Reload from disk")}
@@ -7320,6 +7631,11 @@ export function App() {
               <button className="confirm-button secondary" type="button" autoFocus onClick={() => settleConfirmation(false)}>
                 {translateUiText(locale, confirmation.cancelLabel)}
               </button>
+              {confirmation.alternateLabel && (
+                <button className="confirm-button secondary" type="button" onClick={runConfirmationAlternate}>
+                  {translateUiText(locale, confirmation.alternateLabel)}
+                </button>
+              )}
               <button
                 className={confirmation.tone === "danger" ? "confirm-button danger" : "confirm-button primary"}
                 type="button"
@@ -7398,6 +7714,19 @@ export function App() {
           setBackupComparison(null);
           comparison.restore();
         }}
+      />
+      <FileHistoryManagerDialog
+        open={historyManagerOpen}
+        documents={historyDocuments}
+        loading={backupHistoriesLoading || historySourceStatesLoading}
+        t={t}
+        onClose={() => setHistoryManagerOpen(false)}
+        onLoadDiskVersions={loadManagedFileHistoryVersions}
+        onOpenDiskVersion={openManagedDiskVersionAsDraft}
+        onOpenSnapshot={openManagedSnapshotAsDraft}
+        onDeleteDocument={deleteManagedFileHistory}
+        onDeleteDiskVersion={deleteManagedDiskVersion}
+        onDeleteSnapshot={deleteDraftSnapshot}
       />
       <SettingsDialog
         open={settingsOpen}
@@ -7641,16 +7970,25 @@ function formatBackupTime(modifiedMs: number): string {
 }
 
 function backupKindMessage(kind: MarkdownBackup["kind"]): string {
-  if (kind === "automatic") return "Before automatic save";
-  if (kind === "manual") return "Before manual save";
-  if (kind === "previous") return "Previous saved version";
+  if (kind === "rolling") return "Automatic version (updating)";
+  if (kind === "automatic") return "Automatic version";
+  if (kind === "safety") return "Safety checkpoint";
+  if (kind === "manual") return "Manual checkpoint";
   return "Legacy backup";
 }
 
-function draftSnapshotKindMessage(kind: DraftSnapshot["kind"]): string {
-  if (kind === "automatic") return "Automatic editor checkpoint";
-  if (kind === "manual") return "Manual editor checkpoint";
-  return "Protected before replacement";
+function draftSnapshotCheckpointMessage(snapshot: DraftSnapshot): string {
+  if (snapshot.reason === "manual") return "Manual checkpoint";
+  if (snapshot.reason === "close") return "Before closing";
+  if (snapshot.reason === "reload") return "Before reloading";
+  if (snapshot.reason === "restore") return "Before restoring";
+  if (snapshot.reason === "recovery-discard") return "Recovery content kept";
+  if (snapshot.reason === "save-conflict") return "Before resolving save conflict";
+  if (snapshot.reason === "save-as-overwrite") return "Before overwriting target";
+  if (snapshot.reason === "window-close") return "Before closing";
+  if (snapshot.reason === "legacy-idle") return "Legacy automatic checkpoint";
+  if (snapshot.reason === "legacy-preserved") return "Legacy checkpoint";
+  return snapshot.kind === "manual" ? "Manual checkpoint" : "Safety checkpoint";
 }
 
 function formatBytes(bytes: number): string {

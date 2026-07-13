@@ -2613,6 +2613,7 @@ body.pane-resizing * {
 
 .confirm-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   grid-column: 1 / -1;
@@ -2621,10 +2622,23 @@ body.pane-resizing * {
 
 .confirm-button {
   min-height: 34px;
+  max-width: 100%;
   border-radius: 8px;
   cursor: pointer;
   padding: 0 12px;
   white-space: nowrap;
+}
+
+@media (max-width: 600px) {
+  .confirm-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .confirm-button {
+    width: 100%;
+    white-space: normal;
+  }
 }
 
 .confirm-button.secondary {
@@ -3702,6 +3716,245 @@ kbd {
   flex: 1 1 auto;
   border-right: 1px solid var(--line);
   border-radius: 10px;
+}
+
+.history-manager-entry {
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-raised), transparent 18%);
+  padding: 0 9px;
+}
+
+.history-manager-entry > svg:last-child {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--subtle);
+}
+
+.file-history-dialog {
+  width: min(820px, calc(100vw - 28px));
+}
+
+.file-history-heading,
+.file-history-document-copy {
+  min-width: 0;
+}
+
+.file-history-nav-item small {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  min-width: 22px;
+  min-height: 20px;
+  margin-left: auto;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface-solid), transparent 16%);
+  color: var(--subtle);
+  font-size: 11px;
+  font-weight: 740;
+  padding: 0 5px;
+}
+
+.file-history-nav-item.active small {
+  color: var(--accent-strong);
+}
+
+.file-history-content {
+  position: relative;
+}
+
+.file-history-document-list,
+.file-history-detail {
+  min-height: 100%;
+}
+
+.file-history-list-header,
+.file-history-detail-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-solid), transparent 3%);
+}
+
+.file-history-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 64px;
+  padding: 10px 18px;
+}
+
+.file-history-list-header > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.file-history-list-header strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.file-history-list-header span,
+.file-history-document-copy > span,
+.file-history-document-copy small,
+.file-history-version-summary {
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.file-history-list-header > span {
+  flex: 0 0 auto;
+}
+
+.file-history-document-row,
+.file-history-version-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  align-items: stretch;
+  min-width: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line), transparent 34%);
+}
+
+.file-history-document-open,
+.file-history-version-open {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  min-height: 66px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 9px 10px 9px 18px;
+  text-align: left;
+}
+
+.file-history-document-open:hover,
+.file-history-version-open:hover {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.file-history-document-open:focus-visible,
+.file-history-version-open:focus-visible,
+.file-history-back:focus-visible,
+.file-history-delete-button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.file-history-document-open > svg,
+.file-history-version-open > svg {
+  flex: 0 0 auto;
+}
+
+.file-history-document-open > svg:last-child {
+  margin-left: auto;
+}
+
+.file-history-document-copy,
+.file-history-version-open > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.file-history-document-copy strong,
+.file-history-document-copy > span,
+.file-history-document-copy small,
+.file-history-version-open strong,
+.file-history-version-open small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-history-document-copy strong,
+.file-history-version-open strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 730;
+}
+
+.file-history-version-open small {
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.file-history-delete-button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  min-height: 34px;
+  align-self: center;
+  justify-self: center;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--subtle);
+  cursor: pointer;
+}
+
+.file-history-delete-button:hover {
+  background: color-mix(in srgb, var(--danger), transparent 88%);
+  color: var(--danger);
+}
+
+.file-history-detail-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 12px;
+  min-height: 70px;
+  padding: 9px 8px 9px 12px;
+}
+
+.file-history-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 8px;
+}
+
+.file-history-back:hover {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.file-history-version-summary {
+  border-bottom: 1px solid color-mix(in srgb, var(--line), transparent 34%);
+  padding: 8px 18px;
+}
+
+.file-history-empty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  min-height: 220px;
+  color: var(--subtle);
+  padding: 24px;
+  text-align: center;
+}
+
+.file-history-empty svg {
+  width: 22px;
+  height: 22px;
+}
+
+.spin {
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 @media (max-height: 560px) {

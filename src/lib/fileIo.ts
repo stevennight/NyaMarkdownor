@@ -14,7 +14,9 @@ export type OpenedFile = {
   fileStats?: MarkdownFileStats | null;
 };
 
-export type MarkdownBackupKind = "automatic" | "manual" | "previous";
+export type MarkdownBackupKind = "rolling" | "automatic" | "safety" | "manual";
+
+export type RequestedMarkdownBackupKind = "automatic" | "manual" | "safety";
 
 export type MarkdownBackup = {
   path: string;
@@ -22,6 +24,8 @@ export type MarkdownBackup = {
   modifiedMs: number;
   size: number;
   kind: MarkdownBackupKind | null;
+  startedAtMs?: number | null;
+  updatedAtMs?: number | null;
 };
 
 export type MarkdownBackupHistory = {
@@ -32,6 +36,15 @@ export type MarkdownBackupHistory = {
   totalSize: number;
   sourceExists: boolean;
   latestBackupPath: string | null;
+};
+
+export type MarkdownBackupStorageUsage = {
+  backupCount: number;
+  totalSize: number;
+  maxBackupCount: number;
+  maxTotalSize: number;
+  warningThresholdPercent: number;
+  warning: boolean;
 };
 
 export type SavedExport = {
@@ -174,7 +187,8 @@ export async function readMarkdownFileStats(path: string | null): Promise<Markdo
   return invoke<MarkdownFileStats>("stat_markdown_file", { path });
 }
 
-async function existingMarkdownFileStats(path: string): Promise<MarkdownFileStats | null> {
+export async function existingMarkdownFileStats(path: string | null): Promise<MarkdownFileStats | null> {
+  if (!path || !isTauriRuntime()) return null;
   return invoke<MarkdownFileStats | null>("existing_markdown_file_stats", { path });
 }
 
@@ -201,10 +215,21 @@ export async function listMarkdownBackups(
 }
 
 export async function listMarkdownBackupHistories(
-  backupSettings?: BackupPreferences
+  backupSettings?: BackupPreferences,
+  sourcePaths: readonly string[] = []
 ): Promise<MarkdownBackupHistory[]> {
   if (!isTauriRuntime()) return [];
   return invoke<MarkdownBackupHistory[]>("list_markdown_backup_histories", {
+    ...(sourcePaths.length ? { sourcePaths: [...sourcePaths] } : {}),
+    ...(backupSettings ? { backupSettings } : {})
+  });
+}
+
+export async function markdownBackupStorageUsage(
+  backupSettings?: BackupPreferences
+): Promise<MarkdownBackupStorageUsage | null> {
+  if (!isTauriRuntime()) return null;
+  return invoke<MarkdownBackupStorageUsage>("markdown_backup_storage_usage", {
     ...(backupSettings ? { backupSettings } : {})
   });
 }
@@ -219,6 +244,22 @@ export async function deleteMarkdownBackupHistory(
 
   await invoke("delete_markdown_backup_history", {
     sourcePath,
+    ...(backupSettings ? { backupSettings } : {})
+  });
+}
+
+export async function deleteMarkdownBackup(
+  sourcePath: string,
+  backupPath: string,
+  backupSettings?: BackupPreferences
+): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw new Error("Deleting backups requires the desktop app.");
+  }
+
+  await invoke("delete_markdown_backup", {
+    sourcePath,
+    backupPath,
     ...(backupSettings ? { backupSettings } : {})
   });
 }
@@ -255,14 +296,26 @@ export async function readMarkdownBackup(
   };
 }
 
+export async function sealMarkdownBackupRolling(
+  sourcePath: string | null,
+  backupSettings?: BackupPreferences
+): Promise<void> {
+  if (!sourcePath || !isTauriRuntime()) return;
+  await invoke("seal_markdown_backup_rolling", {
+    sourcePath,
+    ...(backupSettings ? { backupSettings } : {})
+  });
+}
+
 export async function saveMarkdownFile(
   path: string | null,
   content: string,
   suggestedName: string,
   expectedStats: MarkdownFileStats | null = null,
   lineEnding: MarkdownLineEnding = "lf",
-  backupKind: MarkdownBackupKind = "manual",
-  backupSettings?: BackupPreferences
+  backupKind: RequestedMarkdownBackupKind = "automatic",
+  backupSettings?: BackupPreferences,
+  skipBackup = false
 ): Promise<OpenedFile | null> {
   const markdown = normalizeMarkdownLineEndings(content);
   const diskContent = markdownWithLineEnding(markdown, lineEnding);
@@ -283,6 +336,7 @@ export async function saveMarkdownFile(
       expectedStats: targetStats,
       expectedMissing,
       backupKind,
+      skipBackup,
       ...(backupSettings ? { backupSettings } : {})
     });
     return {

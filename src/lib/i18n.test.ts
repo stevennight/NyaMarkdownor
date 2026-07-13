@@ -19,6 +19,15 @@ describe("i18n", () => {
     expect(createTranslator("zh-CN")("General")).toBe("常规");
     expect(createTranslator("zh-CN")("Settings categories")).toBe("设置分类");
     expect(createTranslator("zh-CN")("Version history")).toBe("版本历史");
+    expect(createTranslator("zh-CN")("File history management")).toBe("文件历史管理");
+    expect(createTranslator("zh-CN")("Orphaned file history")).toBe("孤立文件历史");
+    expect(createTranslator("zh-CN")("{count} versions", { count: 7 })).toBe("7 个版本");
+    expect(createTranslator("zh-CN")("Open Version History")).toBe("打开版本历史");
+    expect(createTranslator("zh-CN")("Save without history")).toBe("无历史版本继续保存");
+    expect(createTranslator("zh-CN")("Automatic save paused; version history storage needs attention"))
+      .toBe("自动保存已暂停；需要处理版本历史存储空间");
+    expect(createTranslator("zh-CN")("Version history storage is over 80% full; open Version History to review it"))
+      .toBe("版本历史存储已超过 80%；请打开版本历史进行检查");
     expect(createTranslator("zh-CN")("File changed on disk")).toBe("磁盘文件已变更");
     expect(createTranslator("zh-CN")("Compare versions")).toBe("比较版本");
     expect(createTranslator("zh-CN")("Reload from disk")).toBe("从磁盘重新加载");
@@ -40,6 +49,10 @@ describe("i18n", () => {
     expect(translateUiText("zh-CN", "Switch to Notes.md")).toBe("切换到 Notes.md");
     expect(translateUiText("zh-CN", "Table range selected: 2x3 cells")).toBe("已选择 2 x 3 个表格单元格");
     expect(translateUiText("zh-CN", "2 unsaved tabs")).toBe("2 个标签页未保存");
+    expect(translateUiText("zh-CN", "One tab has unsaved changes. Its current working state will be restored the next time NyaMarkdownor starts."))
+      .toBe("有 1 个标签页存在未保存更改。NyaMarkdownor 下次启动时会恢复其当前工作状态。");
+    expect(translateUiText("zh-CN", "2 tabs have unsaved changes. Their current working states will be restored the next time NyaMarkdownor starts."))
+      .toBe("有 2 个标签页存在未保存更改。NyaMarkdownor 下次启动时会恢复这些标签页的当前工作状态。");
     expect(createTranslator("zh-CN")("Copy Table as CSV")).toBe("将表格复制为 CSV");
     expect(createTranslator("zh-CN")("Document properties ({format})", { format: "YAML" })).toBe("文档属性（YAML）");
     expect(translateUiText("zh-CN", "Close Notes.md?")).toBe("关闭 Notes.md 吗？");
