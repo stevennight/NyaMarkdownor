@@ -22,6 +22,10 @@ describe("desktop development configuration", () => {
   });
 
   it("isolates the development app from an installed release instance", () => {
+    expect(tauriConfig.identifier).toBe("io.github.stevennight.nyamarkdownor");
+    expect(tauriDevConfig.identifier).toBe(`${tauriConfig.identifier}.dev`);
+    expect(tauriConfig.identifier.endsWith(".app")).toBe(false);
+    expect(tauriDevConfig.identifier.endsWith(".app")).toBe(false);
     expect(tauriDevConfig.identifier).not.toBe(tauriConfig.identifier);
     expect(tauriDevConfig.productName).toContain("Dev");
     expect(tauriDevConfig.app.windows[0]?.minWidth).toBe(tauriConfig.app.windows[0]?.minWidth);

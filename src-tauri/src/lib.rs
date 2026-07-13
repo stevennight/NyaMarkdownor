@@ -25,7 +25,7 @@ const MIN_ORPHAN_RETENTION_DAYS: u32 = 7;
 const MAX_ORPHAN_RETENTION_DAYS: u32 = 3_650;
 const MAX_WORKSPACE_FILES: usize = 800;
 const SUPPORTED_MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkdn", "mdwn", "txt"];
-const LINUX_DESKTOP_ENTRY: &str = "dev.nyamarkdownor.app.desktop";
+const LINUX_DESKTOP_ENTRY: &str = "io.github.stevennight.nyamarkdownor.desktop";
 const FILE_CHANGED_DURING_SAVE_ERROR: &str = "File changed on disk before save.";
 const DEFAULT_UPDATE_REPOSITORY: &str = "stevennight/NyaMarkdownor";
 #[cfg(windows)]
@@ -3819,7 +3819,7 @@ mod tests {
                 program: "xdg-mime".to_string(),
                 args: vec![
                     "default".to_string(),
-                    "dev.nyamarkdownor.app.desktop".to_string(),
+                    "io.github.stevennight.nyamarkdownor.desktop".to_string(),
                     "text/markdown".to_string(),
                 ],
             }

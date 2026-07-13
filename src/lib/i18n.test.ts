@@ -53,6 +53,28 @@ describe("i18n", () => {
       .toBe("有 1 个标签页存在未保存更改。NyaMarkdownor 下次启动时会恢复其当前工作状态。");
     expect(translateUiText("zh-CN", "2 tabs have unsaved changes. Their current working states will be restored the next time NyaMarkdownor starts."))
       .toBe("有 2 个标签页存在未保存更改。NyaMarkdownor 下次启动时会恢复这些标签页的当前工作状态。");
+    expect(translateUiText("zh-CN", "This tab has unsaved changes. NyaMarkdownor will create a safety checkpoint before closing it."))
+      .toBe("此标签页有未保存更改。NyaMarkdownor 会在关闭前创建重大变动检查点。");
+    expect(translateUiText("zh-CN", "Dirty tabs will get safety checkpoints before closing. 2 dirty tabs will get safety checkpoints."))
+      .toBe("关闭前会为有未保存更改的标签页创建重大变动检查点。其中 2 个标签页有未保存更改。");
+    expect(translateUiText("zh-CN", "Dirty tabs to the right will get safety checkpoints before closing."))
+      .toBe("关闭前会为右侧有未保存更改的标签页创建重大变动检查点。");
+    expect(translateUiText("zh-CN", "Dirty tabs will get safety checkpoints before closing. A new blank document will open afterward."))
+      .toBe("关闭前会为有未保存更改的标签页创建重大变动检查点，之后会打开新的空白文档。");
+    expect(translateUiText("zh-CN", "Reloading will replace the current unsaved editor content with the file currently on disk after creating a safety checkpoint."))
+      .toBe("创建重大变动检查点后，将用磁盘上的文件替换当前未保存的编辑内容。");
+    expect(translateUiText("zh-CN", "Restoring will replace the current unsaved editor content with this version after creating a safety checkpoint."))
+      .toBe("恢复前会先为当前未保存内容创建重大变动检查点，再用此版本替换编辑区内容。");
+    expect(translateUiText("zh-CN", "The disk version differs from the editor. Reloading replaces the editor content with the disk version after creating a safety checkpoint for any unsaved content."))
+      .toBe("磁盘版本与编辑器内容不同。重新加载会先为未保存内容创建重大变动检查点，再用磁盘版本替换编辑器内容。");
+    expect(translateUiText("zh-CN", "Delete this checkpoint?")).toBe("删除这个检查点吗？");
+    expect(translateUiText("zh-CN", "This removes the checkpoint from this device. The current editor content will not change."))
+      .toBe("这会从本设备删除该检查点，当前编辑内容不会改变。");
+    expect(translateUiText("zh-CN", "Manual checkpoint saved")).toBe("已保存手动检查点");
+    expect(translateUiText("zh-CN", "Checkpoint kept for this session only")).toBe("检查点仅保留在当前会话");
+    expect(translateUiText("zh-CN", "No changes to save")).toBe("没有需要保存的更改");
+    expect(translateUiText("zh-CN", "Automatic version (updating)")).toBe("自动版本（持续更新）");
+    expect(translateUiText("zh-CN", "Automatic version")).toBe("自动版本");
     expect(createTranslator("zh-CN")("Copy Table as CSV")).toBe("将表格复制为 CSV");
     expect(createTranslator("zh-CN")("Document properties ({format})", { format: "YAML" })).toBe("文档属性（YAML）");
     expect(translateUiText("zh-CN", "Close Notes.md?")).toBe("关闭 Notes.md 吗？");

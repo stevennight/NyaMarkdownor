@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "NyaMarkdownor",
-  "version": "1.0.0",
-  "identifier": "dev.nyamarkdownor.app",
+  "version": "1.0.1",
+  "identifier": "io.github.stevennight.nyamarkdownor",
   "build": {
     "beforeDevCommand": "npm run web:dev",
     "devUrl": "http://127.0.0.1:8765",

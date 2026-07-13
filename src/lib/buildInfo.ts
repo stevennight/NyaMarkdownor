@@ -13,7 +13,7 @@ declare const __APP_INFO__: Partial<BuildInfo>;
 
 const developmentBuildInfo: BuildInfo = {
   name: "NyaMarkdownor",
-  version: "1.0.0-dev",
+  version: "1.0.1-dev",
   commit: "",
   buildDate: "",
   updateRepository: "stevennight/NyaMarkdownor"
