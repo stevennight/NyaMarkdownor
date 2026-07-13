@@ -4072,12 +4072,13 @@ export function App() {
     setBackupComparison({
       restore: () => void reloadExternalDiskReview(review),
       tabId: review.tabId,
-      versionMarkdown: review.diskFile.markdown,
-      currentMarkdown: liveTab.document.markdown,
+      versionMarkdown: liveTab.document.markdown,
+      currentMarkdown: review.diskFile.markdown,
       currentName: displayMarkdownDocumentName(liveTab.document),
-      versionLabel: review.filePath,
-      versionTitle: "Disk version",
-      currentTitle: "Current editor",
+      versionLabel: displayMarkdownDocumentName(liveTab.document),
+      currentLabel: review.filePath,
+      versionTitle: "Current editor",
+      currentTitle: "Disk version",
       actionLabel: "Reload from disk"
     });
   }
