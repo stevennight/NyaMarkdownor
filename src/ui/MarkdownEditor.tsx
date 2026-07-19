@@ -19,12 +19,12 @@ import { applyMarkdownBlockquoteBackspace, applyMarkdownLineContinuation, applyM
 import { markdownRangesToClipboardPayload } from "../lib/markdown";
 import { applySelectedTableCellsClear, applySelectedTableCellsPaste, applyTableCellLineBreak, applyTableCellNavigation, applyTableCsvPaste, applyTableDocumentCommand, applyTableRowsPaste, applyTableTsvPaste, type TableDocumentCommand } from "../lib/tableDocumentCommands";
 import { clipboardRowsForTablePaste, type ClipboardTableSource } from "../lib/clipboardTableRows";
-import { writeClipboardEventData } from "../lib/clipboard";
+import { explicitMarkdownFromClipboard, writeClipboardEventData } from "../lib/clipboard";
 import { deleteSelectionRanges } from "../lib/selectionDelete";
 import { shouldHandleSmartCopy } from "../lib/selectionCopy";
 import { getScrollProgress, setScrollProgress } from "../lib/scrollSync";
 import type { TextRange } from "../lib/editorCommands";
-import { createEditorStateFromSnapshot, createEditorStateSnapshot, type EditorStateSnapshot } from "../lib/editorStateSnapshots";
+import { createEditorStateFromSnapshot, createEditorStateSnapshot, createExternalDocumentSyncTransaction, type EditorStateSnapshot } from "../lib/editorStateSnapshots";
 import type { DocumentCursorPosition } from "../lib/documentMetrics";
 import { uniqueSourceSelectionForText } from "../lib/sourceSelectionText";
 import { markdownFrontMatterMarks } from "./markdownFrontMatterPlugin";
@@ -178,10 +178,8 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
 
     if (editorMarkdownRef.current === value) return;
 
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: value }
-    });
     editorMarkdownRef.current = value;
+    view.dispatch(createExternalDocumentSyncTransaction(view.state, value));
   }, [value]);
 
   useEffect(() => {
@@ -398,15 +396,20 @@ function createEditorExtensions({
             return true;
           }
 
-          if (tablePaste.markdownTable) {
-            view.dispatch({
-              changes: { from: selection.from, to: selection.to, insert: tablePaste.markdownTable },
-              selection: { anchor: selection.from + tablePaste.markdownTable.length }
-            });
-            event.preventDefault();
-            onToastRef.current(`Pasted ${clipboardTableSourceLabel(tablePaste.source)} as Markdown table`);
-            return true;
-          }
+        }
+
+        const sourceMarkdown = explicitMarkdownFromClipboard({ markdown });
+        if (sourceMarkdown !== null) {
+          view.dispatch({ ...view.state.replaceSelection(sourceMarkdown), scrollIntoView: true });
+          event.preventDefault();
+          return true;
+        }
+
+        if (tablePaste?.markdownTable) {
+          view.dispatch({ ...view.state.replaceSelection(tablePaste.markdownTable), scrollIntoView: true });
+          event.preventDefault();
+          onToastRef.current(`Pasted ${clipboardTableSourceLabel(tablePaste.source)} as Markdown table`);
+          return true;
         }
 
         if (text && !/[\r\n]/.test(text)) {

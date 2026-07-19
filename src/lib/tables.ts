@@ -260,6 +260,16 @@ export function markdownTableTextToMarkdownTable(text: string): string | null {
   return table ? buildMarkdownTable(table) : null;
 }
 
+export function markdownTextContainsOnlyTable(text: string): boolean {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  const lines = normalized.split("\n");
+  const block = parseMarkdownTableTextBlock(lines);
+  if (!block) return false;
+
+  return lines.slice(0, block.startLine).every((line) => !line.trim())
+    && lines.slice(block.endLine).every((line) => !line.trim());
+}
+
 export function rowsToMarkdownTable(rows: string[][]): string | null {
   if (!rows.length) return null;
 
@@ -284,6 +294,14 @@ export function rowsToMarkdownTable(rows: string[][]): string | null {
 
 function parseMarkdownTableText(text: string): MarkdownTable | null {
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  return parseMarkdownTableTextBlock(lines)?.table ?? null;
+}
+
+function parseMarkdownTableTextBlock(lines: readonly string[]): {
+  table: MarkdownTable;
+  startLine: number;
+  endLine: number;
+} | null {
   let fence: CodeFence | null = null;
 
   for (let index = 0; index < lines.length - 1; index += 1) {
@@ -309,7 +327,7 @@ function parseMarkdownTableText(text: string): MarkdownTable | null {
     while (end < lines.length && canBeTableLine(lines[end])) end += 1;
 
     const table = parseMarkdownTable(lines.slice(index, end));
-    if (table) return table;
+    if (table) return { table, startLine: index, endLine: end };
   }
 
   return null;

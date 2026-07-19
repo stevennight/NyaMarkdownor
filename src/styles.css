@@ -1401,6 +1401,17 @@ body.pane-resizing * {
   box-shadow: 0 0 0 1px var(--accent), inset 0 -2px 0 var(--accent-strong);
 }
 
+.tiptap-markdown-editor .rich-search-match {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent), transparent 78%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent), transparent 62%);
+}
+
+.tiptap-markdown-editor .rich-search-match-active {
+  background: color-mix(in srgb, var(--accent), transparent 52%);
+  box-shadow: 0 0 0 1px var(--accent), inset 0 -2px 0 var(--accent-strong);
+}
+
 .preview {
   min-height: 0;
   overflow: auto;

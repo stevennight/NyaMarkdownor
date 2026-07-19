@@ -1,10 +1,13 @@
 export function htmlTableToRows(html: string): string[][] | null {
   if (!/<table[\s>]/i.test(html)) return null;
-  if (typeof DOMParser === "undefined") return fallbackHtmlTableToRows(html);
+  if (typeof DOMParser === "undefined") {
+    return fallbackHtmlContainsOnlyTable(html) ? fallbackHtmlTableToRows(html) : null;
+  }
 
   const document = new DOMParser().parseFromString(html, "text/html");
-  const table = document.querySelector("table");
-  if (!table) return null;
+  const tables = Array.from(document.body.querySelectorAll("table"));
+  const table = tables[0];
+  if (!table || tables.length !== 1 || !htmlBodyContainsOnlyTable(document.body, table)) return null;
 
   const rows: string[][] = [];
   const rowSpans = new Map<number, { remaining: number; value: string }>();
@@ -35,6 +38,36 @@ export function htmlTableToRows(html: string): string[][] | null {
   }
 
   return rows.length ? trimTrailingEmptyColumns(rows) : null;
+}
+
+function htmlBodyContainsOnlyTable(body: HTMLElement, table: Element): boolean {
+  const remainder = body.cloneNode(true) as HTMLElement;
+  const clonedTable = remainder.querySelector("table");
+  if (!clonedTable) return false;
+  clonedTable.remove();
+  remainder.querySelectorAll("script,style,meta,link,title").forEach((element) => element.remove());
+
+  if ((remainder.textContent ?? "").replace(/\u00a0/g, " ").trim()) return false;
+  return !remainder.querySelector("img,video,audio,canvas,svg,iframe,object,embed,input,textarea,select,button,hr");
+}
+
+function fallbackHtmlContainsOnlyTable(html: string): boolean {
+  if ((html.match(/<table\b/gi)?.length ?? 0) !== 1) return false;
+  const table = html.match(/<table\b[\s\S]*?<\/table>/i)?.[0];
+  if (!table) return false;
+
+  const remainder = html
+    .replace(table, "")
+    .replace(/<!--([\s\S]*?)-->/g, "")
+    .replace(/<(?:script|style|title)\b[\s\S]*?<\/(?:script|style|title)>/gi, "")
+    .replace(/<(?:meta|link)\b[^>]*>/gi, "");
+  if (/<(?:img|video|audio|canvas|svg|iframe|object|embed|input|textarea|select|button|hr)\b/i.test(remainder)) {
+    return false;
+  }
+
+  return !decodeBasicHtmlEntities(remainder.replace(/<[^>]+>/g, ""))
+    .replace(/\u00a0/g, " ")
+    .trim();
 }
 
 function fallbackHtmlTableToRows(html: string): string[][] | null {

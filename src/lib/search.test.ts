@@ -13,6 +13,13 @@ describe("search helpers", () => {
     ]);
   });
 
+  it("keeps case-insensitive Unicode match ranges inside the source text", () => {
+    const matches = findTextMatches("İA", "a", { caseSensitive: false, wholeWord: false });
+
+    expect(matches).toEqual([{ from: 1, to: 2 }]);
+    expect(matches.every((match) => match.from >= 0 && match.to <= 2)).toBe(true);
+  });
+
   it("can restrict matches to whole words", () => {
     expect(findTextMatches("cat scatter cat_ cat", "cat", { caseSensitive: false, wholeWord: true })).toEqual([
       { from: 0, to: 3 },
@@ -40,6 +47,14 @@ describe("search helpers", () => {
       text: "1 two 1",
       count: 2
     });
+  });
+
+  it("does not truncate replace all at the visible match limit", () => {
+    const source = Array.from({ length: 10001 }, () => "x").join(" ");
+    const result = replaceAllText(source, "x", "y", { caseSensitive: true, wholeWord: true });
+
+    expect(result.count).toBe(10001);
+    expect(result.text.includes("x")).toBe(false);
   });
 
   it("selects the next match after replacing the current one", () => {

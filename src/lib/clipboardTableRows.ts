@@ -5,7 +5,8 @@ import {
   markdownTableTextToRows,
   parseCsvRows,
   parseTsvRows,
-  rowsToMarkdownTable
+  rowsToMarkdownTable,
+  markdownTextContainsOnlyTable
 } from "./tables";
 import { stripInlineMarkdown } from "./text";
 
@@ -22,8 +23,9 @@ export function clipboardTableRowsFromData(data: { text?: string | null; html?: 
   const html = data.html ?? "";
   const markdown = data.markdown ?? "";
 
-  const htmlRows = htmlTableToRows(html);
-  if (htmlRows) {
+  if (/<table[\s>]/i.test(html)) {
+    const htmlRows = htmlTableToRows(html);
+    if (!htmlRows) return null;
     return {
       source: "html",
       rows: htmlRows,
@@ -31,18 +33,29 @@ export function clipboardTableRowsFromData(data: { text?: string | null; html?: 
     };
   }
 
-  const markdownRows = markdownTableTextToRows(markdown) ?? markdownTableTextToRows(text);
+  const markdownRows = markdownTableTextToRows(markdown);
   if (markdownRows) {
+    if (!markdownTextContainsOnlyTable(markdown)) return null;
     return {
       source: "markdown",
       rows: markdownRows,
-      markdownTable: markdownTableTextToMarkdownTable(markdown) ?? markdownTableTextToMarkdownTable(text)
+      markdownTable: markdownTableTextToMarkdownTable(markdown)
+    };
+  }
+
+  const textMarkdownRows = markdownTableTextToRows(text);
+  if (textMarkdownRows) {
+    if (!markdownTextContainsOnlyTable(text)) return null;
+    return {
+      source: "markdown",
+      rows: textMarkdownRows,
+      markdownTable: markdownTableTextToMarkdownTable(text)
     };
   }
 
   if (text.includes("\t")) {
     const rows = parseTsvRows(text);
-    if (rows.length) {
+    if (isRectangularGrid(rows)) {
       return {
         source: "tsv",
         rows,
@@ -55,7 +68,7 @@ export function clipboardTableRowsFromData(data: { text?: string | null; html?: 
   // Treat it as TSV rather than allowing an invisible control character into Markdown.
   if (text.includes("\u001f")) {
     const rows = parseTsvRows(text.replaceAll("\u001f", "\t"));
-    if (rows.length) {
+    if (isRectangularGrid(rows)) {
       return {
         source: "tsv",
         rows,
@@ -90,9 +103,21 @@ export function clipboardTableRowsFromData(data: { text?: string | null; html?: 
 export function clipboardRowsForTablePaste(data: { text?: string | null; html?: string | null; markdown?: string | null }): ClipboardTableRows | null {
   const tableRows = clipboardTableRowsFromData(data);
   if (tableRows) return tableRows;
+  if (clipboardContainsEmbeddedTable(data)) return null;
 
   const rows = clipboardPlainLineRowsFromText(data.text ?? "");
   return rows ? { source: "lines", rows, markdownTable: null } : null;
+}
+
+function clipboardContainsEmbeddedTable(data: { text?: string | null; html?: string | null; markdown?: string | null }): boolean {
+  return /<table[\s>]/i.test(data.html ?? "")
+    || Boolean(markdownTableTextToRows(data.markdown ?? ""))
+    || Boolean(markdownTableTextToRows(data.text ?? ""));
+}
+
+function isRectangularGrid(rows: readonly (readonly string[])[]): boolean {
+  const width = rows[0]?.length ?? 0;
+  return width > 1 && rows.length > 0 && rows.every((row) => row.length === width);
 }
 
 export function clipboardPlainLineRowsFromText(text: string): string[][] | null {

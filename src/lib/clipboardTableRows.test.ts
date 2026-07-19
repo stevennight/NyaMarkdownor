@@ -171,6 +171,32 @@ describe("clipboard table row detection", () => {
     expect(clipboardRowsForTablePaste({ text: prose })?.source).toBe("lines");
   });
 
+  it("does not collapse mixed documents to their first table", () => {
+    const mixedMarkdown = [
+      "Before",
+      "",
+      "| A | B |",
+      "| --- | --- |",
+      "| 1 | 2 |",
+      "",
+      "After"
+    ].join("\n");
+    const mixedData = {
+      text: mixedMarkdown,
+      markdown: mixedMarkdown,
+      html: "<p>Before</p><table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table><p>After</p>"
+    };
+
+    expect(clipboardTableRowsFromData(mixedData)).toBeNull();
+    expect(clipboardRowsForTablePaste(mixedData)).toBeNull();
+    expect(clipboardTableRowsFromData({ markdown: mixedMarkdown })).toBeNull();
+    expect(clipboardRowsForTablePaste({ markdown: mixedMarkdown, text: mixedMarkdown })).toBeNull();
+  });
+
+  it("rejects mixed-width TSV instead of padding prose into a grid", () => {
+    expect(clipboardTableRowsFromData({ text: "Before\nA\tB\n1\t2\nAfter" })).toBeNull();
+  });
+
   it("ignores table-looking Markdown inside code examples", () => {
     expect(clipboardTableRowsFromData({
       text: [

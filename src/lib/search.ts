@@ -12,21 +12,16 @@ export type SearchMatch = TextRange;
 export function findTextMatches(text: string, query: string, options: SearchOptions, limit = 10000): SearchMatch[] {
   if (!query || limit <= 0) return [];
 
-  const haystack = options.caseSensitive ? text : text.toLowerCase();
-  const needle = options.caseSensitive ? query : query.toLowerCase();
+  const matcher = new RegExp(escapeRegularExpression(query), options.caseSensitive ? "gu" : "giu");
   const matches: SearchMatch[] = [];
-  let position = 0;
 
-  while (position <= haystack.length && matches.length < limit) {
-    const found = haystack.indexOf(needle, position);
-    if (found === -1) break;
-
-    const match = { from: found, to: found + query.length };
+  for (const result of text.matchAll(matcher)) {
+    if (matches.length >= limit) break;
+    const from = result.index;
+    const match = { from, to: from + result[0].length };
     if (!options.wholeWord || isWholeWordMatch(text, match)) {
       matches.push(match);
     }
-
-    position = found + Math.max(1, query.length);
   }
 
   return matches;
@@ -60,7 +55,7 @@ export function replaceTextRange(text: string, range: TextRange, replacement: st
 }
 
 export function replaceAllText(text: string, query: string, replacement: string, options: SearchOptions): { text: string; count: number } {
-  const matches = findTextMatches(text, query, options);
+  const matches = findTextMatches(text, query, options, Number.POSITIVE_INFINITY);
   if (!matches.length) return { text, count: 0 };
 
   let next = text;
@@ -92,4 +87,8 @@ function isWholeWordMatch(text: string, match: SearchMatch): boolean {
 
 function isWordChar(char: string | undefined): boolean {
   return Boolean(char && /[\p{L}\p{N}_]/u.test(char));
+}
+
+function escapeRegularExpression(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

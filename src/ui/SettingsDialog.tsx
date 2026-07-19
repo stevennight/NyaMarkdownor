@@ -114,17 +114,27 @@ export function SettingsDialog({
 }: SettingsDialogProps) {
   const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>("general");
   const settingsContentRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open) return undefined;
 
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusFrame = window.requestAnimationFrame(() => closeButtonRef.current?.focus());
+
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") onCloseRef.current();
     };
 
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, open]);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", handleKeyDown);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, [open]);
 
   if (!open) return null;
 
@@ -161,7 +171,7 @@ export function SettingsDialog({
             <div className="settings-title">{t("Settings")}</div>
             <div className="settings-subtitle">{selectedCategory.label}</div>
           </div>
-          <button className="icon-only" type="button" aria-label={t("Close settings")} title={t("Close settings")} onClick={onClose}>
+          <button ref={closeButtonRef} className="icon-only" type="button" aria-label={t("Close settings")} title={t("Close settings")} onClick={onClose}>
             <X />
           </button>
         </header>

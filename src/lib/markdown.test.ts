@@ -265,6 +265,26 @@ describe("Markdown rendering and clean copy", () => {
     expect(payload.html).toContain("abcdef");
   });
 
+  it("keeps prose around a table in every rich-copy representation", () => {
+    const source = [
+      "Before [Docs](https://example.com/docs)",
+      "",
+      "| A | B |",
+      "| --- | --- |",
+      "| 1 | 2 |",
+      "",
+      "After"
+    ].join("\n");
+    const payload = markdownRangesToClipboardPayload(source, [{ from: 0, to: source.length }]);
+
+    expect(payload.markdown).toBe(source);
+    expect(payload.plainText).toContain("Before Docs");
+    expect(payload.plainText).toContain("After");
+    expect(payload.html).toContain("<table>");
+    expect(payload.html).toContain("Before");
+    expect(payload.html).toContain("After");
+  });
+
   it("copies Markdown tables as TSV-like clean text", () => {
     const plain = markdownToPlain([
       "| A | B |",

@@ -6,6 +6,17 @@ describe("HTML table paste helpers", () => {
     expect(htmlTableToRows("<p>Alpha</p>")).toBeNull();
   });
 
+  it("does not extract a table from mixed HTML content", () => {
+    expect(htmlTableToRows("<p>Before</p><table><tr><td>A</td></tr></table><p>After</p>")).toBeNull();
+    expect(htmlTableToRows("<table><tr><td>A</td></tr></table><table><tr><td>B</td></tr></table>")).toBeNull();
+  });
+
+  it("allows clipboard comments and empty wrappers around a table", () => {
+    expect(htmlTableToRows("<!--StartFragment--><div><table><tr><td>A</td></tr></table></div><!--EndFragment-->")).toEqual([
+      ["A"]
+    ]);
+  });
+
   it("parses simple HTML tables without relying on a browser DOMParser", () => {
     expect(htmlTableToRows("<table><tr><th>Name</th><th>Score</th></tr><tr><td>Beta</td><td>10</td></tr></table>")).toEqual([
       ["Name", "Score"],

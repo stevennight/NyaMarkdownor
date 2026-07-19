@@ -2,6 +2,7 @@ import { decodeHTMLStrict } from "entities";
 
 export type RichLinkClipboardData = {
   html?: string | null;
+  markdown?: string | null;
   text?: string | null;
 };
 
@@ -11,6 +12,7 @@ export type BrowserTitleLink = {
 };
 
 export function browserTitleLinkFromClipboard(data: RichLinkClipboardData): BrowserTitleLink | null {
+  if (data.markdown?.trim()) return null;
   const plainUrl = data.text?.trim() ?? "";
   const html = data.html?.trim() ?? "";
   if (!plainUrl || !html || !isWebUrl(plainUrl)) return null;

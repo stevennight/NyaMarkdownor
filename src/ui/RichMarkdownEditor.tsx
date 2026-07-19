@@ -3,15 +3,16 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import { type Editor } from "@tiptap/core";
 import { Trash2 } from "lucide-react";
 import { DOMSerializer, type Node as ProseMirrorNode } from "@tiptap/pm/model";
+import type { SelectionBookmark } from "@tiptap/pm/state";
 import { CellSelection, TableMap } from "@tiptap/pm/tables";
 import type { MarkdownBlockCommand, MarkdownListIndentDirection, MarkdownTextCommand } from "../lib/editorCommands";
 import type { TableDocumentCommand } from "../lib/tableDocumentCommands";
-import { findTextMatches, type SearchMatch, type SearchOptions } from "../lib/search";
+import type { SearchMatch, SearchOptions } from "../lib/search";
 import type { TextRange } from "../lib/editorCommands";
 import { createRichMarkdownSyncScheduler, richMarkdownSyncDelayFor, type RichMarkdownSyncSource } from "../lib/richMarkdownSync";
 import { richTableClipboardFormats, type RichTableClipboardFormats } from "../lib/richTableClipboard";
 import { writeClipboardEventData } from "../lib/clipboard";
-import { clipboardTableRowsFromData, type ClipboardTableSource } from "../lib/clipboardTableRows";
+import { clipboardRowsForTablePaste, type ClipboardTableSource } from "../lib/clipboardTableRows";
 import type { RichDocumentHistoryAction } from "../lib/richDocumentHistory";
 import { richTableSelectionFor, richTableSelectionSummary, type RichTableSelectionCommand, type RichTableSelectionSummary } from "../lib/richTableSelection";
 import { richTableColumnAlignmentTransaction, type RichTableColumnAlignment } from "../lib/richTableAlignment";
@@ -28,7 +29,11 @@ import { createRichMarkdownExtensions } from "../lib/richMarkdownExtensions";
 import { withoutGeneratedTrailingParagraph } from "../lib/richMarkdownDocument";
 import { shouldOpenRichLinkOnClick } from "../lib/richLinks";
 import { browserTitleLinkFromClipboard } from "../lib/richLinkPaste";
+import { findRichTextMatches, richSearchHighlightExtension, setRichSearchHighlights } from "../lib/richSearch";
+import { richMarkdownSourceFromClipboard } from "../lib/richMarkdownPaste";
 import type { Translator } from "../lib/i18n";
+
+const EMPTY_SEARCH_MATCHES: readonly TextRange[] = [];
 
 type RichTableCommand = Extract<
   TableDocumentCommand,
@@ -91,10 +96,12 @@ type RichMarkdownEditorProps = {
   onScrollProgress?: (progress: number) => void;
   selection?: TextRange;
   selectionText?: string;
+  searchMatches?: readonly TextRange[];
+  activeSearchRange?: TextRange | null;
 };
 
 export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, RichMarkdownEditorProps>(function RichMarkdownEditor(
-  { documentFilePath, markdown, t, smartCopy, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onActiveHeadingIndexChange, onOpenLink, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText },
+  { documentFilePath, markdown, t, smartCopy, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onActiveHeadingIndexChange, onOpenLink, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
   forwardedRef
 ) {
   const onChangeRef = useRef(onChange);
@@ -136,21 +143,12 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
         lastEditSurfaceRef.current = "body";
         const currentEditor = editorRef.current;
         if (currentEditor && !currentEditor.isDestroyed) {
-          const preservedSelection = richSelectionRange(currentEditor);
-          const scrollHost = scrollHostRef.current;
-          const preservedScrollTop = scrollHost?.scrollTop;
-          currentEditor.commands.setContent(promotion.body, { contentType: "markdown", emitUpdate: false });
-          restoreRichSelection(currentEditor, preservedSelection);
+          replaceRichEditorBody(currentEditor, promotion.body, scrollHostRef.current);
           reportTableContext(currentEditor, tableActiveRef, onTableContextChangeRef);
           reportTableSelection(currentEditor, tableSelectionRef, onTableSelectionChangeRef);
+          reportSelection(currentEditor, onSelectionChangeRef);
           headingPositionsRef.current = richHeadingPositions(currentEditor);
           reportActiveRichHeading(currentEditor, headingPositionsRef, activeHeadingIndexRef, onActiveHeadingIndexChangeRef);
-
-          if (typeof preservedScrollTop === "number") {
-            window.requestAnimationFrame(() => {
-              if (scrollHost && scrollHostRef.current === scrollHost) scrollHost.scrollTop = preservedScrollTop;
-            });
-          }
         }
       }
 
@@ -163,7 +161,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
 
   const editor = useEditor({
     immediatelyRender: true,
-    extensions: createRichMarkdownExtensions(documentFilePath),
+    extensions: [...createRichMarkdownExtensions(documentFilePath), richSearchHighlightExtension],
     content: splitMarkdownFrontMatter(markdown).body,
     contentType: "markdown",
     editorProps: {
@@ -218,10 +216,42 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
           const currentEditor = editorRef.current;
           if (!currentEditor || currentEditor.isDestroyed) return false;
 
-          const titleLink = browserTitleLinkFromClipboard({
-            text: event.clipboardData?.getData("text/plain"),
-            html: event.clipboardData?.getData("text/html")
-          });
+          const clipboard = {
+            text: event.clipboardData?.getData("text/plain") ?? "",
+            html: event.clipboardData?.getData("text/html") ?? "",
+            markdown: event.clipboardData?.getData("text/markdown") ?? ""
+          };
+          const table = clipboardRowsForTablePaste(clipboard);
+
+          if (table) {
+            const capacity = richTablePasteCapacity(currentEditor.state, table.rows);
+            if (capacity && (capacity.additionalRows > 0 || capacity.additionalColumns > 0)) {
+              if (!expandRichTableForPaste(currentEditor, capacity)) return false;
+            }
+
+            const tableTransaction = richTablePasteTransaction(currentEditor.state, table.rows);
+            if (tableTransaction) {
+              currentEditor.view.dispatch(tableTransaction);
+              currentEditor.commands.focus();
+              event.preventDefault();
+              onToastRef.current(`Filled table from ${clipboardTableSourceLabel(table.source)}`);
+              return true;
+            }
+          }
+
+          const markdownSource = richMarkdownSourceFromClipboard(
+            clipboard,
+            (source) => currentEditor.markdown?.parse(source) ?? null
+          );
+          if (markdownSource) {
+            const parsed = currentEditor.markdown?.parse(markdownSource);
+            if (parsed?.content?.length && currentEditor.chain().insertContent(parsed.content).run()) {
+              event.preventDefault();
+              return true;
+            }
+          }
+
+          const titleLink = browserTitleLinkFromClipboard(clipboard);
           if (titleLink) {
             const link = currentEditor.state.schema.marks.link.create({ href: titleLink.href });
             const transaction = currentEditor.state.tr
@@ -233,28 +263,10 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
             return true;
           }
 
-          const table = clipboardTableRowsFromData({
-            text: event.clipboardData?.getData("text/plain"),
-            html: event.clipboardData?.getData("text/html"),
-            markdown: event.clipboardData?.getData("text/markdown")
-          });
-          if (!table?.markdownTable) return false;
-
-          const capacity = richTablePasteCapacity(currentEditor.state, table.rows);
-          if (capacity && (capacity.additionalRows > 0 || capacity.additionalColumns > 0)) {
-            if (!expandRichTableForPaste(currentEditor, capacity)) return false;
-          }
-
-          const tableTransaction = richTablePasteTransaction(currentEditor.state, table.rows);
-          if (tableTransaction) {
-            currentEditor.view.dispatch(tableTransaction);
-            currentEditor.commands.focus();
-            event.preventDefault();
-            onToastRef.current(`Filled table from ${clipboardTableSourceLabel(table.source)}`);
-            return true;
-          }
-
+          if (!table) return false;
           if (richTableContext(currentEditor, currentEditor.state.selection instanceof CellSelection)) return false;
+
+          if (!table.markdownTable) return false;
 
           const parsed = currentEditor.markdown?.parse(table.markdownTable);
           if (!parsed?.content?.length) return false;
@@ -309,12 +321,19 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
     if (synchronizedMarkdownRef.current === markdown) return;
     const next = splitMarkdownFrontMatter(markdown);
     markdownSyncRef.current?.cancel();
-    editor.commands.setContent(next.body, { contentType: "markdown", emitUpdate: false });
+    replaceRichEditorBody(editor, next.body, scrollHostRef.current);
     frontMatterRef.current = next.frontMatter;
     synchronizedMarkdownRef.current = markdown;
+    reportTableContext(editor, tableActiveRef, onTableContextChangeRef);
+    reportTableSelection(editor, tableSelectionRef, onTableSelectionChangeRef);
+    reportSelection(editor, onSelectionChangeRef);
     headingPositionsRef.current = richHeadingPositions(editor);
     reportActiveRichHeading(editor, headingPositionsRef, activeHeadingIndexRef, onActiveHeadingIndexChangeRef);
   }, [editor, markdown]);
+
+  useEffect(() => {
+    setRichSearchHighlights(editor, { matches: searchMatches, active: activeSearchRange });
+  }, [activeSearchRange, editor, searchMatches]);
 
   useEffect(() => {
     const host = scrollHostRef.current;
@@ -801,6 +820,33 @@ function restoreRichSelection(editor: Editor, selection: TextRange | null | unde
   editor.commands.setTextSelection({ from, to });
 }
 
+function replaceRichEditorBody(editor: Editor, markdown: string, scrollHost: HTMLDivElement | null): void {
+  const bookmark = editor.state.selection.getBookmark();
+  const fallbackSelection = richSelectionRange(editor);
+  const preservedScrollTop = scrollHost?.scrollTop;
+
+  editor.commands.setContent(markdown, { contentType: "markdown", emitUpdate: false });
+  restoreRichSelectionBookmark(editor, bookmark, fallbackSelection);
+
+  if (typeof preservedScrollTop === "number") {
+    window.requestAnimationFrame(() => {
+      if (scrollHost?.isConnected) scrollHost.scrollTop = preservedScrollTop;
+    });
+  }
+}
+
+function restoreRichSelectionBookmark(
+  editor: Editor,
+  bookmark: SelectionBookmark,
+  fallbackSelection: TextRange | null
+): void {
+  try {
+    editor.view.dispatch(editor.state.tr.setSelection(bookmark.resolve(editor.state.doc)));
+  } catch {
+    restoreRichSelection(editor, fallbackSelection);
+  }
+}
+
 function restoreRichTextSelection(editor: Editor, selectedText: string | undefined): boolean {
   const text = selectedText?.trim();
   if (!text || text.length > 2_000) return false;
@@ -822,23 +868,14 @@ function richSelectedText(editor: Editor | null): string {
 
 function richTextMatches(editor: Editor | null, query: string, options: SearchOptions): SearchMatch[] {
   if (!editor || !query) return [];
-
-  const matches: SearchMatch[] = [];
-  editor.state.doc.descendants((node, position) => {
-    if (!node.isText || !node.text || matches.length >= 10000) return;
-    const remaining = 10000 - matches.length;
-    for (const match of findTextMatches(node.text, query, options, remaining)) {
-      matches.push({ from: position + match.from, to: position + match.to });
-    }
-  });
-  return matches;
+  return findRichTextMatches(editor.state.doc, query, options);
 }
 
 function selectRichTextRange(editor: Editor | null, range: TextRange): boolean {
   if (!editor) return false;
   const from = Math.max(0, Math.min(range.from, editor.state.doc.content.size));
   const to = Math.max(from, Math.min(range.to, editor.state.doc.content.size));
-  return editor.chain().focus().setTextSelection({ from, to }).scrollIntoView().run();
+  return editor.chain().setTextSelection({ from, to }).scrollIntoView().run();
 }
 
 function replaceRichTextRange(editor: Editor | null, range: TextRange, replacement: string): boolean {
@@ -847,7 +884,7 @@ function replaceRichTextRange(editor: Editor | null, range: TextRange, replaceme
   const to = Math.max(from, Math.min(range.to, editor.state.doc.content.size));
   const transaction = editor.state.tr.insertText(replacement, from, to);
   editor.view.dispatch(transaction);
-  return editor.chain().focus().setTextSelection({ from, to: from + replacement.length }).scrollIntoView().run();
+  return editor.chain().setTextSelection({ from, to: from + replacement.length }).scrollIntoView().run();
 }
 
 function replaceAllRichTextMatches(editor: Editor | null, query: string, replacement: string, options: SearchOptions): number {
@@ -859,7 +896,6 @@ function replaceAllRichTextMatches(editor: Editor | null, query: string, replace
     transaction = transaction.insertText(replacement, matches[index].from, matches[index].to);
   }
   editor.view.dispatch(transaction);
-  editor.commands.focus();
   return matches.length;
 }
 

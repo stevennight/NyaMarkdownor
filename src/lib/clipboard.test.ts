@@ -7,7 +7,7 @@ const clipboardPlugin = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => clipboardPlugin);
 
-import { copyRichContent, writeClipboardEventData } from "./clipboard";
+import { copyRichContent, explicitMarkdownFromClipboard, writeClipboardEventData } from "./clipboard";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -17,6 +17,13 @@ afterEach(() => {
 });
 
 describe("clipboard helpers", () => {
+  it("keeps explicit Markdown source ahead of clean clipboard representations", () => {
+    expect(explicitMarkdownFromClipboard({
+      markdown: "[Docs](https://example.com)\r\n"
+    })).toBe("[Docs](https://example.com)\n");
+    expect(explicitMarkdownFromClipboard({ markdown: "" })).toBeNull();
+  });
+
   it("writes plain text, HTML, and Markdown to copy events", () => {
     const clipboardData = createClipboardData();
     const mode = writeClipboardEventData(createClipboardEvent(clipboardData), {

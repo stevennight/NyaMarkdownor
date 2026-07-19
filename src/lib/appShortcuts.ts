@@ -14,6 +14,20 @@ export type TabNavigationShortcut =
 
 type KeyboardShortcutEvent = Pick<KeyboardEvent, "altKey" | "ctrlKey" | "key" | "metaKey" | "shiftKey">;
 
+export type AppShortcutOverlayState = {
+  commandPaletteOpen: boolean;
+  settingsOpen: boolean;
+  historyManagerOpen: boolean;
+  externalDiskReviewOpen: boolean;
+};
+
+export function areAppShortcutsBlocked(state: AppShortcutOverlayState): boolean {
+  return state.commandPaletteOpen
+    || state.settingsOpen
+    || state.historyManagerOpen
+    || state.externalDiskReviewOpen;
+}
+
 export function getTabNavigationShortcut(event: KeyboardShortcutEvent): TabNavigationShortcut | null {
   if (!(event.ctrlKey || event.metaKey)) return null;
 

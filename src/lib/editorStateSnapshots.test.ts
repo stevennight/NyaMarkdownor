@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { history, undoDepth } from "@codemirror/commands";
-import { createEditorStateFromSnapshot, createEditorStateSnapshot, normalizeStoredEditorStateSnapshot } from "./editorStateSnapshots";
+import { createEditorStateFromSnapshot, createEditorStateSnapshot, createExternalDocumentSyncTransaction, normalizeStoredEditorStateSnapshot } from "./editorStateSnapshots";
 
 describe("editor state snapshots", () => {
   it("restores document, selection, and undo history from a matching snapshot", () => {
@@ -76,5 +76,22 @@ describe("editor state snapshots", () => {
       doc: "markdown",
       scrollProgress: 2
     }, "markdown")?.scrollProgress).toBe(1);
+  });
+
+  it("syncs external content without adding a full-document undo step", () => {
+    let state = EditorState.create({
+      doc: "draft",
+      selection: EditorSelection.range(2, 5),
+      extensions: [history()]
+    });
+    state = state.update({ changes: { from: 5, insert: "!" } }).state;
+    const historyDepth = undoDepth(state);
+
+    const transaction = createExternalDocumentSyncTransaction(state, "disk");
+
+    expect(historyDepth).toBe(1);
+    expect(transaction.state.doc.toString()).toBe("disk");
+    expect(transaction.state.selection.main).toMatchObject({ anchor: 2, head: 4 });
+    expect(undoDepth(transaction.state)).toBe(0);
   });
 });

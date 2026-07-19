@@ -40,10 +40,15 @@ export function CommandPalette({ open, commands, locale, placeholder = "Run comm
     if (!open) {
       setQuery("");
       setActiveIndex(-1);
-      return;
+      return undefined;
     }
 
-    window.setTimeout(() => inputRef.current?.focus(), 0);
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => {
+      window.clearTimeout(focusTimer);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
   }, [open]);
 
   useEffect(() => {

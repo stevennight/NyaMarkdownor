@@ -32,6 +32,14 @@ describe("rich link paste", () => {
     });
   });
 
+  it("does not reinterpret an explicit Markdown clipboard payload as a browser title link", () => {
+    expect(browserTitleLinkFromClipboard({
+      text: "https://baidu.com/q/1111",
+      html: '<a href="https://baidu.com/q/1111">https://baidu.com/q/1111</a>',
+      markdown: "[https://baidu.com/q/1111](https://baidu.com/q/1111)"
+    })).toBeNull();
+  });
+
   it("does not intercept ordinary copied linked text or mismatched targets", () => {
     expect(browserTitleLinkFromClipboard({
       text: "提交 - baidu.com - 标题",

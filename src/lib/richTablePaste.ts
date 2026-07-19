@@ -24,8 +24,12 @@ export function richTablePasteTransaction(state: EditorState, cells: readonly (r
   const paragraph = state.schema.nodes.paragraph;
   if (!paragraph) return null;
 
+  const firstPosition = replacements[0]?.position;
+  const lastPosition = replacements[replacements.length - 1]?.position;
+  if (firstPosition === undefined || lastPosition === undefined) return null;
+
   const transaction = state.tr;
-  for (const replacement of replacements.sort((left, right) => right.position - left.position)) {
+  for (const replacement of [...replacements].sort((left, right) => right.position - left.position)) {
     const cell = transaction.doc.nodeAt(replacement.position);
     if (!cell) return null;
     const content = tableCellContent(state, replacement.value, paragraph.name);
@@ -33,9 +37,12 @@ export function richTablePasteTransaction(state: EditorState, cells: readonly (r
     transaction.replaceWith(replacement.position, replacement.position + cell.nodeSize, cell.copy(content));
   }
 
-  const lastPosition = replacements[replacements.length - 1]?.position;
-  if (lastPosition === undefined) return null;
-  return transaction.setSelection(new CellSelection(transaction.doc.resolve(lastPosition)));
+  const mappedFirstPosition = transaction.mapping.map(firstPosition, -1);
+  const mappedLastPosition = transaction.mapping.map(lastPosition, -1);
+  return transaction.setSelection(new CellSelection(
+    transaction.doc.resolve(mappedFirstPosition),
+    transaction.doc.resolve(mappedLastPosition)
+  ));
 }
 
 export function richTablePasteCapacity(state: EditorState, cells: readonly (readonly string[])[]): RichTablePasteCapacity | null {

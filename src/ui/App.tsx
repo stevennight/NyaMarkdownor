@@ -244,7 +244,7 @@ import {
   tabMatchesDiskReviewCandidate,
   type DiskReviewCandidate
 } from "../lib/diskReview";
-import { getTabNavigationShortcut, getTableSelectionShortcut, type TabNavigationShortcut, type TableSelectionShortcut } from "../lib/appShortcuts";
+import { areAppShortcutsBlocked, getTabNavigationShortcut, getTableSelectionShortcut, type TabNavigationShortcut, type TableSelectionShortcut } from "../lib/appShortcuts";
 import { documentWindowTitle } from "../lib/windowTitle";
 import { localPathKey, sameLocalPath } from "../lib/localPathKeys";
 import {
@@ -1863,22 +1863,44 @@ export function App() {
 
   function focusEditorSoon() {
     if (editorFocusTimerRef.current !== null) window.clearTimeout(editorFocusTimerRef.current);
-    pendingEditorFocusTabIdRef.current = activeTabIdRef.current;
+    const targetTabId = activeTabIdRef.current;
+    pendingEditorFocusTabIdRef.current = targetTabId;
+    let remainingAttempts = 20;
 
-    editorFocusTimerRef.current = window.setTimeout(() => {
+    const attemptFocus = () => {
       editorFocusTimerRef.current = null;
+      if (pendingEditorFocusTabIdRef.current !== targetTabId || activeTabIdRef.current !== targetTabId) return;
+
+      if (viewModeRef.current === "preview") {
+        const preview = previewRef.current;
+        if (preview) {
+          preview.focus();
+          pendingEditorFocusTabIdRef.current = null;
+          return;
+        }
+      }
+
       if (viewModeRef.current === "wysiwyg") {
-        richEditorRef.current?.focus();
+        if (richEditorRef.current) {
+          richEditorRef.current.focus();
+          pendingEditorFocusTabIdRef.current = null;
+          return;
+        }
+      } else if (shouldFocusEditorView(editorViewTabIdRef.current, activeTabIdRef.current, viewModeRef.current)) {
+        currentActiveEditorView()?.focus();
         pendingEditorFocusTabIdRef.current = null;
         return;
       }
-      if (!shouldFocusEditorView(editorViewTabIdRef.current, activeTabIdRef.current, viewModeRef.current)) {
-        if (viewModeRef.current === "preview") pendingEditorFocusTabIdRef.current = null;
-        return;
+
+      remainingAttempts -= 1;
+      if (remainingAttempts > 0) {
+        editorFocusTimerRef.current = window.setTimeout(attemptFocus, 25);
+      } else {
+        pendingEditorFocusTabIdRef.current = null;
       }
-      currentActiveEditorView()?.focus();
-      pendingEditorFocusTabIdRef.current = null;
-    }, 0);
+    };
+
+    editorFocusTimerRef.current = window.setTimeout(attemptFocus, 0);
   }
 
   function activateDocumentTab(tabId: string, options: { focusEditor?: boolean } = {}) {
@@ -2658,6 +2680,11 @@ export function App() {
     setFindOpen(true);
   }
 
+  function closeFindPanel() {
+    setFindOpen(false);
+    focusEditorSoon();
+  }
+
   function selectEditorRange(range: { from: number; to: number }, options: { focus?: boolean } = {}) {
     const view = currentActiveEditorView();
     if (!view) {
@@ -2879,8 +2906,12 @@ export function App() {
 
   function setViewMode(viewMode: ViewMode) {
     const currentViewMode = viewModeRef.current;
+    const returnFocusToViewMenu = viewMenuOpen;
+    const preserveOverlayFocus = settingsOpen || findOpen;
     if (viewMode === currentViewMode) {
       setViewMenuOpen(false);
+      if (returnFocusToViewMenu) window.requestAnimationFrame(() => viewMenuTriggerRef.current?.focus());
+      else if (!preserveOverlayFocus) focusEditorSoon();
       return;
     }
 
@@ -2908,7 +2939,13 @@ export function App() {
     }
 
     setViewMenuOpen(false);
+    viewModeRef.current = viewMode;
     setViewModeState(viewMode);
+    if (returnFocusToViewMenu) {
+      window.requestAnimationFrame(() => viewMenuTriggerRef.current?.focus());
+    } else if (!preserveOverlayFocus) {
+      focusEditorSoon();
+    }
   }
 
   function focusViewMenuItem(direction: ViewMenuFocusDirection) {
@@ -6572,6 +6609,13 @@ export function App() {
 
       if (linkDialogState) return;
 
+      if (areAppShortcutsBlocked({
+        commandPaletteOpen,
+        settingsOpen,
+        historyManagerOpen,
+        externalDiskReviewOpen: Boolean(externalDiskReview)
+      })) return;
+
       if (viewMenuOpen && event.key === "Escape") {
         event.preventDefault();
         setViewMenuOpen(false);
@@ -7617,6 +7661,8 @@ export function App() {
                 onScrollProgress={(progress) => rememberRichScrollProgress(activeTab.id, progress)}
                 selection={richSelectionsRef.current.get(activeTab.id) ?? activeTab.richSelection}
                 selectionText={sourceToRichSelectionTextRef.current.get(activeTab.id)}
+                searchMatches={findOpen ? findMatches : undefined}
+                activeSearchRange={findOpen && activeFindIndex >= 0 ? findMatches[activeFindIndex] : null}
               />
             </Suspense>
           ) : (
@@ -8069,7 +8115,7 @@ export function App() {
         onPrevious={() => goToFindMatch("previous")}
         onReplace={replaceCurrentFindMatch}
         onReplaceAll={replaceAllFindMatches}
-        onClose={() => setFindOpen(false)}
+        onClose={closeFindPanel}
       />
       <CommandPalette
         open={commandPaletteOpen}

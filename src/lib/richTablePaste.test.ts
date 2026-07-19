@@ -32,6 +32,10 @@ describe("rich table paste", () => {
       "2:0", "C", "D"
     ]);
     expect(transaction?.selection).toBeInstanceOf(CellSelection);
+    const selection = transaction?.selection as CellSelection;
+    const positions = tableCellPositions(transaction?.doc ?? state.doc);
+    expect(selection.$anchorCell.pos).toBe(positions[4]);
+    expect(selection.$headCell.pos).toBe(positions[8]);
   });
 
   it("keeps pasted cell line breaks as hard breaks", () => {

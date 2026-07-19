@@ -1,5 +1,5 @@
-import { EditorState, type Extension } from "@codemirror/state";
-import { historyField } from "@codemirror/commands";
+import { EditorSelection, EditorState, Transaction, type Extension } from "@codemirror/state";
+import { historyField, isolateHistory } from "@codemirror/commands";
 
 export type EditorStateSnapshot = {
   doc?: unknown;
@@ -50,6 +50,25 @@ export function createEditorStateFromSnapshot(
   }
 }
 
+export function createExternalDocumentSyncTransaction(state: EditorState, markdown: string): Transaction {
+  const selection = EditorSelection.create(
+    state.selection.ranges.map((range) => EditorSelection.range(
+      clampOffset(range.anchor, markdown.length),
+      clampOffset(range.head, markdown.length)
+    )),
+    state.selection.mainIndex
+  );
+
+  return state.update({
+    changes: { from: 0, to: state.doc.length, insert: markdown },
+    selection,
+    annotations: [
+      Transaction.addToHistory.of(false),
+      isolateHistory.of("full")
+    ]
+  });
+}
+
 function editorStateJson(snapshot: EditorStateSnapshot): EditorStateSnapshot {
   return {
     doc: snapshot.doc,
@@ -66,4 +85,8 @@ function normalizedScrollProgressProperty(value: unknown): Pick<EditorStateSnaps
 function normalizeScrollProgress(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
   return Math.min(1, Math.max(0, value));
+}
+
+function clampOffset(value: number, documentLength: number): number {
+  return Math.max(0, Math.min(value, documentLength));
 }

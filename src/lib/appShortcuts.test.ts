@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getTabNavigationShortcut, getTableSelectionShortcut } from "./appShortcuts";
+import { areAppShortcutsBlocked, getTabNavigationShortcut, getTableSelectionShortcut } from "./appShortcuts";
 
 type ShortcutEvent = Parameters<typeof getTableSelectionShortcut>[0];
 
@@ -55,5 +55,22 @@ describe("getTabNavigationShortcut", () => {
     expect(getTabNavigationShortcut(shortcutEvent("1", { altKey: false }))).toBeNull();
     expect(getTabNavigationShortcut(shortcutEvent("PageDown", { altKey: true }))).toBeNull();
     expect(getTabNavigationShortcut(shortcutEvent("0"))).toBeNull();
+  });
+});
+
+describe("areAppShortcutsBlocked", () => {
+  const clear = {
+    commandPaletteOpen: false,
+    settingsOpen: false,
+    historyManagerOpen: false,
+    externalDiskReviewOpen: false
+  };
+
+  it("allows shortcuts when no blocking overlay is open", () => {
+    expect(areAppShortcutsBlocked(clear)).toBe(false);
+  });
+
+  it.each(Object.keys(clear) as Array<keyof typeof clear>)("blocks shortcuts for %s", (key) => {
+    expect(areAppShortcutsBlocked({ ...clear, [key]: true })).toBe(true);
   });
 });

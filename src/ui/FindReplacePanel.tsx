@@ -48,11 +48,17 @@ export function FindReplacePanel({
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    if (!open) return;
-    window.setTimeout(() => {
+    if (!open) return undefined;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusTimer = window.setTimeout(() => {
       inputRef.current?.focus();
       inputRef.current?.select();
     }, 0);
+
+    return () => {
+      window.clearTimeout(focusTimer);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
   }, [open]);
 
   if (!open) return null;
