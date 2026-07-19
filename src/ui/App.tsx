@@ -1745,8 +1745,9 @@ export function App() {
       }
     } catch (error) {
       console.warn("Could not check for application updates", error);
-      setApplicationUpdate({ status: "error", message: messageFromError(error) });
-      if (interactive) showToast("Update check failed");
+      const message = messageFromError(error);
+      setApplicationUpdate({ status: "error", message });
+      if (interactive) showToast(t("Update check failed"));
     }
   }
 

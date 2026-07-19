@@ -30,7 +30,11 @@ enum WindowsInstallerKind {
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum UpdateCheckResult {
     Unsupported {
         current_version: String,
@@ -77,9 +81,16 @@ pub async fn check_for_updates(
         });
     }
 
+    let release = fetch_latest_release(repository, false).await?;
+    classify_update(current_version, &release)
+}
+
+fn classify_update(
+    current_version: &str,
+    release: &GitHubRelease,
+) -> Result<UpdateCheckResult, String> {
     let current = parse_stable_version(current_version, "current application version")?;
-    let release = fetch_latest_release(repository).await?;
-    let latest = release_version(&release)?;
+    let latest = release_version(release)?;
 
     if latest <= current {
         return Ok(UpdateCheckResult::UpToDate {
@@ -87,7 +98,6 @@ pub async fn check_for_updates(
         });
     }
 
-    validate_release_assets(repository, &release)?;
     let version = latest.to_string();
     Ok(UpdateCheckResult::Available {
         current_version: current_version.to_string(),
@@ -99,7 +109,7 @@ pub async fn check_for_updates(
             .trim()
             .to_string(),
         release_notes: truncate_text(release.body.as_deref().unwrap_or_default().trim(), 4_000),
-        published_at: release.published_at.unwrap_or_default(),
+        published_at: release.published_at.clone().unwrap_or_default(),
         version,
     })
 }
@@ -131,16 +141,14 @@ pub async fn download_and_install_update(
         return Err("The requested update is not newer than the installed version.".to_string());
     }
 
-    let release = fetch_latest_release(repository).await?;
+    let release = fetch_latest_release(repository, true).await?;
     let latest = release_version(&release)?;
     if latest != requested {
         return Err("The selected update is no longer the latest GitHub release. Check again before installing.".to_string());
     }
 
     let (installer_asset, checksum_asset) = validate_release_assets(repository, &release)?;
-    let client = update_client()?;
     let checksum_bytes = download_bytes(
-        &client,
         &checksum_asset.browser_download_url,
         MAX_CHECKSUM_BYTES,
         "release checksums",
@@ -166,7 +174,6 @@ pub async fn download_and_install_update(
         .map_err(|error| format!("Could not prepare the update download folder: {error}"))?;
 
     let installer_path = download_installer(
-        &client,
         installer_asset,
         &expected_checksum,
         &update_directory,
@@ -213,17 +220,45 @@ fn parse_stable_version(value: &str, label: &str) -> Result<Version, String> {
     Ok(version)
 }
 
-async fn fetch_latest_release(repository: &str) -> Result<GitHubRelease, String> {
+async fn fetch_latest_release(
+    repository: &str,
+    resolve_fallback_assets: bool,
+) -> Result<GitHubRelease, String> {
+    match fetch_latest_release_metadata(repository).await {
+        Ok(release) => Ok(release),
+        Err(api_error) => {
+            let mut release = fetch_latest_release_from_web(repository)
+                .await
+                .map_err(|web_error| {
+                    format!(
+                        "Could not determine the latest GitHub release. API attempt: {api_error} Release page attempt: {web_error}"
+                    )
+                })?;
+            if resolve_fallback_assets {
+                release.assets = fetch_release_assets_from_checksum(repository, &release.tag_name)
+                    .await
+                    .map_err(|asset_error| {
+                        format!(
+                            "GitHub release metadata was unavailable through the API and its assets could not be resolved from SHA256SUMS: {asset_error}"
+                        )
+                    })?;
+            }
+            Ok(release)
+        }
+    }
+}
+
+async fn fetch_latest_release_metadata(repository: &str) -> Result<GitHubRelease, String> {
     validate_repository(repository)?;
-    let client = update_client()?;
     let url = format!("https://api.github.com/repos/{repository}/releases/latest");
-    let response = client
-        .get(url)
-        .header(ACCEPT, HeaderValue::from_static(GITHUB_API_ACCEPT))
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await
-        .map_err(|error| format!("Could not contact GitHub Releases: {error}"))?;
+    let response = successful_get(
+        &url,
+        GITHUB_API_ACCEPT,
+        "fetch GitHub release metadata",
+        true,
+        Duration::from_secs(12),
+    )
+    .await?;
     let bytes = response_bytes(
         response,
         MAX_RELEASE_METADATA_BYTES,
@@ -240,13 +275,134 @@ async fn fetch_latest_release(repository: &str) -> Result<GitHubRelease, String>
     Ok(release)
 }
 
-fn update_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+async fn fetch_release_assets_from_checksum(
+    repository: &str,
+    tag_name: &str,
+) -> Result<Vec<GitHubReleaseAsset>, String> {
+    let checksum_url =
+        format!("https://github.com/{repository}/releases/download/{tag_name}/SHA256SUMS");
+    let checksum_bytes =
+        download_bytes(&checksum_url, MAX_CHECKSUM_BYTES, "release checksums").await?;
+    let checksum_text = std::str::from_utf8(&checksum_bytes)
+        .map_err(|_| "The GitHub release checksum file is not valid UTF-8.".to_string())?;
+    let mut assets = checksum_file_names(checksum_text)
+        .into_iter()
+        .map(|name| GitHubReleaseAsset {
+            browser_download_url: format!(
+                "https://github.com/{repository}/releases/download/{tag_name}/{name}"
+            ),
+            name,
+            size: 0,
+        })
+        .collect::<Vec<_>>();
+    if assets.is_empty() {
+        return Err("The GitHub release checksum file contains no valid assets.".to_string());
+    }
+    assets.push(GitHubReleaseAsset {
+        name: "SHA256SUMS".to_string(),
+        browser_download_url: checksum_url,
+        size: checksum_bytes.len() as u64,
+    });
+    Ok(assets)
+}
+
+async fn fetch_latest_release_from_web(repository: &str) -> Result<GitHubRelease, String> {
+    validate_repository(repository)?;
+    let url = format!("https://github.com/{repository}/releases/latest");
+    let response = successful_get(
+        &url,
+        "text/html",
+        "follow the GitHub latest-release page",
+        false,
+        Duration::from_secs(12),
+    )
+    .await?;
+    release_from_web_url(repository, response.url().as_str())
+}
+
+fn release_from_web_url(repository: &str, url: &str) -> Result<GitHubRelease, String> {
+    let url = reqwest::Url::parse(url)
+        .map_err(|error| format!("GitHub returned an invalid release page URL: {error}"))?;
+    if url.scheme() != "https" || url.host_str() != Some("github.com") {
+        return Err("GitHub redirected the release page to an untrusted address.".to_string());
+    }
+
+    let repository_parts = repository.split('/').collect::<Vec<_>>();
+    let path_parts = url
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+    if repository_parts.len() != 2
+        || path_parts.len() != 5
+        || !path_parts[0].eq_ignore_ascii_case(repository_parts[0])
+        || !path_parts[1].eq_ignore_ascii_case(repository_parts[1])
+        || path_parts[2] != "releases"
+        || path_parts[3] != "tag"
+    {
+        return Err("GitHub returned an unexpected latest-release page.".to_string());
+    }
+
+    let tag_name = path_parts[4].to_string();
+    let release = GitHubRelease {
+        name: Some(tag_name.clone()),
+        tag_name,
+        body: None,
+        published_at: None,
+        draft: false,
+        prerelease: false,
+        assets: Vec::new(),
+    };
+    release_version(&release)?;
+    Ok(release)
+}
+
+fn update_client(use_system_proxy: bool, timeout: Duration) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
         .user_agent("NyaMarkdownor-Updater")
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(10 * 60))
+        .connect_timeout(timeout.min(Duration::from_secs(15)))
+        .timeout(timeout);
+    if !use_system_proxy {
+        builder = builder.no_proxy();
+    }
+    builder
         .build()
         .map_err(|error| format!("Could not initialize the update client: {error}"))
+}
+
+async fn successful_get(
+    url: &str,
+    accept: &'static str,
+    label: &str,
+    github_api: bool,
+    timeout: Duration,
+) -> Result<reqwest::Response, String> {
+    let mut failures = Vec::new();
+    for (use_system_proxy, connection_label) in
+        [(true, "system proxy"), (false, "direct connection")]
+    {
+        let client = match update_client(use_system_proxy, timeout) {
+            Ok(client) => client,
+            Err(error) => {
+                failures.push(format!("{connection_label}: {error}"));
+                continue;
+            }
+        };
+        let mut request = client
+            .get(url)
+            .header(ACCEPT, HeaderValue::from_static(accept));
+        if github_api {
+            request = request.header("X-GitHub-Api-Version", "2022-11-28");
+        }
+        match request.send().await {
+            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) => failures.push(format!(
+                "{connection_label}: GitHub returned HTTP {}",
+                response.status()
+            )),
+            Err(error) => failures.push(format!("{connection_label}: {error}")),
+        }
+    }
+    Err(format!("Could not {label}; {}.", failures.join("; ")))
 }
 
 async fn response_bytes(
@@ -282,18 +438,15 @@ async fn response_bytes(
     Ok(bytes)
 }
 
-async fn download_bytes(
-    client: &reqwest::Client,
-    url: &str,
-    maximum_bytes: u64,
-    label: &str,
-) -> Result<Vec<u8>, String> {
-    let response = client
-        .get(url)
-        .header(ACCEPT, HeaderValue::from_static("application/octet-stream"))
-        .send()
-        .await
-        .map_err(|error| format!("Could not download {label}: {error}"))?;
+async fn download_bytes(url: &str, maximum_bytes: u64, label: &str) -> Result<Vec<u8>, String> {
+    let response = successful_get(
+        url,
+        "application/octet-stream",
+        &format!("download {label}"),
+        false,
+        Duration::from_secs(10 * 60),
+    )
+    .await?;
     response_bytes(response, maximum_bytes, label).await
 }
 
@@ -334,7 +487,7 @@ fn validate_release_asset(
     if !is_plain_file_name(&asset.name) {
         return Err("The GitHub release contains an invalid asset name.".to_string());
     }
-    if asset.size == 0 || asset.size > maximum_bytes {
+    if asset.size > maximum_bytes {
         return Err(format!(
             "The GitHub release asset {} has an invalid size.",
             asset.name
@@ -410,8 +563,25 @@ fn checksum_for_file(checksums: &str, file_name: &str) -> Option<String> {
     })
 }
 
+fn checksum_file_names(checksums: &str) -> Vec<String> {
+    checksums
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end_matches('\r');
+            let separator = line.get(64..66)?;
+            if line.len() < 66
+                || !line[..64].bytes().all(|byte| byte.is_ascii_hexdigit())
+                || (separator != "  " && separator != " *")
+            {
+                return None;
+            }
+            let name = &line[66..];
+            is_plain_file_name(name).then(|| name.to_string())
+        })
+        .collect()
+}
+
 async fn download_installer(
-    client: &reqwest::Client,
     asset: &GitHubReleaseAsset,
     expected_checksum: &str,
     directory: &Path,
@@ -430,12 +600,14 @@ async fn download_installer(
         .map_err(|error| format!("Could not create the update installer file: {error}"))?;
 
     let result = async {
-        let mut response = client
-            .get(&asset.browser_download_url)
-            .header(ACCEPT, HeaderValue::from_static("application/octet-stream"))
-            .send()
-            .await
-            .map_err(|error| format!("Could not download the update installer: {error}"))?;
+        let mut response = successful_get(
+            &asset.browser_download_url,
+            "application/octet-stream",
+            "download the update installer",
+            false,
+            Duration::from_secs(10 * 60),
+        )
+        .await?;
         let status = response.status();
         if !status.is_success() {
             return Err(format!(
@@ -466,7 +638,7 @@ async fn download_installer(
         }
         file.flush()
             .map_err(|error| format!("Could not finish writing the update installer: {error}"))?;
-        if total_bytes == 0 || total_bytes != asset.size {
+        if total_bytes == 0 || (asset.size != 0 && total_bytes != asset.size) {
             return Err(
                 "The downloaded installer size does not match the GitHub release metadata."
                     .to_string(),
@@ -674,8 +846,10 @@ fn normalize_windows_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        checksum_for_file, release_version, select_windows_installer, truncate_text,
-        validate_repository, GitHubRelease, GitHubReleaseAsset, WindowsInstallerKind,
+        checksum_file_names, checksum_for_file, classify_update, release_from_web_url,
+        release_version, select_windows_installer, truncate_text, validate_repository,
+        GitHubRelease, GitHubReleaseAsset, UpdateCheckResult, UpdateSupportReason,
+        WindowsInstallerKind,
     };
 
     fn asset(name: &str) -> GitHubReleaseAsset {
@@ -703,6 +877,94 @@ mod tests {
     }
 
     #[test]
+    fn version_checks_do_not_depend_on_installer_metadata() {
+        let release = GitHubRelease {
+            tag_name: "v2.0.0".to_string(),
+            name: Some("NyaMarkdownor v2.0.0".to_string()),
+            body: Some("Release notes".to_string()),
+            published_at: Some("2026-07-19T00:00:00Z".to_string()),
+            draft: false,
+            prerelease: false,
+            assets: Vec::new(),
+        };
+
+        assert!(matches!(
+            classify_update("1.0.5", &release).unwrap(),
+            UpdateCheckResult::Available { version, .. } if version == "2.0.0"
+        ));
+    }
+
+    #[test]
+    fn serializes_every_update_result_field_as_camel_case() {
+        assert_eq!(
+            serde_json::to_value(UpdateCheckResult::Unsupported {
+                current_version: "1.0.5".to_string(),
+                reason: UpdateSupportReason::NotInstalled,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "status": "unsupported",
+                "currentVersion": "1.0.5",
+                "reason": "notInstalled",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateCheckResult::UpToDate {
+                current_version: "1.0.5".to_string(),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "status": "upToDate",
+                "currentVersion": "1.0.5",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateCheckResult::Available {
+                current_version: "1.0.5".to_string(),
+                version: "1.0.6".to_string(),
+                release_name: "NyaMarkdownor v1.0.6".to_string(),
+                release_notes: "Fixes".to_string(),
+                published_at: "2026-07-19T00:00:00Z".to_string(),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "status": "available",
+                "currentVersion": "1.0.5",
+                "version": "1.0.6",
+                "releaseName": "NyaMarkdownor v1.0.6",
+                "releaseNotes": "Fixes",
+                "publishedAt": "2026-07-19T00:00:00Z",
+            })
+        );
+    }
+
+    #[test]
+    fn parses_the_trusted_latest_release_redirect() {
+        let release = release_from_web_url(
+            "stevennight/NyaMarkdownor",
+            "https://github.com/stevennight/NyaMarkdownor/releases/tag/v2.3.4",
+        )
+        .unwrap();
+        assert_eq!(release.tag_name, "v2.3.4");
+
+        assert!(release_from_web_url(
+            "stevennight/NyaMarkdownor",
+            "https://example.com/stevennight/NyaMarkdownor/releases/tag/v2.3.4",
+        )
+        .is_err());
+        assert!(release_from_web_url(
+            "stevennight/NyaMarkdownor",
+            "https://github.com/other/project/releases/tag/v2.3.4",
+        )
+        .is_err());
+        assert!(release_from_web_url(
+            "stevennight/NyaMarkdownor",
+            "https://github.com/stevennight/NyaMarkdownor/releases/tag/latest",
+        )
+        .is_err());
+    }
+
+    #[test]
     fn rejects_untrusted_repository_shapes() {
         assert!(validate_repository("stevennight/NyaMarkdownor").is_ok());
         assert!(validate_repository("https://github.com/stevennight/NyaMarkdownor").is_err());
@@ -719,6 +981,14 @@ mod tests {
             Some(hash.to_string())
         );
         assert_eq!(checksum_for_file(&checksums, "missing.exe"), None);
+        assert_eq!(
+            checksum_file_names(&checksums),
+            vec![
+                "NyaMarkdownor_2.0.0_x64-setup.exe".to_string(),
+                "other.msi".to_string()
+            ]
+        );
+        assert!(checksum_file_names(&format!("{hash}  ../unsafe.exe\ninvalid")).is_empty());
     }
 
     #[test]

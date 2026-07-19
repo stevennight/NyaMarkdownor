@@ -474,7 +474,12 @@ export function SettingsDialog({
                   <div className="settings-row">
                     <span>{t("Updates")}</span>
                     <div className="settings-update-control">
-                      <output className="settings-build-value">{applicationUpdateLabel(applicationUpdate, t)}</output>
+                      <div className="settings-update-status">
+                        <output className="settings-build-value">{applicationUpdateLabel(applicationUpdate, t)}</output>
+                        {applicationUpdate.status === "error" && (
+                          <output className="settings-update-error">{applicationUpdate.message}</output>
+                        )}
+                      </div>
                       {applicationUpdate.status === "available" ? (
                         <button
                           className="settings-action"

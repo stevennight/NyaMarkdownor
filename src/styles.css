@@ -3301,8 +3301,22 @@ kbd {
   min-width: 0;
 }
 
-.settings-update-control .settings-build-value {
+.settings-update-status {
   flex: 1 1 180px;
+  min-width: 0;
+}
+
+.settings-update-status .settings-build-value {
+  display: block;
+}
+
+.settings-update-error {
+  display: block;
+  margin-top: 4px;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .settings-actions {
