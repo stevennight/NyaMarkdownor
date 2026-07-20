@@ -2541,7 +2541,7 @@ body.pane-resizing * {
   position: fixed;
   right: 18px;
   bottom: 44px;
-  z-index: 20;
+  z-index: 60;
   max-width: min(420px, calc(100vw - 36px));
   transform: translateY(12px);
   border: 1px solid var(--line);
