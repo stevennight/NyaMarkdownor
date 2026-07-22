@@ -1,6 +1,7 @@
 import type { MarkdownDocument, MarkdownFileStats } from "../types";
 import { queueDesktopStoreTextWrite, readDesktopStoreText } from "./desktopStore";
 import { isMarkdownLineEnding, normalizeMarkdownText } from "./lineEndings";
+import { simplifyLocalPath } from "./localPathKeys";
 
 const DRAFT_DOCUMENT_STORAGE_KEY = "nya-markdownor-draft-v2";
 
@@ -110,11 +111,11 @@ export function normalizeDraftDocument(value: unknown, migrateLegacyTableCellBre
 
   return {
     fileName: typeof document.fileName === "string" && document.fileName ? document.fileName : "Untitled.md",
-    filePath: typeof document.filePath === "string" && document.filePath ? document.filePath : null,
+    filePath: typeof document.filePath === "string" && document.filePath ? simplifyLocalPath(document.filePath) : null,
     markdown: normalized.markdown,
     lastSavedMarkdown,
     lineEnding: isMarkdownLineEnding(document.lineEnding) ? document.lineEnding : normalized.lineEnding,
-    lastBackupPath: typeof document.lastBackupPath === "string" ? document.lastBackupPath : null,
+    lastBackupPath: typeof document.lastBackupPath === "string" ? simplifyLocalPath(document.lastBackupPath) : null,
     fileStats: normalizeStoredFileStats(document.fileStats)
   };
 }

@@ -1020,7 +1020,7 @@ fn validate_workspace_root(path: String) -> Result<PathBuf, String> {
         return Err("Workspace must be a folder.".to_string());
     }
 
-    path.canonicalize()
+    dunce::canonicalize(path)
         .map_err(|error| format!("Failed to inspect workspace folder: {error}"))
 }
 
@@ -1088,7 +1088,7 @@ where
             continue;
         }
 
-        let path = candidate.canonicalize().unwrap_or(candidate);
+        let path = dunce::canonicalize(&candidate).unwrap_or(candidate);
         let path_string = path.to_string_lossy().to_string();
         if seen.insert(local_path_key(&path_string)) {
             paths.push(path_string);
@@ -3733,7 +3733,7 @@ mod tests {
         configured_backup_root, create_central_backup, create_new_file, decode_text_bytes,
         enforce_global_backup_limits, file_association_command, file_stats_for,
         legacy_backup_dir_for_source, list_backup_histories_for_sources_in_roots,
-        list_backups_for_source, markdown_file_paths_from_args,
+        list_backups_for_source, list_markdown_workspace, markdown_file_paths_from_args,
         parse_central_backup_name_for_platform, reveal_command_for_platform, save_dialog_defaults,
         scan_all_central_backups, scan_central_backup_dir, seal_latest_rolling_backup,
         secondary_instance_markdown_paths, source_backup_key, source_stats_before_backup,
@@ -3893,12 +3893,14 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                markdown
-                    .canonicalize()
+                dunce::canonicalize(markdown)
                     .unwrap()
                     .to_string_lossy()
                     .to_string(),
-                text.canonicalize().unwrap().to_string_lossy().to_string(),
+                dunce::canonicalize(text)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
             ]
         );
 
@@ -3918,8 +3920,7 @@ mod tests {
 
         assert_eq!(
             paths,
-            vec![markdown
-                .canonicalize()
+            vec![dunce::canonicalize(markdown)
                 .unwrap()
                 .to_string_lossy()
                 .to_string()]
@@ -3944,12 +3945,72 @@ mod tests {
 
         assert_eq!(
             paths,
-            vec![markdown
-                .canonicalize()
+            vec![dunce::canonicalize(markdown)
                 .unwrap()
                 .to_string_lossy()
                 .to_string()]
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn launch_paths_do_not_expose_safe_windows_verbatim_prefixes() {
+        let root = temporary_test_dir("launch-windows-verbatim-path");
+        let markdown = root.join("Draft.md");
+        std::fs::write(&markdown, "# Draft").unwrap();
+        let verbatim = markdown.canonicalize().unwrap();
+
+        assert!(verbatim.to_string_lossy().starts_with(r"\\?\"));
+
+        let paths = markdown_file_paths_from_args(vec![verbatim.into_os_string()]);
+
+        assert_eq!(
+            paths,
+            vec![dunce::canonicalize(markdown)
+                .unwrap()
+                .to_string_lossy()
+                .to_string()]
+        );
+        assert!(!paths[0].starts_with(r"\\?\"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn secondary_instance_paths_deduplicate_regular_and_verbatim_windows_paths() {
+        let root = temporary_test_dir("secondary-instance-windows-deduplicate");
+        let markdown = root.join("Draft.md");
+        std::fs::write(&markdown, "# Draft").unwrap();
+        let verbatim = markdown.canonicalize().unwrap();
+
+        let paths = secondary_instance_markdown_paths(vec![
+            "nya-markdownor".to_string(),
+            markdown.to_string_lossy().to_string(),
+            verbatim.to_string_lossy().to_string(),
+        ]);
+
+        assert_eq!(paths.len(), 1);
+        assert!(!paths[0].starts_with(r"\\?\"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_listing_does_not_expose_safe_windows_verbatim_prefixes() {
+        let root = temporary_test_dir("workspace-windows-verbatim-path");
+        let markdown = root.join("Draft.md");
+        std::fs::write(&markdown, "# Draft").unwrap();
+        let verbatim_root = root.canonicalize().unwrap();
+
+        let listing = list_markdown_workspace(verbatim_root.to_string_lossy().to_string()).unwrap();
+
+        assert!(!listing.root_path.starts_with(r"\\?\"));
+        assert_eq!(listing.files.len(), 1);
+        assert!(!listing.files[0].path.starts_with(r"\\?\"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

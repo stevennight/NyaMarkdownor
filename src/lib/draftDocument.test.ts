@@ -105,6 +105,21 @@ describe("draft document storage", () => {
     });
   });
 
+  it("migrates safe Windows verbatim paths in recovered drafts", () => {
+    const record = parseDraftDocumentRecord(JSON.stringify({
+      fileName: "Recovered.md",
+      filePath: "\\\\?\\D:\\notes\\Recovered.md",
+      markdown: "# Recovered",
+      lastSavedMarkdown: "# Recovered",
+      lastBackupPath: "\\\\?\\D:\\backups\\Recovered.md.bak"
+    }));
+
+    expect(record?.document).toMatchObject({
+      filePath: "D:\\notes\\Recovered.md",
+      lastBackupPath: "D:\\backups\\Recovered.md.bak"
+    });
+  });
+
   it("migrates legacy table cell separators in recovered Markdown", () => {
     const markdown = [
       "| Name | Note |",

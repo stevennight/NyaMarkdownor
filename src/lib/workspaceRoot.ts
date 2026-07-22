@@ -1,4 +1,5 @@
 import { queueDesktopStoreTextWrite, readDesktopStoreText } from "./desktopStore";
+import { simplifyLocalPath } from "./localPathKeys";
 
 const WORKSPACE_ROOT_KEY = "nya-markdownor-workspace-root-v1";
 
@@ -46,7 +47,7 @@ export function createWorkspaceRootRecord(rootPath: string | null, savedAt = Dat
   return {
     version: 1,
     savedAt,
-    rootPath: typeof rootPath === "string" && rootPath ? rootPath : null
+    rootPath: typeof rootPath === "string" && rootPath ? simplifyLocalPath(rootPath) : null
   };
 }
 

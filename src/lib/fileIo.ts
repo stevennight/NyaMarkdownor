@@ -1,6 +1,6 @@
 import { invoke, isTauri as tauriRuntimeAvailable } from "@tauri-apps/api/core";
 import type { BackupPreferences, MarkdownFileStats, MarkdownLineEnding, WorkspaceListing } from "../types";
-import { localPathKey } from "./localPathKeys";
+import { localPathKey, simplifyLocalPath } from "./localPathKeys";
 import { markdownWithLineEnding, normalizeMarkdownLineEndings, normalizeMarkdownText } from "./lineEndings";
 import { sortWorkspaceFiles, workspaceFileDepth } from "./workspaceFiles";
 import { isExtensionOnlyMarkdownName, isSupportedMarkdownFileName, markdownFileInputAccept } from "./markdownFileTypes";
@@ -169,14 +169,15 @@ export async function readMarkdownPath(path: string): Promise<OpenedFile> {
     throw new Error("Recent files are only available in the desktop app.");
   }
 
+  const localPath = simplifyLocalPath(path);
   const [markdown, fileStats] = await Promise.all([
-    invoke<string>("read_markdown_file", { path }),
-    readMarkdownFileStats(path)
+    invoke<string>("read_markdown_file", { path: localPath }),
+    readMarkdownFileStats(localPath)
   ]);
   const normalized = normalizeMarkdownText(markdown);
   return {
-    path,
-    name: fileNameFromPath(path),
+    path: localPath,
+    name: fileNameFromPath(localPath),
     ...normalized,
     fileStats
   };

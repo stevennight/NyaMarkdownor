@@ -182,6 +182,21 @@ describe("document tab session storage", () => {
     });
   });
 
+  it("migrates safe Windows verbatim paths in restored tab sessions", () => {
+    const record = parseDocumentTabsRecord(JSON.stringify({
+      version: 1,
+      tableCellBreakFormat: "html",
+      savedAt: 321,
+      activeTabId: "tab-a",
+      tabs: [{
+        ...firstTab,
+        document: { ...firstTab.document, filePath: "\\\\?\\D:\\notes\\Notes.md" }
+      }]
+    }));
+
+    expect(record?.tabs[0].document.filePath).toBe("D:\\notes\\Notes.md");
+  });
+
   it("deduplicates restored tab ids so malformed sessions stay renderable", () => {
     const record = parseDocumentTabsRecord(JSON.stringify({
       version: 1,

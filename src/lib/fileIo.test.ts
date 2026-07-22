@@ -183,6 +183,22 @@ describe("file IO path helpers", () => {
     });
   });
 
+  it("simplifies safe Windows verbatim paths before opening and binding files", async () => {
+    vi.stubGlobal("isTauri", true);
+    invokeMock.mockImplementation(async (command, args) => {
+      expect(args).toEqual({ path: "C:\\Users\\Steve\\Desktop\\Draft.md" });
+      if (command === "read_markdown_file") return "# Draft";
+      if (command === "stat_markdown_file") return { modifiedMs: 10, size: 7 };
+      throw new Error(`Unexpected command ${command}`);
+    });
+
+    await expect(readMarkdownPath("\\\\?\\C:\\Users\\Steve\\Desktop\\Draft.md")).resolves.toMatchObject({
+      path: "C:\\Users\\Steve\\Desktop\\Draft.md",
+      name: "Draft.md",
+      markdown: "# Draft"
+    });
+  });
+
   it("creates desktop new files with a real path binding", async () => {
     vi.stubGlobal("isTauri", true);
     invokeMock.mockImplementation(async (command, args) => {

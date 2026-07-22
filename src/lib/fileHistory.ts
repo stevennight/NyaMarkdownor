@@ -1,6 +1,6 @@
 import type { DraftSnapshot } from "./draftSnapshots";
 import type { MarkdownBackup, MarkdownBackupHistory } from "./fileIo";
-import { localPathKey } from "./localPathKeys";
+import { localPathKey, simplifyLocalPath } from "./localPathKeys";
 
 export type FileHistorySourceState = "available" | "missing" | "draft" | "unknown";
 
@@ -52,7 +52,9 @@ export function buildFileHistoryDocuments(
   const documents = new Map<string, FileHistoryDocument>();
 
   for (const history of backupHistories) {
-    const key = fileHistoryDocumentKey({ fileName: history.fileName, filePath: history.sourcePath });
+    const sourcePath = simplifyLocalPath(history.sourcePath);
+    const diskHistory = sourcePath === history.sourcePath ? history : { ...history, sourcePath };
+    const key = fileHistoryDocumentKey({ fileName: history.fileName, filePath: sourcePath });
     const existing = documents.get(key);
 
     if (existing) {
@@ -60,9 +62,9 @@ export function buildFileHistoryDocuments(
       existing.totalSize += history.totalSize;
       existing.latestMs = Math.max(existing.latestMs, history.latestMs);
       if (history.latestMs > (existing.diskHistory?.latestMs ?? Number.NEGATIVE_INFINITY)) {
-        existing.diskHistory = history;
+        existing.diskHistory = diskHistory;
         existing.fileName = history.fileName;
-        existing.filePath = history.sourcePath;
+        existing.filePath = sourcePath;
       }
       if (history.sourceExists) existing.sourceState = "available";
       continue;
@@ -71,9 +73,9 @@ export function buildFileHistoryDocuments(
     documents.set(key, {
       key,
       fileName: history.fileName,
-      filePath: history.sourcePath,
+      filePath: sourcePath,
       sourceState: history.sourceExists ? "available" : "missing",
-      diskHistory: history,
+      diskHistory,
       snapshots: [],
       versionCount: history.backupCount,
       totalSize: history.totalSize,

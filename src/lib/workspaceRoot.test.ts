@@ -70,6 +70,18 @@ describe("workspace root storage", () => {
     expect(parseWorkspaceRootRecord(JSON.stringify(record))).toEqual(record);
   });
 
+  it("migrates safe Windows verbatim workspace roots", () => {
+    expect(parseWorkspaceRootRecord(JSON.stringify({
+      version: 1,
+      savedAt: 123,
+      rootPath: "\\\\?\\D:\\notes"
+    }))).toEqual({
+      version: 1,
+      savedAt: 123,
+      rootPath: "D:\\notes"
+    });
+  });
+
   it("does not throw when workspace-root persistence is unavailable", () => {
     vi.stubGlobal("localStorage", createStorageMock({ setThrows: true }));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

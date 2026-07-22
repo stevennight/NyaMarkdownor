@@ -140,6 +140,17 @@ describe("recent files", () => {
     });
   });
 
+  it("migrates and deduplicates safe Windows verbatim recent paths", () => {
+    const files: RecentFile[] = [
+      { path: "\\\\?\\D:\\notes\\A.md", name: "A.md", updatedAt: 2 },
+      { path: "D:\\notes\\A.md", name: "A duplicate.md", updatedAt: 1 }
+    ];
+
+    expect(parseRecentFilesRecord(JSON.stringify(files))?.files).toEqual([
+      { path: "D:\\notes\\A.md", name: "A.md", updatedAt: 2 }
+    ]);
+  });
+
   it("keeps the in-memory recent list when persistence fails", () => {
     vi.stubGlobal("localStorage", createStorageMock({ setThrows: true }));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

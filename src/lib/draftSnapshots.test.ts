@@ -459,6 +459,16 @@ describe("draft snapshots", () => {
     expect(parseDraftSnapshotsRecord(JSON.stringify(record))).toEqual(record);
   });
 
+  it("migrates safe Windows verbatim paths in recovered snapshots", () => {
+    const snapshot = {
+      ...createDraftSnapshot(baseDocument, 100, "close"),
+      filePath: "\\\\?\\D:\\notes\\Notes.md"
+    };
+
+    expect(parseDraftSnapshotsRecord(JSON.stringify([snapshot]))?.snapshots[0].filePath)
+      .toBe("D:\\notes\\Notes.md");
+  });
+
   it("loads legacy snapshot arrays as migration records", () => {
     const storage = createStorageMock();
     vi.stubGlobal("localStorage", storage);

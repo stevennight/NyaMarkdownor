@@ -1,6 +1,6 @@
 import type { RecentFile } from "../types";
 import { queueDesktopStoreTextWrite, readDesktopStoreText } from "./desktopStore";
-import { localPathKey } from "./localPathKeys";
+import { localPathKey, simplifyLocalPath } from "./localPathKeys";
 
 const RECENT_FILES_KEY = "nya-markdownor-recent-files-v1";
 const MAX_RECENT_FILES = 8;
@@ -43,9 +43,10 @@ export function rememberRecentFiles(current: RecentFile[], files: Iterable<Recen
   let next = current;
 
   for (const file of opened) {
-    const key = localPathKey(file.path);
+    const path = simplifyLocalPath(file.path);
+    const key = localPathKey(path);
     next = [
-      { path: file.path, name: file.name, updatedAt },
+      { path, name: file.name, updatedAt },
       ...next.filter((item) => localPathKey(item.path) !== key)
     ].slice(0, MAX_RECENT_FILES);
   }
@@ -135,10 +136,11 @@ function normalizeRecentFiles(value: unknown[]): RecentFile[] {
     )) continue;
 
     const file = item as RecentFile;
-    const key = localPathKey(file.path);
+    const path = simplifyLocalPath(file.path);
+    const key = localPathKey(path);
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    files.push(file);
+    files.push({ ...file, path });
     if (files.length >= MAX_RECENT_FILES) break;
   }
 

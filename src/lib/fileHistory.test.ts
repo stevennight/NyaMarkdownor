@@ -74,6 +74,18 @@ describe("file history documents", () => {
     expect(documents[0].versionCount).toBe(3);
   });
 
+  it("migrates safe Windows verbatim paths from disk history metadata", () => {
+    const documents = buildFileHistoryDocuments([
+      history({ sourcePath: "\\\\?\\D:\\Notes\\Draft.md", fileName: "Draft.md" })
+    ], []);
+
+    expect(documents[0]).toMatchObject({
+      key: "path:d:/notes/draft.md",
+      filePath: "D:\\Notes\\Draft.md",
+      diskHistory: { sourcePath: "D:\\Notes\\Draft.md" }
+    });
+  });
+
   it("keeps same-named documents at different paths separate", () => {
     const documents = buildFileHistoryDocuments([], [
       snapshot({ id: "a", filePath: "D:/One/Notes.md" }),

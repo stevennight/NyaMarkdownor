@@ -1,7 +1,7 @@
 import type { BackupPreferences, MarkdownDocument, MarkdownFileStats, MarkdownLineEnding } from "../types";
 import { queueDesktopStoreTextWrite, readDesktopStoreText } from "./desktopStore";
 import { isMarkdownLineEnding, normalizeMarkdownText } from "./lineEndings";
-import { localPathKey } from "./localPathKeys";
+import { localPathKey, simplifyLocalPath } from "./localPathKeys";
 import { defaultBackupPreferences } from "./preferences";
 
 const SNAPSHOT_STORAGE_KEY = "nya-markdownor-draft-snapshots-v1";
@@ -439,7 +439,7 @@ function normalizeDraftSnapshot(value: unknown, migrateLegacyTableCellBreaks = f
     id: snapshot.id,
     documentId,
     fileName: snapshot.fileName,
-    filePath: snapshot.filePath,
+    filePath: snapshot.filePath ? simplifyLocalPath(snapshot.filePath) : null,
     markdown: normalized.markdown,
     lastSavedMarkdown: normalizeMarkdownText(snapshot.lastSavedMarkdown, { migrateLegacyTableCellBreaks }).markdown,
     lineEnding: isMarkdownLineEnding(snapshot.lineEnding) ? snapshot.lineEnding : normalized.lineEnding,
