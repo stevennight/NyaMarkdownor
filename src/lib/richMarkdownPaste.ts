@@ -20,7 +20,7 @@ export function richMarkdownSourceFromClipboard(
   if (!text.trim() || text.length > MAX_PLAIN_MARKDOWN_PASTE_LENGTH) return null;
 
   const parsed = parseMarkdownSafely(normalizeMarkdownLineEndings(text), parseMarkdown);
-  return parsed && containsExplicitMarkdownResource(parsed)
+  return parsed && containsExplicitMarkdownStructure(parsed)
     ? normalizeMarkdownLineEndings(text)
     : null;
 }
@@ -36,8 +36,9 @@ function parseMarkdownSafely(
   }
 }
 
-function containsExplicitMarkdownResource(node: JSONContent): boolean {
-  if (node.type === "markdownAutolink"
+function containsExplicitMarkdownStructure(node: JSONContent): boolean {
+  if (node.type === "table"
+    || node.type === "markdownAutolink"
     || node.type === "protectedReferenceLink"
     || node.type === "markdownReferenceDefinition") {
     return true;
@@ -53,5 +54,5 @@ function containsExplicitMarkdownResource(node: JSONContent): boolean {
     return true;
   }
 
-  return node.content?.some(containsExplicitMarkdownResource) ?? false;
+  return node.content?.some(containsExplicitMarkdownStructure) ?? false;
 }

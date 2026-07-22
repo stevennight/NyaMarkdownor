@@ -10,6 +10,7 @@ import { normalizeTextRanges } from "./textRanges";
 import { clampSelectionRangesToTableBlock, tableBlockForSelectionRanges } from "./tableSelectionRanges";
 import { splitMarkdownFrontMatter } from "./markdownFrontMatter";
 import { highlightCodeHtml } from "./codeHighlight";
+import { projectMalformedMarkdownTables } from "./markdownTableProjection";
 
 const markdownIt = new MarkdownIt({
   html: false,
@@ -162,7 +163,7 @@ export function markdownToHtmlFragment(markdown: string): string {
 }
 
 function renderMarkdownFragment(markdown: string, sourceLineOffset: number): string {
-  return markdownIt.render(markdown, {
+  return markdownIt.render(projectMalformedMarkdownTables(markdown), {
     headingIds: new Map<string, number>(),
     sourceLineOffset
   });

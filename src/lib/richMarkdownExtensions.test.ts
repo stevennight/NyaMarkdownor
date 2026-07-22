@@ -29,6 +29,71 @@ describe("rich Markdown extensions", () => {
     }
   });
 
+  it("renders malformed API tables visually while preserving their exact source", () => {
+    const source = [
+      "Before",
+      "",
+      "| 参数名称 | 参数说明 | 请求类型 | 是否必须 | 数据类型 | schema |",
+      "| --- | --- | --- | --- | --- | --- |",
+      "| first | ordinary | body | false | string | |",
+      "            | haveInterview | 是否安排面试（true | false） | body | false | boolean | |",
+      "            | second | continued | body | false | string | |",
+      "",
+      "After"
+    ].join("\n");
+    const parsed = markdown.parse(source);
+    const table = protectedNodes(parsed, "table")[0];
+
+    expect(table).toBeDefined();
+    expect(table.content).toHaveLength(4);
+    expect(table.content?.[2].content?.[1].content?.[0].content?.[0].text)
+      .toBe("是否安排面试（true | false）");
+    replaceFirstText(parsed, "Before", "Updated");
+    expect(markdown.serialize(parsed)).toBe(source.replace("Before", "Updated"));
+
+    table.content![1].content![1].content![0].content![0].text = "edited";
+    const editedTable = markdown.serialize(parsed);
+    expect(editedTable).toContain("edited");
+    expect(editedTable).toContain("是否安排面试（true \\| false）");
+    expect(editedTable).not.toMatch(/^ {8,}\|/m);
+  });
+
+  it("keeps standalone indented pipe code blocks out of API-table recovery", () => {
+    const source = [
+      "| Name | Description |",
+      "| --- | --- |",
+      "| first | row |",
+      "",
+      "    | intentional | code |"
+    ].join("\n");
+    const parsed = markdown.parse(source);
+
+    expect(protectedNodes(parsed, "table")).toHaveLength(1);
+    expect(protectedNodes(parsed, "codeBlock")).toHaveLength(1);
+    expect(markdown.serialize(parsed)).toBe(source);
+  });
+
+  it("keeps an unindented API description pipe without shifting later columns", () => {
+    const source = [
+      "| 参数名称 | 参数说明 | 请求类型 | 是否必须 | 数据类型 | schema |",
+      "| --- | --- | --- | --- | --- | --- |",
+      "| haveInterview | 是否安排面试（true | false） | body | false | boolean | |"
+    ].join("\n");
+    const parsed = markdown.parse(source);
+    const row = protectedNodes(parsed, "table")[0].content?.[1];
+    const cells = row?.content?.map((cell) => cell.content?.[0].content?.map((node) => node.text ?? "").join("") ?? "");
+
+    expect(cells).toEqual([
+      "haveInterview",
+      "是否安排面试（true | false）",
+      "body",
+      "false",
+      "boolean",
+      ""
+    ]);
+    expect(markdown.serialize(parsed)).toBe(source);
+  });
+
   it("round-trips footnote references and multiline definitions", () => {
     const source = [
       "Body[^alpha].",

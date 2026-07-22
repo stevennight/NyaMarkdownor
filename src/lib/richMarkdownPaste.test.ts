@@ -30,6 +30,24 @@ describe("rich Markdown paste selection", () => {
     expect(richMarkdownSourceFromClipboard({ markdown: source }, parseMarkdown)).toBe(source);
   });
 
+  it("recognizes a complete Markdown API document from plain text by its table structure", () => {
+    const source = [
+      "## Resume query",
+      "",
+      "**Endpoint** `/resume/list`",
+      "",
+      "| Name | Description | Type |",
+      "| --- | --- | --- |",
+      "| page | Page number | integer |",
+      "",
+      "```json",
+      '{ "page": 1 }',
+      "```"
+    ].join("\n");
+
+    expect(richMarkdownSourceFromClipboard({ text: source }, parseMarkdown)).toBe(source);
+  });
+
   it("conservatively recognizes plain-text Markdown links and autolinks", () => {
     expect(richMarkdownSourceFromClipboard({ text: "[Docs](https://example.com/docs)" }, parseMarkdown))
       .toBe("[Docs](https://example.com/docs)");

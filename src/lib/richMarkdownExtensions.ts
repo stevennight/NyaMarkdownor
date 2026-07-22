@@ -22,6 +22,11 @@ import { codeHighlightClasses } from "./codeHighlight";
 import { localImageSourceForRender } from "./previewAssets";
 import { normalizeRichLinkHref } from "./richLinks";
 import { createRichMarkdownLinkInputRule } from "./richMarkdownLinkInput";
+import {
+  malformedMarkdownTableProjectionAtStart,
+  malformedMarkdownTableProjectionStart
+} from "./markdownTableProjection";
+import { unescapedPipeIndexes } from "./tableSourceRanges";
 
 type ProtectedMarkdownKind = "footnote" | "html";
 
@@ -467,11 +472,28 @@ const RichTable = Table.extend({
     };
   },
 
+  markdownTokenizer: {
+    name: "table",
+    level: "block",
+    start: malformedMarkdownTableProjectionStart,
+    tokenize(src, _tokens, lexer) {
+      const projection = malformedMarkdownTableProjectionAtStart(src);
+      if (!projection) return undefined;
+
+      const table = lexer.blockTokens(projection.markdown)
+        .find((token) => token.type === "table");
+      return table ? { ...table, raw: projection.raw } : undefined;
+    }
+  },
+
   renderMarkdown: (node, helpers) => {
     const raw = stringAttribute(node.attrs?.markdownRaw);
     const fingerprint = stringAttribute(node.attrs?.markdownFingerprint);
     if (raw && fingerprint && fingerprint === tableMarkdownFingerprint(node)) return raw;
-    return renderTableToMarkdown(tableWithMarkdownCellBreaks(node), helpers, {
+    return renderTableToMarkdown(tableWithMarkdownCellBreaks(node), {
+      ...helpers,
+      renderChildren: (children, context) => escapeTableCellPipes(helpers.renderChildren(children, context))
+    }, {
       cellLineSeparator: TABLE_CELL_LINE_SEPARATOR
     });
   }
@@ -1077,6 +1099,16 @@ function tableWithMarkdownCellBreaks(table: JSONContent): JSONContent {
   };
   normalize(normalized);
   return normalized;
+}
+
+function escapeTableCellPipes(markdown: string): string {
+  const indexes = unescapedPipeIndexes(markdown);
+  let escaped = markdown;
+  for (let index = indexes.length - 1; index >= 0; index -= 1) {
+    const pipeIndex = indexes[index];
+    escaped = `${escaped.slice(0, pipeIndex)}\\${escaped.slice(pipeIndex)}`;
+  }
+  return escaped;
 }
 
 export function protectedMarkdownBlockAtStart(src: string): ProtectedMatch | null {

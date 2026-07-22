@@ -128,6 +128,20 @@ describe("Markdown rendering and clean copy", () => {
     expect(renderMarkdown("<iframe src=\"x\"></iframe>").html).toContain("&lt;iframe");
   });
 
+  it("renders malformed API-export table rows as one complete table", () => {
+    const rendered = renderMarkdown([
+      "| 参数名称 | 参数说明 | 请求类型 | 是否必须 | 数据类型 | schema |",
+      "| --- | --- | --- | --- | --- | --- |",
+      "| first | ordinary | body | false | string | |",
+      "            | haveInterview | 是否安排面试（true | false） | body | false | boolean | |",
+      "            | second | continued | body | false | string | |"
+    ].join("\n"));
+
+    expect(rendered.html.match(/<tr>/g)).toHaveLength(4);
+    expect(rendered.html).toContain("是否安排面试（true | false）");
+    expect(rendered.html).not.toContain("<pre><code>");
+  });
+
   it("keeps escaped and entity break markup literal next to real table breaks", () => {
     const escaped = renderMarkdown([
       "| Note |",
