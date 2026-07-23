@@ -233,13 +233,15 @@
   min-width: 720px;
   min-height: 100%;
   height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .backup-compare-diff > .cm-editor {
   height: 100%;
 }
 
-.backup-compare-diff .cm-scroller {
+.backup-compare-diff > .cm-editor .cm-scroller {
   overscroll-behavior: contain;
 }
 
