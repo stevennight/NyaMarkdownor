@@ -1,4 +1,4 @@
-import type { AppPreferences, BackupPreferences, EditorDensity, LanguagePreference, SidebarPage, TableHeightMode, ThemeMode, ViewMode } from "../types";
+import type { AppPreferences, BackupPreferences, CopyMode, EditorDensity, LanguagePreference, SidebarPage, TableHeightMode, ThemeMode, ViewMode } from "../types";
 import { queueDesktopStoreTextWrite, readDesktopStoreText } from "./desktopStore";
 import { defaultPaneLayout, normalizePaneLayout } from "./paneLayout";
 
@@ -6,6 +6,8 @@ const PREFERENCES_KEY = "nya-markdownor-preferences-v1";
 
 type PreferencesInput = Omit<Partial<AppPreferences>, "backup"> & {
   backup?: Partial<BackupPreferences> | null;
+  editorLineWidth?: number;
+  smartCopy?: boolean;
 };
 
 export type PreferencesRecord = {
@@ -37,10 +39,10 @@ export const defaultPreferences: AppPreferences = {
   sidebarVisible: true,
   sidebarPage: "outline",
   autoSave: true,
-  smartCopy: true,
+  copyMode: "markdown",
   softSyntax: true,
   editorFontSize: 15,
-  editorLineWidth: 920,
+  editorContentWidth: 85,
   editorDensity: "comfortable",
   tableHeightMode: "full",
   tableMaxHeightVh: 60,
@@ -111,16 +113,36 @@ export function normalizePreferences(value: PreferencesInput): AppPreferences {
     sidebarVisible: typeof value.sidebarVisible === "boolean" ? value.sidebarVisible : defaultPreferences.sidebarVisible,
     sidebarPage: isSidebarPage(value.sidebarPage) ? value.sidebarPage : defaultPreferences.sidebarPage,
     autoSave: typeof value.autoSave === "boolean" ? value.autoSave : defaultPreferences.autoSave,
-    smartCopy: typeof value.smartCopy === "boolean" ? value.smartCopy : defaultPreferences.smartCopy,
+    copyMode: normalizeCopyMode(value.copyMode, value.smartCopy),
     softSyntax: typeof value.softSyntax === "boolean" ? value.softSyntax : defaultPreferences.softSyntax,
     editorFontSize: clampNumber(value.editorFontSize, 13, 20, defaultPreferences.editorFontSize),
-    editorLineWidth: clampNumber(value.editorLineWidth, 680, 1160, defaultPreferences.editorLineWidth),
+    editorContentWidth: normalizeEditorContentWidth(value.editorContentWidth, value.editorLineWidth),
     editorDensity: isEditorDensity(value.editorDensity) ? value.editorDensity : defaultPreferences.editorDensity,
     tableHeightMode: isTableHeightMode(value.tableHeightMode) ? value.tableHeightMode : defaultPreferences.tableHeightMode,
     tableMaxHeightVh: clampNumber(value.tableMaxHeightVh, 30, 80, defaultPreferences.tableMaxHeightVh),
     paneLayout: normalizePaneLayout(value.paneLayout),
     backup: normalizeBackupPreferences(value.backup)
   };
+}
+
+function normalizeCopyMode(value: unknown, legacySmartCopy: unknown): CopyMode {
+  if (isCopyMode(value)) return value;
+  if (typeof legacySmartCopy === "boolean") return legacySmartCopy ? "smart" : "markdown";
+  return defaultPreferences.copyMode;
+}
+
+function normalizeEditorContentWidth(value: unknown, legacyLineWidth: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return clampNumber(value, 60, 100, defaultPreferences.editorContentWidth);
+  }
+
+  if (typeof legacyLineWidth === "number" && Number.isFinite(legacyLineWidth)) {
+    const clampedPixels = Math.max(680, Math.min(1160, legacyLineWidth));
+    const percentage = 70 + ((clampedPixels - 680) / (1160 - 680)) * 30;
+    return Math.round(percentage / 5) * 5;
+  }
+
+  return defaultPreferences.editorContentWidth;
 }
 
 export function normalizeBackupPreferences(value: Partial<BackupPreferences> | null | undefined): BackupPreferences {
@@ -178,6 +200,10 @@ function isSidebarPage(value: unknown): value is SidebarPage {
 
 function isEditorDensity(value: unknown): value is EditorDensity {
   return value === "compact" || value === "comfortable" || value === "spacious";
+}
+
+function isCopyMode(value: unknown): value is CopyMode {
+  return value === "markdown" || value === "smart" || value === "plain";
 }
 
 function isTableHeightMode(value: unknown): value is TableHeightMode {

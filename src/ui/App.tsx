@@ -89,7 +89,7 @@ import { EditorView } from "@codemirror/view";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import type { BackupPreferences, Heading, LanguagePreference, MarkdownDocument, MarkdownFileStats, MarkdownTable, PaneLayout, SidebarPage, TableAlignment, TableBlock, TableHeightMode, ThemeMode, ViewMode, WorkspaceFile, WorkspaceListing } from "../types";
+import type { BackupPreferences, CopyMode, Heading, LanguagePreference, MarkdownDocument, MarkdownFileStats, MarkdownTable, PaneLayout, SidebarPage, TableAlignment, TableBlock, TableHeightMode, ThemeMode, ViewMode, WorkspaceFile, WorkspaceListing } from "../types";
 import { MarkdownEditor } from "./MarkdownEditor";
 import type { RichMarkdownEditorHandle } from "./RichMarkdownEditor";
 import { extractHeadings, markdownRangesToClipboardPayload, markdownRangesToTableCsv, markdownRangesToTableMarkdown, markdownRangesToTableTsv, markdownTableSliceToClipboardPayload, markdownTableSliceToCsv, markdownTableSliceToMarkdown, markdownTableSliceToTsv, referenceLabelsFromMarkdown } from "../lib/markdown";
@@ -471,10 +471,10 @@ export function App() {
   const [sidebarPage, setSidebarPage] = useState<SidebarPage>(initialPreferences.sidebarPage);
   const [autoSave, setAutoSaveState] = useState(initialPreferences.autoSave);
   const [backupPreferences, setBackupPreferencesState] = useState<BackupPreferences>(initialPreferences.backup);
-  const [smartCopy, setSmartCopyState] = useState(initialPreferences.smartCopy);
+  const [copyMode, setCopyModeState] = useState<CopyMode>(initialPreferences.copyMode);
   const [softSyntax, setSoftSyntaxState] = useState(initialPreferences.softSyntax);
   const [editorFontSize, setEditorFontSizeState] = useState(initialPreferences.editorFontSize);
-  const [editorLineWidth, setEditorLineWidthState] = useState(initialPreferences.editorLineWidth);
+  const [editorContentWidth, setEditorContentWidthState] = useState(initialPreferences.editorContentWidth);
   const [editorDensity, setEditorDensityState] = useState(initialPreferences.editorDensity);
   const [tableHeightMode, setTableHeightModeState] = useState<TableHeightMode>(initialPreferences.tableHeightMode);
   const [tableMaxHeightVh, setTableMaxHeightVhState] = useState(initialPreferences.tableMaxHeightVh);
@@ -871,10 +871,10 @@ export function App() {
           setSidebarPage(preferences.sidebarPage);
           setAutoSaveState(preferences.autoSave);
           setBackupPreferencesState(preferences.backup);
-          setSmartCopyState(preferences.smartCopy);
+          setCopyModeState(preferences.copyMode);
           setSoftSyntaxState(preferences.softSyntax);
           setEditorFontSizeState(preferences.editorFontSize);
-          setEditorLineWidthState(preferences.editorLineWidth);
+          setEditorContentWidthState(preferences.editorContentWidth);
           setEditorDensityState(preferences.editorDensity);
           setTableHeightModeState(preferences.tableHeightMode);
           setTableMaxHeightVhState(preferences.tableMaxHeightVh);
@@ -979,9 +979,9 @@ export function App() {
   useEffect(() => {
     if (!desktopProfileReady) return;
 
-    const nextPreferences = { viewMode, theme, language, sidebarVisible, sidebarPage, autoSave, backup: backupPreferences, smartCopy, softSyntax, editorFontSize, editorLineWidth, editorDensity, tableHeightMode, tableMaxHeightVh, paneLayout };
+    const nextPreferences = { viewMode, theme, language, sidebarVisible, sidebarPage, autoSave, backup: backupPreferences, copyMode, softSyntax, editorFontSize, editorContentWidth, editorDensity, tableHeightMode, tableMaxHeightVh, paneLayout };
     savePreferences(nextPreferences);
-  }, [desktopProfileReady, viewMode, theme, language, sidebarVisible, sidebarPage, autoSave, backupPreferences, smartCopy, softSyntax, editorFontSize, editorLineWidth, editorDensity, tableHeightMode, tableMaxHeightVh, paneLayout]);
+  }, [desktopProfileReady, viewMode, theme, language, sidebarVisible, sidebarPage, autoSave, backupPreferences, copyMode, softSyntax, editorFontSize, editorContentWidth, editorDensity, tableHeightMode, tableMaxHeightVh, paneLayout]);
 
   useEffect(() => {
     paneLayoutRef.current = paneLayout;
@@ -3048,8 +3048,8 @@ export function App() {
     setBackupPreferencesState((current) => backupPreferencesWithDirectory(current, null));
   }
 
-  function setSmartCopy(value: boolean) {
-    setSmartCopyState(value);
+  function setCopyMode(value: CopyMode) {
+    setCopyModeState(value);
   }
 
   function setSoftSyntax(value: boolean) {
@@ -3060,8 +3060,8 @@ export function App() {
     setEditorFontSizeState(value);
   }
 
-  function setEditorLineWidth(value: number) {
-    setEditorLineWidthState(value);
+  function setEditorContentWidth(value: number) {
+    setEditorContentWidthState(value);
   }
 
   function setEditorDensity(value: typeof editorDensity) {
@@ -6820,7 +6820,9 @@ export function App() {
     { id: "find", title: "Find", group: "Edit", shortcut: "Ctrl+F", run: () => openFindPanel(false) },
     { id: "replace", title: "Find and Replace", group: "Edit", shortcut: "Ctrl+H", run: () => openFindPanel(true) },
     { id: "toggle-theme", title: theme === "light" ? "Dark Theme" : "Light Theme", group: "View", run: toggleTheme },
-    { id: "toggle-smart-copy", title: smartCopy ? "Disable Smart Copy" : "Enable Smart Copy", group: "Clipboard", run: () => setSmartCopy(!smartCopy) },
+    { id: "default-copy-markdown", title: "Use Markdown Copy by Default", group: "Clipboard", disabled: copyMode === "markdown", run: () => setCopyMode("markdown") },
+    { id: "default-copy-smart", title: "Use Multi-format Copy by Default", group: "Clipboard", disabled: copyMode === "smart", run: () => setCopyMode("smart") },
+    { id: "default-copy-plain", title: "Use Plain Text Copy by Default", group: "Clipboard", disabled: copyMode === "plain", run: () => setCopyMode("plain") },
     { id: "toggle-soft-syntax", title: softSyntax ? "Show Markdown Syntax" : "Soften Markdown Syntax", group: "Editor", run: () => setSoftSyntax(!softSyntax) },
     { id: "bold", title: "Bold", group: "Format", shortcut: "Ctrl+B", run: () => runTextCommand("bold") },
     { id: "italic", title: "Italic", group: "Format", shortcut: "Ctrl+I", run: () => runTextCommand("italic") },
@@ -6906,7 +6908,7 @@ export function App() {
       openWorkspaceFile
     ) : [])
   ];
-  }, [activeTab.id, activeTable, autoPreviewEnabled, backups, closedTabs, commandPaletteOpen, desktopRuntime, draftSnapshots, dirty, hasDirtyTabs, desktopLocalFilesAvailable, recentFiles, richTableActive, sidebarVisible, smartCopy, softSyntax, tabs, theme, viewMode, workspace, workspaceSortMode, documentState.markdown, documentState.filePath, documentState.fileName, documentState.fileStats, selectedTableCells, selection, tableSizeDraft]);
+  }, [activeTab.id, activeTable, autoPreviewEnabled, backups, closedTabs, commandPaletteOpen, copyMode, desktopRuntime, draftSnapshots, dirty, hasDirtyTabs, desktopLocalFilesAvailable, recentFiles, richTableActive, sidebarVisible, softSyntax, tabs, theme, viewMode, workspace, workspaceSortMode, documentState.markdown, documentState.filePath, documentState.fileName, documentState.fileStats, selectedTableCells, selection, tableSizeDraft]);
 
   const deferredMetricsMarkdown = useDeferredValue(documentState.markdown);
   const metricsMarkdown = documentState.markdown.length > DEFERRED_METRICS_THRESHOLD
@@ -6930,7 +6932,7 @@ export function App() {
   const paneLayoutVariables = paneLayoutCssVariables(paneLayout);
   const appStyle = {
     "--editor-font-size": `${editorFontSize}px`,
-    "--editor-content-width": `${editorLineWidth}px`,
+    "--editor-content-width": `${editorContentWidth}%`,
     "--table-max-height": `${tableMaxHeightVh}vh`,
     "--outline-empty-label": JSON.stringify(t("No headings")),
     "--editor-placeholder": JSON.stringify(t("Start writing")),
@@ -7122,8 +7124,10 @@ export function App() {
                 <TableMenuItem label={t("Copy Column")} icon={<ArrowDown />} onClick={copyActiveTableColumn} />
               </>
             )}
-            <MenuSectionLabel>{t("Clipboard")}</MenuSectionLabel>
-            <ToolbarMenuToggle label={t("Smart copy")} icon={<ClipboardCopy />} checked={smartCopy} onToggle={() => setSmartCopy(!smartCopy)} />
+            <MenuSectionLabel>{t("Default copy")}</MenuSectionLabel>
+            <ToolbarMenuChoice label={t("Markdown")} icon={<FileCode2 />} checked={copyMode === "markdown"} onSelect={() => setCopyMode("markdown")} />
+            <ToolbarMenuChoice label={t("Multi-format")} icon={<ClipboardCopy />} checked={copyMode === "smart"} onSelect={() => setCopyMode("smart")} />
+            <ToolbarMenuChoice label={t("Plain text")} icon={<TextCursorInput />} checked={copyMode === "plain"} onSelect={() => setCopyMode("plain")} />
           </ToolbarActionMenu>
         </div>
         </div>
@@ -7655,7 +7659,7 @@ export function App() {
                 documentFilePath={documentState.filePath}
                 markdown={documentState.markdown}
                 t={t}
-                smartCopy={smartCopy}
+                copyMode={copyMode}
                 onChange={(markdown, source) => updateRichMarkdown(activeTab.id, markdown, source)}
                 onHistoryAction={(action) => applyRichHistoryAction(activeTab.id, action)}
                 onTableContextChange={setRichTableActive}
@@ -7691,7 +7695,7 @@ export function App() {
               onInitialSelectionTextResolved={() => richToSourceSelectionTextRef.current.delete(activeTab.id)}
               searchMatches={findOpen ? findMatches : []}
               activeSearchRange={findOpen && activeFindIndex >= 0 ? findMatches[activeFindIndex] : null}
-              smartCopy={smartCopy}
+              copyMode={copyMode}
               onInsertTableRequest={openInsertTableDialog}
               onToast={showToast}
             />
@@ -8195,10 +8199,10 @@ export function App() {
         autoSave={autoSave}
         autoSaveAvailable={desktopRuntime}
         fileAssociationsAvailable={desktopRuntime}
-        smartCopy={smartCopy}
+        copyMode={copyMode}
         softSyntax={softSyntax}
         editorFontSize={editorFontSize}
-        editorLineWidth={editorLineWidth}
+        editorContentWidth={editorContentWidth}
         editorDensity={editorDensity}
         tableHeightMode={tableHeightMode}
         tableMaxHeightVh={tableMaxHeightVh}
@@ -8214,10 +8218,10 @@ export function App() {
         onSidebarVisibleChange={setSidebarVisible}
         onAutoSaveChange={setAutoSave}
         onManageFileAssociation={manageFileAssociations}
-        onSmartCopyChange={setSmartCopy}
+        onCopyModeChange={setCopyMode}
         onSoftSyntaxChange={setSoftSyntax}
         onEditorFontSizeChange={setEditorFontSize}
-        onEditorLineWidthChange={setEditorLineWidth}
+        onEditorContentWidthChange={setEditorContentWidth}
         onEditorDensityChange={setEditorDensity}
         onTableHeightModeChange={setTableHeightMode}
         onTableMaxHeightVhChange={setTableMaxHeightVh}
@@ -8778,6 +8782,30 @@ function ToolbarMenuToggle({ label, icon, checked, disabled, onToggle }: Toolbar
       onClick={(event) => {
         event.currentTarget.closest("details")?.removeAttribute("open");
         onToggle();
+      }}
+    >
+      {icon}
+      <span>{label}</span>
+      <Check className={checked ? "menu-check visible" : "menu-check"} />
+    </button>
+  );
+}
+
+type ToolbarMenuChoiceProps = Omit<IconButtonProps, "onClick"> & {
+  checked: boolean;
+  onSelect: () => void;
+};
+
+function ToolbarMenuChoice({ label, icon, checked, disabled, onSelect }: ToolbarMenuChoiceProps) {
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={(event) => {
+        event.currentTarget.closest("details")?.removeAttribute("open");
+        onSelect();
       }}
     >
       {icon}

@@ -7,7 +7,7 @@ const clipboardPlugin = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => clipboardPlugin);
 
-import { copyRichContent, explicitMarkdownFromClipboard, writeClipboardEventData } from "./clipboard";
+import { clipboardPayloadForCopyMode, copyRichContent, explicitMarkdownFromClipboard, trimClipboardBoundaryLineBreaks, writeClipboardEventData } from "./clipboard";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -17,6 +17,28 @@ afterEach(() => {
 });
 
 describe("clipboard helpers", () => {
+  it("selects Markdown, multi-format, or plain payloads for the configured copy mode", () => {
+    const payload = {
+      plainText: "Heading",
+      html: "<h1>Heading</h1>",
+      markdown: "# Heading"
+    };
+
+    expect(clipboardPayloadForCopyMode(payload, "markdown")).toEqual({
+      plainText: "# Heading",
+      markdown: "# Heading"
+    });
+    expect(clipboardPayloadForCopyMode(payload, "smart")).toBe(payload);
+    expect(clipboardPayloadForCopyMode(payload, "plain")).toEqual({
+      plainText: "Heading"
+    });
+  });
+
+  it("removes editor-generated line breaks only at rich clipboard boundaries", () => {
+    expect(trimClipboardBoundaryLineBreaks("\r\n# Heading\r\n\r\nBody\r\n\r\n")).toBe("# Heading\n\nBody");
+    expect(trimClipboardBoundaryLineBreaks("  code  ")).toBe("  code  ");
+  });
+
   it("keeps explicit Markdown source ahead of clean clipboard representations", () => {
     expect(explicitMarkdownFromClipboard({
       markdown: "[Docs](https://example.com)\r\n"

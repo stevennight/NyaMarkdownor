@@ -19,11 +19,12 @@ import { applyMarkdownBlockquoteBackspace, applyMarkdownLineContinuation, applyM
 import { markdownRangesToClipboardPayload } from "../lib/markdown";
 import { applySelectedTableCellsClear, applySelectedTableCellsPaste, applyTableCellLineBreak, applyTableCellNavigation, applyTableCsvPaste, applyTableDocumentCommand, applyTableRowsPaste, applyTableTsvPaste, type TableDocumentCommand } from "../lib/tableDocumentCommands";
 import { clipboardRowsForTablePaste, type ClipboardTableSource } from "../lib/clipboardTableRows";
-import { explicitMarkdownFromClipboard, writeClipboardEventData } from "../lib/clipboard";
+import { clipboardPayloadForCopyMode, explicitMarkdownFromClipboard, writeClipboardEventData } from "../lib/clipboard";
 import { deleteSelectionRanges } from "../lib/selectionDelete";
-import { shouldHandleSmartCopy } from "../lib/selectionCopy";
+import { shouldHandleDefaultCopy } from "../lib/selectionCopy";
 import { getScrollProgress, setScrollProgress } from "../lib/scrollSync";
 import type { TextRange } from "../lib/editorCommands";
+import type { CopyMode } from "../types";
 import { createEditorStateFromSnapshot, createEditorStateSnapshot, createExternalDocumentSyncTransaction, type EditorStateSnapshot } from "../lib/editorStateSnapshots";
 import type { DocumentCursorPosition } from "../lib/documentMetrics";
 import { uniqueSourceSelectionForText } from "../lib/sourceSelectionText";
@@ -41,7 +42,7 @@ type MarkdownEditorProps = {
   editorStateSnapshot?: EditorStateSnapshot;
   markdown: string;
   placeholderText: string;
-  smartCopy: boolean;
+  copyMode: CopyMode;
   onChange: (markdown: string) => void;
   onSelectionChange: (selection: EditorSelectionPayload) => void;
   onEditorViewChange?: (sessionKey: string, view: EditorView | null) => void;
@@ -62,7 +63,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
     editorStateSnapshot,
     markdown: value,
     placeholderText,
-    smartCopy,
+    copyMode,
     onChange,
     onSelectionChange,
     onEditorViewChange,
@@ -83,7 +84,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
   const editorSessionKeyRef = useRef(editorSessionKey);
   const valueRef = useRef(value);
   const editorMarkdownRef = useRef(value);
-  const smartCopyRef = useRef(smartCopy);
+  const copyModeRef = useRef(copyMode);
   const onChangeRef = useRef(onChange);
   const onSelectionChangeRef = useRef(onSelectionChange);
   const onEditorViewChangeRef = useRef(onEditorViewChange);
@@ -96,7 +97,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
 
   editorSessionKeyRef.current = editorSessionKey;
   valueRef.current = value;
-  smartCopyRef.current = smartCopy;
+  copyModeRef.current = copyMode;
   onChangeRef.current = onChange;
   onSelectionChangeRef.current = onSelectionChange;
   onEditorViewChangeRef.current = onEditorViewChange;
@@ -114,7 +115,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
       onSelectionChangeRef,
       onInsertTableRequestRef,
       onToastRef,
-      smartCopyRef,
+      copyModeRef,
       placeholderCompartment: placeholderCompartmentRef.current,
       placeholderText,
       editorMarkdownRef
@@ -206,7 +207,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
 });
 
 type EditorExtensionRefs = {
-  smartCopyRef: MutableRefObject<boolean>;
+  copyModeRef: MutableRefObject<CopyMode>;
   onChangeRef: MutableRefObject<(markdown: string) => void>;
   onSelectionChangeRef: MutableRefObject<(selection: EditorSelectionPayload) => void>;
   onInsertTableRequestRef: MutableRefObject<(() => void) | undefined>;
@@ -217,7 +218,7 @@ type EditorExtensionRefs = {
 };
 
 function createEditorExtensions({
-  smartCopyRef,
+  copyModeRef,
   onChangeRef,
   onSelectionChangeRef,
   onInsertTableRequestRef,
@@ -323,13 +324,23 @@ function createEditorExtensions({
       },
       copy(event, view) {
         const selections = view.state.selection.ranges;
-        if (!shouldHandleSmartCopy(smartCopyRef.current, selections.some((selection) => !selection.empty))) return false;
+        if (!shouldHandleDefaultCopy(selections.some((selection) => !selection.empty))) return false;
 
-        const copied = writeClipboardEventData(event, markdownRangesToClipboardPayload(view.state.doc.toString(), selections));
+        const copied = writeClipboardEventData(
+          event,
+          clipboardPayloadForCopyMode(
+            markdownRangesToClipboardPayload(view.state.doc.toString(), selections),
+            copyModeRef.current
+          )
+        );
         if (!copied) return false;
 
         event.preventDefault();
-        onToastRef.current(copied === "rich" ? "Copied clean text, HTML, and Markdown" : "Copied clean text");
+        onToastRef.current(copyModeRef.current === "markdown"
+          ? "Copied Markdown selection"
+          : copyModeRef.current === "smart"
+            ? "Copied clean text, HTML, and Markdown"
+            : "Copied clean text selection");
         return true;
       },
       cut(event, view) {
@@ -339,7 +350,10 @@ function createEditorExtensions({
         const source = view.state.doc.toString();
         const edit = applySelectedTableCellsClear(source, selections);
         if (edit) {
-          const copied = writeClipboardEventData(event, markdownRangesToClipboardPayload(source, selections));
+          const copied = writeClipboardEventData(
+            event,
+            clipboardPayloadForCopyMode(markdownRangesToClipboardPayload(source, selections), copyModeRef.current)
+          );
           if (!copied) return false;
 
           dispatchTextEdit(view, edit);
@@ -348,12 +362,13 @@ function createEditorExtensions({
           return true;
         }
 
-        if (!smartCopyRef.current) return false;
-
         const deletion = deleteSelectionRanges(source, selections);
         if (!deletion) return false;
 
-        const copied = writeClipboardEventData(event, markdownRangesToClipboardPayload(source, selections));
+        const copied = writeClipboardEventData(
+          event,
+          clipboardPayloadForCopyMode(markdownRangesToClipboardPayload(source, selections), copyModeRef.current)
+        );
         if (!copied) return false;
 
         view.dispatch({
@@ -362,7 +377,11 @@ function createEditorExtensions({
           scrollIntoView: true
         });
         event.preventDefault();
-        onToastRef.current(copied === "rich" ? "Cut clean text, HTML, and Markdown" : "Cut clean text");
+        onToastRef.current(copyModeRef.current === "markdown"
+          ? "Cut Markdown"
+          : copyModeRef.current === "smart"
+            ? "Cut clean text, HTML, and Markdown"
+            : "Cut clean text");
         return true;
       },
       paste(event, view) {

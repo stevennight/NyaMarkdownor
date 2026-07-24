@@ -10,6 +10,8 @@ export type MarkdownLineEnding = "lf" | "crlf";
 
 export type EditorDensity = "compact" | "comfortable" | "spacious";
 
+export type CopyMode = "markdown" | "smart" | "plain";
+
 export type TableHeightMode = "full" | "scroll";
 
 export type SidebarPage = "outline" | "files" | "recovery";
@@ -42,10 +44,10 @@ export type AppPreferences = {
   sidebarVisible: boolean;
   sidebarPage: SidebarPage;
   autoSave: boolean;
-  smartCopy: boolean;
+  copyMode: CopyMode;
   softSyntax: boolean;
   editorFontSize: number;
-  editorLineWidth: number;
+  editorContentWidth: number;
   editorDensity: EditorDensity;
   tableHeightMode: TableHeightMode;
   tableMaxHeightVh: number;

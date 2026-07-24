@@ -4,8 +4,8 @@ import { tableCellContentRange } from "./tableSourceRanges";
 import { clampSelectionRangesToTableBlock, tableBlockForSelectionRanges } from "./tableSelectionRanges";
 import { normalizeTextRanges } from "./textRanges";
 
-export function shouldHandleSmartCopy(enabled: boolean, hasSelection: boolean): boolean {
-  return enabled && hasSelection;
+export function shouldHandleDefaultCopy(hasSelection: boolean): boolean {
+  return hasSelection;
 }
 
 export type SelectionSummary = {

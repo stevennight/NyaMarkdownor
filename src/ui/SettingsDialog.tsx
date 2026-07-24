@@ -13,7 +13,7 @@ import {
   X,
   type LucideIcon
 } from "lucide-react";
-import type { BackupPreferences, EditorDensity, LanguagePreference, TableHeightMode, ThemeMode, ViewMode } from "../types";
+import type { BackupPreferences, CopyMode, EditorDensity, LanguagePreference, TableHeightMode, ThemeMode, ViewMode } from "../types";
 import type { BuildInfo } from "../lib/buildInfo";
 import type { ApplicationUpdateState } from "../lib/appUpdates";
 import type { FileAssociationScope } from "../lib/fileIo";
@@ -28,10 +28,10 @@ type SettingsDialogProps = {
   autoSave: boolean;
   autoSaveAvailable: boolean;
   fileAssociationsAvailable: boolean;
-  smartCopy: boolean;
+  copyMode: CopyMode;
   softSyntax: boolean;
   editorFontSize: number;
-  editorLineWidth: number;
+  editorContentWidth: number;
   editorDensity: EditorDensity;
   tableHeightMode: TableHeightMode;
   tableMaxHeightVh: number;
@@ -47,10 +47,10 @@ type SettingsDialogProps = {
   onSidebarVisibleChange: (value: boolean) => void;
   onAutoSaveChange: (value: boolean) => void;
   onManageFileAssociation: (scope: FileAssociationScope) => void;
-  onSmartCopyChange: (value: boolean) => void;
+  onCopyModeChange: (value: CopyMode) => void;
   onSoftSyntaxChange: (value: boolean) => void;
   onEditorFontSizeChange: (value: number) => void;
-  onEditorLineWidthChange: (value: number) => void;
+  onEditorContentWidthChange: (value: number) => void;
   onEditorDensityChange: (value: EditorDensity) => void;
   onTableHeightModeChange: (value: TableHeightMode) => void;
   onTableMaxHeightVhChange: (value: number) => void;
@@ -79,10 +79,10 @@ export function SettingsDialog({
   autoSave,
   autoSaveAvailable,
   fileAssociationsAvailable,
-  smartCopy,
+  copyMode,
   softSyntax,
   editorFontSize,
-  editorLineWidth,
+  editorContentWidth,
   editorDensity,
   tableHeightMode,
   tableMaxHeightVh,
@@ -98,10 +98,10 @@ export function SettingsDialog({
   onSidebarVisibleChange,
   onAutoSaveChange,
   onManageFileAssociation,
-  onSmartCopyChange,
+  onCopyModeChange,
   onSoftSyntaxChange,
   onEditorFontSizeChange,
-  onEditorLineWidthChange,
+  onEditorContentWidthChange,
   onEditorDensityChange,
   onTableHeightModeChange,
   onTableMaxHeightVhChange,
@@ -255,13 +255,13 @@ export function SettingsDialog({
                     onChange={onEditorFontSizeChange}
                   />
                   <SliderRow
-                    label={t("Line width")}
-                    value={editorLineWidth}
-                    min={680}
-                    max={1160}
-                    step={20}
-                    suffix="px"
-                    onChange={onEditorLineWidthChange}
+                    label={t("Content width")}
+                    value={editorContentWidth}
+                    min={60}
+                    max={100}
+                    step={5}
+                    suffix="%"
+                    onChange={onEditorContentWidthChange}
                   />
                   <div className="settings-row">
                     <span>{t("Density")}</span>
@@ -294,7 +294,18 @@ export function SettingsDialog({
                 </section>
                 <section className="settings-section">
                   <div className="settings-section-title">{t("Editing")}</div>
-                  <ToggleRow label={t("Smart copy")} checked={smartCopy} onChange={onSmartCopyChange} />
+                  <div className="settings-row">
+                    <span>{t("Default copy")}</span>
+                    <SegmentedControl
+                      value={copyMode}
+                      options={[
+                        ["markdown", t("Markdown")],
+                        ["smart", t("Multi-format")],
+                        ["plain", t("Plain text")]
+                      ]}
+                      onChange={(value) => onCopyModeChange(value as CopyMode)}
+                    />
+                  </div>
                   <ToggleRow label={t("Soft syntax")} checked={softSyntax} onChange={onSoftSyntaxChange} />
                 </section>
               </>

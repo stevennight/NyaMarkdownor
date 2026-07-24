@@ -32,6 +32,21 @@ describe("preferences", () => {
       ...defaultPreferences,
       theme: "dark"
     });
+    expect(defaultPreferences).toMatchObject({
+      copyMode: "markdown",
+      editorContentWidth: 85
+    });
+  });
+
+  it("migrates legacy copy and pixel-width preferences", () => {
+    expect(normalizePreferences({
+      smartCopy: true,
+      editorLineWidth: 920
+    } as never)).toMatchObject({
+      copyMode: "smart",
+      editorContentWidth: 85
+    });
+    expect(normalizePreferences({ smartCopy: false } as never).copyMode).toBe("markdown");
   });
 
   it("migrates old preference records with default backup settings", () => {
@@ -149,7 +164,7 @@ describe("preferences", () => {
     const normalized = normalizePreferences({
       sidebarVisible: false,
       editorFontSize: 99,
-      editorLineWidth: 200,
+      editorContentWidth: 200,
       editorDensity: "spacious",
       tableHeightMode: "scroll",
       tableMaxHeightVh: 99,
@@ -157,7 +172,7 @@ describe("preferences", () => {
     });
 
     expect(normalized.editorFontSize).toBe(20);
-    expect(normalized.editorLineWidth).toBe(680);
+    expect(normalized.editorContentWidth).toBe(100);
     expect(normalized.sidebarVisible).toBe(false);
     expect(normalized.editorDensity).toBe("spacious");
     expect(normalized.tableHeightMode).toBe("scroll");

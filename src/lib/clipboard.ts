@@ -1,6 +1,7 @@
 import { writeHtml as writeClipboardHtml, writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 import { isTauriRuntime } from "./fileIo";
 import { normalizeMarkdownLineEndings } from "./lineEndings";
+import type { CopyMode } from "../types";
 
 export type ClipboardPayload = {
   plainText: string;
@@ -9,6 +10,21 @@ export type ClipboardPayload = {
 };
 
 export type ClipboardWriteMode = "rich" | "html" | "plain";
+
+export function trimClipboardBoundaryLineBreaks(text: string): string {
+  return normalizeMarkdownLineEndings(text).replace(/^\n+|\n+$/g, "");
+}
+
+export function clipboardPayloadForCopyMode(payload: ClipboardPayload, copyMode: CopyMode): ClipboardPayload {
+  if (copyMode === "smart") return payload;
+  if (copyMode === "plain") return { plainText: payload.plainText };
+
+  const markdown = payload.markdown ?? payload.plainText;
+  return {
+    plainText: markdown,
+    markdown
+  };
+}
 
 export function explicitMarkdownFromClipboard(data: { markdown?: string | null }): string | null {
   return typeof data.markdown === "string" && data.markdown.length > 0

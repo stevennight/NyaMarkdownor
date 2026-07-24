@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { getSelectionSummary, hasNonEmptySelection, hasStructuredTableSelection, markdownFromSelectionRanges, selectionRangesOrWholeDocument, shouldHandleSmartCopy } from "./selectionCopy";
+import { getSelectionSummary, hasNonEmptySelection, hasStructuredTableSelection, markdownFromSelectionRanges, selectionRangesOrWholeDocument, shouldHandleDefaultCopy } from "./selectionCopy";
 
-describe("smart copy policy", () => {
-  it("only intercepts copy when enabled and text is selected", () => {
-    expect(shouldHandleSmartCopy(true, true)).toBe(true);
-    expect(shouldHandleSmartCopy(true, false)).toBe(false);
-    expect(shouldHandleSmartCopy(false, true)).toBe(false);
+describe("default copy policy", () => {
+  it("only intercepts copy when text is selected", () => {
+    expect(shouldHandleDefaultCopy(true)).toBe(true);
+    expect(shouldHandleDefaultCopy(false)).toBe(false);
   });
 });
 

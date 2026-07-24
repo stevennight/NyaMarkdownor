@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, type ChangeEvent, t
 import { EditorContent, useEditor } from "@tiptap/react";
 import { type Editor } from "@tiptap/core";
 import { Trash2 } from "lucide-react";
-import { DOMSerializer, type Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { SelectionBookmark } from "@tiptap/pm/state";
 import { CellSelection, TableMap } from "@tiptap/pm/tables";
 import type { MarkdownBlockCommand, MarkdownListIndentDirection, MarkdownTextCommand } from "../lib/editorCommands";
@@ -11,7 +11,7 @@ import type { SearchMatch, SearchOptions } from "../lib/search";
 import type { TextRange } from "../lib/editorCommands";
 import { createRichMarkdownSyncScheduler, richMarkdownSyncDelayFor, type RichMarkdownSyncSource } from "../lib/richMarkdownSync";
 import { richTableClipboardFormats, type RichTableClipboardFormats } from "../lib/richTableClipboard";
-import { writeClipboardEventData } from "../lib/clipboard";
+import { clipboardPayloadForCopyMode, trimClipboardBoundaryLineBreaks, writeClipboardEventData } from "../lib/clipboard";
 import { clipboardRowsForTablePaste, type ClipboardTableSource } from "../lib/clipboardTableRows";
 import type { RichDocumentHistoryAction } from "../lib/richDocumentHistory";
 import { richTableSelectionFor, richTableSelectionSummary, type RichTableSelectionCommand, type RichTableSelectionSummary } from "../lib/richTableSelection";
@@ -23,7 +23,7 @@ import { getScrollProgress, setScrollProgress } from "../lib/scrollSync";
 import { activeRichHeadingIndexAtPosition, richHeadingPositionAtIndex } from "../lib/richOutlineNavigation";
 import { uniqueRichTextSelectionForText } from "../lib/richSelectionText";
 import { markdownFrontMatterEditor, promoteMarkdownFrontMatter, splitMarkdownFrontMatter, updateMarkdownFrontMatterContent, withMarkdownFrontMatter } from "../lib/markdownFrontMatter";
-import { shouldHandleSmartCopy } from "../lib/selectionCopy";
+import { shouldHandleDefaultCopy } from "../lib/selectionCopy";
 import { richTableStructureTransaction, type RichTableStructureCommand } from "../lib/richTableStructure";
 import { createRichMarkdownExtensions } from "../lib/richMarkdownExtensions";
 import { withoutGeneratedTrailingParagraph } from "../lib/richMarkdownDocument";
@@ -32,6 +32,8 @@ import { browserTitleLinkFromClipboard } from "../lib/richLinkPaste";
 import { findRichTextMatches, richSearchHighlightExtension, setRichSearchHighlights } from "../lib/richSearch";
 import { richMarkdownSourceFromClipboard } from "../lib/richMarkdownPaste";
 import type { Translator } from "../lib/i18n";
+import type { CopyMode } from "../types";
+import { markdownRangeToClipboardPayload } from "../lib/markdown";
 
 const EMPTY_SEARCH_MATCHES: readonly TextRange[] = [];
 
@@ -83,7 +85,7 @@ type RichMarkdownEditorProps = {
   documentFilePath: string | null;
   markdown: string;
   t: Translator;
-  smartCopy: boolean;
+  copyMode: CopyMode;
   onChange: (markdown: string, source: RichMarkdownSyncSource) => void;
   onHistoryAction: (action: RichDocumentHistoryAction) => boolean;
   onTableContextChange: (active: boolean) => void;
@@ -101,7 +103,7 @@ type RichMarkdownEditorProps = {
 };
 
 export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, RichMarkdownEditorProps>(function RichMarkdownEditor(
-  { documentFilePath, markdown, t, smartCopy, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onActiveHeadingIndexChange, onOpenLink, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
+  { documentFilePath, markdown, t, copyMode, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onActiveHeadingIndexChange, onOpenLink, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
   forwardedRef
 ) {
   const onChangeRef = useRef(onChange);
@@ -112,7 +114,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   const onActiveHeadingIndexChangeRef = useRef(onActiveHeadingIndexChange);
   const onOpenLinkRef = useRef(onOpenLink);
   const onToastRef = useRef(onToast);
-  const smartCopyRef = useRef(smartCopy);
+  const copyModeRef = useRef(copyMode);
   const onScrollProgressRef = useRef(onScrollProgress);
   const scrollHostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<Editor | null>(null);
@@ -133,7 +135,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   onActiveHeadingIndexChangeRef.current = onActiveHeadingIndexChange;
   onOpenLinkRef.current = onOpenLink;
   onToastRef.current = onToast;
-  smartCopyRef.current = smartCopy;
+  copyModeRef.current = copyMode;
   onScrollProgressRef.current = onScrollProgress;
   if (!markdownSyncRef.current) {
     markdownSyncRef.current = createRichMarkdownSyncScheduler((nextMarkdown, source) => {
@@ -202,14 +204,20 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
         },
         copy: (_view, event) => {
           const currentEditor = editorRef.current;
-          if (!currentEditor || currentEditor.isDestroyed || !shouldHandleSmartCopy(smartCopyRef.current, !currentEditor.state.selection.empty)) return false;
+          if (!currentEditor || currentEditor.isDestroyed || !shouldHandleDefaultCopy(!currentEditor.state.selection.empty)) return false;
 
           const payload = richSelectionClipboardContent(currentEditor);
-          const copied = payload ? writeClipboardEventData(event, payload) : null;
+          const copied = payload
+            ? writeClipboardEventData(event, clipboardPayloadForCopyMode(payload, copyModeRef.current))
+            : null;
           if (!copied) return false;
 
           event.preventDefault();
-          onToastRef.current(copied === "rich" ? "Copied rich selection" : "Copied selection");
+          onToastRef.current(copyModeRef.current === "markdown"
+            ? "Copied Markdown selection"
+            : copyModeRef.current === "smart"
+              ? "Copied clean text, HTML, and Markdown"
+              : "Copied clean text selection");
           return true;
         },
         paste: (_view, event) => {
@@ -588,13 +596,12 @@ function richSelectionClipboardContent(editor: Editor | null): RichMarkdownClipb
   const { from, to, empty } = editor.state.selection;
   const fragment = empty ? editor.state.doc.content : editor.state.doc.slice(from, to).content;
   const markdownDocument = { type: "doc", content: fragment.toJSON() };
-  const container = document.createElement("div");
-  container.append(DOMSerializer.fromSchema(editor.schema).serializeFragment(fragment));
+  const serializedMarkdown = editor.markdown?.serialize(markdownDocument) ?? editor.getMarkdown();
+  const markdown = trimClipboardBoundaryLineBreaks(serializedMarkdown);
+  const payload = markdownRangeToClipboardPayload(markdown, { from: 0, to: markdown.length });
 
   return {
-    markdown: editor.markdown?.serialize(markdownDocument) ?? editor.getMarkdown(),
-    plainText: fragment.textBetween(0, fragment.size, "\n\n"),
-    html: container.innerHTML,
+    ...payload,
     selected: !empty
   };
 }
