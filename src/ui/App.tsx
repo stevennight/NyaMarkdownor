@@ -911,7 +911,13 @@ export function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-  }, [theme]);
+
+    if (!desktopRuntime) return;
+
+    void getCurrentWindow().setTheme(theme).catch((error) => {
+      console.warn(error);
+    });
+  }, [desktopRuntime, theme]);
 
   useEffect(() => {
     document.documentElement.lang = locale;
