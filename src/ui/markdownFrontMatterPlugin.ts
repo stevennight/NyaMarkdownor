@@ -1,3 +1,4 @@
+import { EditorState } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { splitMarkdownFrontMatter } from "../lib/markdownFrontMatter";
 
@@ -73,8 +74,24 @@ export function markdownFrontMatterSyntaxRanges(markdown: string): MarkdownFront
   return ranges;
 }
 
+export function markdownFrontMatterSyntaxRangesForState(state: EditorState): MarkdownFrontMatterSyntaxRange[] {
+  const firstLine = state.doc.line(1);
+  const opening = normalizedStateLineText(firstLine.text);
+  if ((opening !== "---" && opening !== "+++") || firstLine.to >= state.doc.length) return [];
+
+  for (let lineNumber = 2; lineNumber <= state.doc.lines; lineNumber += 1) {
+    const line = state.doc.line(lineNumber);
+    if (normalizedStateLineText(line.text) !== opening) continue;
+
+    const end = line.to < state.doc.length ? line.to + 1 : line.to;
+    return markdownFrontMatterSyntaxRanges(state.sliceDoc(0, end));
+  }
+
+  return [];
+}
+
 function buildFrontMatterDecorations(view: EditorView): DecorationSet {
-  const decorations = markdownFrontMatterSyntaxRanges(view.state.doc.toString()).map((range) => {
+  const decorations = markdownFrontMatterSyntaxRangesForState(view.state).map((range) => {
     if (range.kind === "line") {
       if (range.lineRole === "start") return frontMatterLineStart.range(range.from);
       if (range.lineRole === "end") return frontMatterLineEnd.range(range.from);
@@ -85,4 +102,8 @@ function buildFrontMatterDecorations(view: EditorView): DecorationSet {
   });
 
   return Decoration.set(decorations, true);
+}
+
+function normalizedStateLineText(text: string): string {
+  return text.endsWith("\r") ? text.slice(0, -1) : text;
 }

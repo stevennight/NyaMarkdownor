@@ -2617,8 +2617,15 @@ export function App() {
   }
 
   function setMarkdown(markdown: string) {
-    richDocumentHistoriesRef.current.delete(activeTabIdRef.current);
-    setDocumentState((current) => ({ ...current, markdown }));
+    updateSourceMarkdown(activeTabIdRef.current, markdown);
+  }
+
+  function updateSourceMarkdown(tabId: string, markdown: string) {
+    const tab = tabsRef.current.find((candidate) => candidate.id === tabId);
+    if (!tab || tab.document.markdown === markdown) return;
+
+    richDocumentHistoriesRef.current.delete(tabId);
+    updateDocumentTab(tabId, (current) => ({ ...current, markdown }));
   }
 
   function updateRichMarkdown(tabId: string, markdown: string, source: RichMarkdownSyncSource) {
@@ -7737,7 +7744,7 @@ export function App() {
               editorStateSnapshot={editorStateSnapshotsRef.current.get(activeTab.id) ?? activeTab.editorStateSnapshot}
               markdown={documentState.markdown}
               placeholderText={t("Start writing Markdown...")}
-              onChange={setMarkdown}
+              onChange={(markdown) => updateSourceMarkdown(activeTab.id, markdown)}
               onSelectionChange={setSelection}
               onEditorViewChange={rememberEditorView}
               onEditorStateSnapshotChange={rememberEditorStateSnapshot}

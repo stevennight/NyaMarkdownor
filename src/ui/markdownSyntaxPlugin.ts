@@ -4,7 +4,8 @@ import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate
 import type { SyntaxNode } from "@lezer/common";
 import { findInlineMarkdownLinks, findMarkdownAutolinks } from "../lib/inlineMarkdown";
 import { intersectsNonEmptySelection } from "../lib/selectionRanges";
-import { findTableAtOffset } from "../lib/tables";
+import { findTableAtOffset, findTableBlock } from "../lib/tables";
+import { unescapedPipeIndexes } from "../lib/tableSourceRanges";
 
 const syntaxMark = Decoration.mark({ class: "cm-md-mark" });
 const tableMark = Decoration.mark({ class: "cm-md-table-mark" });
@@ -50,7 +51,6 @@ function buildDecorations(view: EditorView): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   const selections = view.state.selection.ranges;
   const tableRanges: TableSourceRange[] = [];
-  let tableMarkdown: string | null = null;
 
   for (const { from, to } of view.visibleRanges) {
     let position = from;
@@ -63,12 +63,7 @@ function buildDecorations(view: EditorView): DecorationSet {
         : collectLineRanges(
             line.text,
             line.from,
-            hasTableCandidate && isMarkdownTableLineWithCache(
-              line.text,
-              line.from,
-              tableMarkdown ?? (tableMarkdown = view.state.doc.toString()),
-              tableRanges
-            )
+            hasTableCandidate && isMarkdownTableLineWithCache(view.state, line.from, tableRanges)
           );
       for (const range of ranges) {
         const decoration = intersectsNonEmptySelection(range.from, range.to, selections)
@@ -90,21 +85,16 @@ type TableSourceRange = {
 };
 
 function isMarkdownTableLineWithCache(
-  lineText: string,
+  state: EditorState,
   from: number,
-  markdown: string,
   tableRanges: TableSourceRange[]
 ): boolean {
-  if (!lineText.includes("|")) return false;
   if (tableRanges.some((range) => from >= range.from && from < range.to)) return true;
 
-  const table = findTableAtOffset(markdown, from, {
-    assumeNonCodeLine: true,
-    deferLineNumberCalculation: true
-  });
+  const table = markdownTableRangeForState(state, from);
   if (!table) return false;
 
-  tableRanges.push({ from: table.startOffset, to: table.endOffset });
+  tableRanges.push(table);
   return true;
 }
 
@@ -123,14 +113,54 @@ export function isMarkdownCodeTextLine(state: EditorState, from: number, to: num
   return probes.some((position) => isMarkdownCodeTextPosition(state, position));
 }
 
-export function isMarkdownTableLine(state: EditorState, from: number, to: number, markdown = state.doc.toString()): boolean {
+export function isMarkdownTableLine(state: EditorState, from: number, to: number, markdown?: string): boolean {
   const docLength = state.doc.length;
   const lineFrom = Math.max(0, Math.min(from, docLength));
   const lineTo = Math.max(lineFrom, Math.min(to, docLength));
   const lineText = state.sliceDoc(lineFrom, lineTo);
   if (!lineText.includes("|") || isMarkdownCodeTextLine(state, lineFrom, lineTo)) return false;
 
-  return Boolean(findTableAtOffset(markdown, lineFrom));
+  return markdown === undefined
+    ? Boolean(markdownTableRangeForState(state, lineFrom))
+    : Boolean(findTableAtOffset(markdown, lineFrom));
+}
+
+export function markdownTableRangeForState(state: EditorState, from: number): TableSourceRange | null {
+  const doc = state.doc;
+  const safeFrom = Math.max(0, Math.min(from, doc.length));
+  const currentLine = doc.lineAt(safeFrom);
+  if (!canBeLocalTableLine(currentLine.text)) return null;
+
+  let startLineNumber = currentLine.number;
+  let endLineNumber = currentLine.number;
+  while (startLineNumber > 1 && canBeLocalTableLine(doc.line(startLineNumber - 1).text)) {
+    startLineNumber -= 1;
+  }
+  while (endLineNumber < doc.lines && canBeLocalTableLine(doc.line(endLineNumber + 1).text)) {
+    endLineNumber += 1;
+  }
+
+  const lines: string[] = [];
+  for (let lineNumber = startLineNumber; lineNumber <= endLineNumber; lineNumber += 1) {
+    lines.push(doc.line(lineNumber).text);
+  }
+
+  const localLineIndex = currentLine.number - startLineNumber;
+  const table = findTableBlock(lines, localLineIndex, 0);
+  if (!table || localLineIndex < table.startLine || localLineIndex > table.endLine) return null;
+
+  const tableStartLine = doc.line(startLineNumber + table.startLine);
+  const tableEndLine = doc.line(startLineNumber + table.endLine);
+  return {
+    from: tableStartLine.from,
+    to: tableEndLine.to < doc.length ? tableEndLine.to + 1 : tableEndLine.to
+  };
+}
+
+function canBeLocalTableLine(text: string): boolean {
+  return Boolean(text.trim())
+    && unescapedPipeIndexes(text).length > 0
+    && !/^(?: {4,}|\t)/.test(text);
 }
 
 function collectLineRanges(text: string, offset: number, tableLine: boolean): Range[] {

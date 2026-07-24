@@ -31,6 +31,11 @@ import { uniqueSourceSelectionForText } from "../lib/sourceSelectionText";
 import { markdownFrontMatterMarks } from "./markdownFrontMatterPlugin";
 import { markdownSyntaxMarks } from "./markdownSyntaxPlugin";
 import { searchHighlightField, setSearchHighlights } from "./searchHighlightPlugin";
+import {
+  createSourceEditorSyncScheduler,
+  sourceEditorSyncDelayFor,
+  type SourceEditorSyncScheduler
+} from "../lib/sourceEditorSync";
 
 type EditorSelectionPayload = TextRange & {
   ranges: TextRange[];
@@ -83,7 +88,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
   const viewRef = useRef<EditorView | null>(null);
   const editorSessionKeyRef = useRef(editorSessionKey);
   const valueRef = useRef(value);
-  const editorMarkdownRef = useRef(value);
+  const synchronizedMarkdownRef = useRef(value);
   const copyModeRef = useRef(copyMode);
   const onChangeRef = useRef(onChange);
   const onSelectionChangeRef = useRef(onSelectionChange);
@@ -94,6 +99,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
   const onInsertTableRequestRef = useRef(onInsertTableRequest);
   const onToastRef = useRef(onToast);
   const placeholderCompartmentRef = useRef(new Compartment());
+  const sourceEditorSyncRef = useRef<SourceEditorSyncScheduler<EditorState> | null>(null);
 
   editorSessionKeyRef.current = editorSessionKey;
   valueRef.current = value;
@@ -106,19 +112,28 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
   onInitialSelectionTextResolvedRef.current = onInitialSelectionTextResolved;
   onInsertTableRequestRef.current = onInsertTableRequest;
   onToastRef.current = onToast;
+  if (!sourceEditorSyncRef.current) {
+    sourceEditorSyncRef.current = createSourceEditorSyncScheduler(
+      (state) => state.doc.toString(),
+      (nextMarkdown) => {
+        if (nextMarkdown === synchronizedMarkdownRef.current) return;
+        synchronizedMarkdownRef.current = nextMarkdown;
+        onChangeRef.current(nextMarkdown);
+      },
+      (state) => reportSelection(state, onSelectionChangeRef.current)
+    );
+  }
 
   useEffect(() => {
     if (!hostRef.current) return undefined;
 
     const extensions = createEditorExtensions({
-      onChangeRef,
-      onSelectionChangeRef,
       onInsertTableRequestRef,
       onToastRef,
       copyModeRef,
       placeholderCompartment: placeholderCompartmentRef.current,
       placeholderText,
-      editorMarkdownRef
+      sourceEditorSync: sourceEditorSyncRef.current!
     });
     const initialState = createEditorStateFromSnapshot(valueRef.current, extensions, editorStateSnapshot);
     const initialSelection = initialSelectionText
@@ -133,7 +148,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
 
     if (initialSelectionText) onInitialSelectionTextResolvedRef.current?.();
 
-    editorMarkdownRef.current = valueRef.current;
+    synchronizedMarkdownRef.current = valueRef.current;
     viewRef.current = view;
     assignRef(forwardedRef, view);
     onEditorViewChangeRef.current?.(editorSessionKeyRef.current, view);
@@ -159,6 +174,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
     }
 
     return () => {
+      sourceEditorSyncRef.current?.flush({ reportSelection: false });
       onEditorStateSnapshotChangeRef.current?.(
         editorSessionKeyRef.current,
         createEditorStateSnapshot(view.state, getScrollProgress(view.scrollDOM))
@@ -177,9 +193,11 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
     const view = viewRef.current;
     if (!view) return;
 
-    if (editorMarkdownRef.current === value) return;
+    if (synchronizedMarkdownRef.current === value) return;
 
-    editorMarkdownRef.current = value;
+    sourceEditorSyncRef.current?.cancel();
+    synchronizedMarkdownRef.current = value;
+    if (view.state.doc.length === value.length && view.state.doc.toString() === value) return;
     view.dispatch(createExternalDocumentSyncTransaction(view.state, value));
   }, [value]);
 
@@ -208,24 +226,20 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
 
 type EditorExtensionRefs = {
   copyModeRef: MutableRefObject<CopyMode>;
-  onChangeRef: MutableRefObject<(markdown: string) => void>;
-  onSelectionChangeRef: MutableRefObject<(selection: EditorSelectionPayload) => void>;
   onInsertTableRequestRef: MutableRefObject<(() => void) | undefined>;
   onToastRef: MutableRefObject<(message: string) => void>;
-  editorMarkdownRef: MutableRefObject<string>;
+  sourceEditorSync: SourceEditorSyncScheduler<EditorState>;
   placeholderCompartment: Compartment;
   placeholderText: string;
 };
 
 function createEditorExtensions({
   copyModeRef,
-  onChangeRef,
-  onSelectionChangeRef,
   onInsertTableRequestRef,
   onToastRef,
   placeholderCompartment,
   placeholderText,
-  editorMarkdownRef
+  sourceEditorSync
 }: EditorExtensionRefs): Extension {
   return [
     lineNumbers(),
@@ -260,14 +274,12 @@ function createEditorExtensions({
     placeholderCompartment.of(placeholder(placeholderText)),
     EditorView.lineWrapping,
     EditorView.updateListener.of((update) => {
-      if (update.docChanged) {
-        const next = update.state.doc.toString();
-        editorMarkdownRef.current = next;
-        onChangeRef.current(next);
-      }
-
       if (update.selectionSet || update.docChanged) {
-        reportSelection(update.state, onSelectionChangeRef.current);
+        sourceEditorSync.schedule(
+          update.state,
+          update.docChanged,
+          sourceEditorSyncDelayFor(update.state.doc.length)
+        );
       }
     }),
     EditorView.domEventHandlers({

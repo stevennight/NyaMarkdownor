@@ -1,7 +1,12 @@
 import { EditorState } from "@codemirror/state";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { describe, expect, it } from "vitest";
-import { isMarkdownCodeTextLine, isMarkdownTableLine, markdownSyntaxRangesForLine } from "./markdownSyntaxPlugin";
+import {
+  isMarkdownCodeTextLine,
+  isMarkdownTableLine,
+  markdownSyntaxRangesForLine,
+  markdownTableRangeForState
+} from "./markdownSyntaxPlugin";
 
 function createMarkdownState(doc: string): EditorState {
   return EditorState.create({
@@ -79,6 +84,32 @@ describe("Markdown syntax decorations", () => {
 
     expect(isMarkdownTableLine(state, proseLine.from, proseLine.to, source)).toBe(false);
     expect(isMarkdownTableLine(state, tableLine.from, tableLine.to, source)).toBe(true);
+  });
+
+  it("finds a table from editor state without materializing a large document string", () => {
+    const prefix = "paragraph\n".repeat(100_000);
+    const table = "| A | B |\n| --- | --- |\n| x | y |";
+    const state = createMarkdownState(`${prefix}${table}\n${"tail\n".repeat(100_000)}`);
+    const tableLine = state.doc.line(100_001);
+    const range = markdownTableRangeForState(state, tableLine.from);
+
+    expect(range).not.toBeNull();
+    expect(state.sliceDoc(range!.from, range!.to).trimEnd()).toBe(table);
+    expect(isMarkdownTableLine(state, tableLine.from, tableLine.to)).toBe(true);
+  });
+
+  it("does not mark adjacent pipe prose before a table as a table row", () => {
+    const state = createMarkdownState([
+      "A | B prose",
+      "| Header | Value |",
+      "| --- | --- |",
+      "| x | y |"
+    ].join("\n"));
+    const proseLine = state.doc.line(1);
+    const tableLine = state.doc.line(2);
+
+    expect(markdownTableRangeForState(state, proseLine.from)).toBeNull();
+    expect(markdownTableRangeForState(state, tableLine.from)).not.toBeNull();
   });
 
   it("softens link destinations so selected links do not expose raw URL syntax", () => {

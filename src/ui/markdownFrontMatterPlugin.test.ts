@@ -1,5 +1,9 @@
+import { EditorState } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
-import { markdownFrontMatterSyntaxRanges } from "./markdownFrontMatterPlugin";
+import {
+  markdownFrontMatterSyntaxRanges,
+  markdownFrontMatterSyntaxRangesForState
+} from "./markdownFrontMatterPlugin";
 
 describe("Markdown front matter source styling", () => {
   it("identifies YAML delimiters, property keys, and header lines", () => {
@@ -42,5 +46,24 @@ describe("Markdown front matter source styling", () => {
     expect(ranges.filter((range) => range.kind === "key")).toEqual([
       { from: 5, to: 9, kind: "key" }
     ]);
+  });
+
+  it("reads only the front matter prefix from editor state", () => {
+    const frontMatter = "---\ntitle: Large document\n---\n";
+    const state = EditorState.create({
+      doc: `${frontMatter}${"body text\n".repeat(100_000)}`
+    });
+    const ranges = markdownFrontMatterSyntaxRangesForState(state);
+
+    expect(ranges).toEqual(markdownFrontMatterSyntaxRanges(frontMatter));
+    expect(Math.max(...ranges.map((range) => range.to))).toBeLessThanOrEqual(frontMatter.length);
+  });
+
+  it("does not scan a large ordinary body as front matter", () => {
+    const state = EditorState.create({
+      doc: `# Body\n${"content\n".repeat(100_000)}`
+    });
+
+    expect(markdownFrontMatterSyntaxRangesForState(state)).toEqual([]);
   });
 });
