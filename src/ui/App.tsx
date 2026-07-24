@@ -348,7 +348,7 @@ const WORK_RECOVERY_IDLE_MS = 500;
 const WORK_RECOVERY_MAX_DELAY_MS = 5000;
 const BACKUP_HISTORY_REFRESH_MS = 30000;
 const MAX_INTERACTIVE_BACKUP_COMPARE_BYTES = 16 * 1024 * 1024;
-const TAB_DRAG_MIME = "application/x-nya-markdownor-tab";
+const TAB_POINTER_DRAG_THRESHOLD_PX = 5;
 const DEFERRED_METRICS_THRESHOLD = 80_000;
 
 type ConfirmationState = {
@@ -531,6 +531,14 @@ export function App() {
   const viewMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const tabListRef = useRef<HTMLDivElement | null>(null);
   const tabListMenuRef = useRef<HTMLDivElement | null>(null);
+  const tabPointerDragRef = useRef<{
+    pointerId: number;
+    tabId: string;
+    startX: number;
+    startY: number;
+    dragging: boolean;
+  } | null>(null);
+  const suppressedTabClickRef = useRef<string | null>(null);
   const workspaceRef = useRef<HTMLElement | null>(null);
   const editorPaneRef = useRef<HTMLElement | null>(null);
   const previewPaneRef = useRef<HTMLElement | null>(null);
@@ -1949,66 +1957,108 @@ export function App() {
     moveDocumentTab(activeTabIdRef.current, direction);
   }
 
-  function handleTabDragStart(event: ReactDragEvent<HTMLDivElement>, tabId: string) {
-    if (tabsRef.current.length <= 1) {
-      event.preventDefault();
-      return;
+  function handleTabPointerDown(event: ReactPointerEvent<HTMLButtonElement>, tabId: string) {
+    if (event.button !== 0 || !event.isPrimary || tabsRef.current.length <= 1) return;
+
+    tabPointerDragRef.current = {
+      pointerId: event.pointerId,
+      tabId,
+      startX: event.clientX,
+      startY: event.clientY,
+      dragging: false
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handleTabPointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = tabPointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+
+    if (!drag.dragging) {
+      const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+      if (distance < TAB_POINTER_DRAG_THRESHOLD_PX) return;
+      drag.dragging = true;
+      setDraggedTabId(drag.tabId);
     }
 
-    setDraggedTabId(tabId);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData(TAB_DRAG_MIME, tabId);
+    event.preventDefault();
+    scrollTabListDuringPointerDrag(event.clientX);
+    setTabDropTarget(tabDropTargetAtPoint(drag.tabId, event.clientX, event.clientY));
   }
 
-  function handleTabDragOver(event: ReactDragEvent<HTMLDivElement>, targetTabId: string) {
-    if (!isDocumentTabDrag(event)) return;
+  function handleTabPointerUp(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = tabPointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
 
-    const sourceTabId = draggedTabId ?? event.dataTransfer.getData(TAB_DRAG_MIME);
-    if (!sourceTabId || sourceTabId === targetTabId) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = "move";
-
-    const position = tabDropPositionForClientX(event.currentTarget, event.clientX);
-    setTabDropTarget((current) => (
-      current?.tabId === targetTabId && current.position === position
-        ? current
-        : { tabId: targetTabId, position }
-    ));
-  }
-
-  function handleTabDrop(event: ReactDragEvent<HTMLDivElement>, targetTabId: string) {
-    if (!isDocumentTabDrag(event)) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-
-    const sourceTabId = draggedTabId ?? event.dataTransfer.getData(TAB_DRAG_MIME);
-    const position = tabDropPositionForClientX(event.currentTarget, event.clientX);
+    const dropTarget = drag.dragging
+      ? tabDropTargetAtPoint(drag.tabId, event.clientX, event.clientY)
+      : null;
+    const dragged = drag.dragging;
+    tabPointerDragRef.current = null;
     clearTabDragState();
 
-    if (!sourceTabId || sourceTabId === targetTabId) return;
+    if (!dragged) return;
+
+    event.preventDefault();
+    suppressTabClick(drag.tabId);
+    if (!dropTarget) return;
 
     const currentTabs = tabsRef.current;
-    const nextTabs = reorderDocumentTabs(currentTabs, sourceTabId, targetTabId, position);
+    const nextTabs = reorderDocumentTabs(currentTabs, drag.tabId, dropTarget.tabId, dropTarget.position);
     if (sameDocumentTabOrder(currentTabs, nextTabs)) return;
 
     setDocumentTabs(nextTabs);
     showToast("Tab moved");
   }
 
-  function handleTabDragEnd() {
+  function handleTabPointerCancel(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (tabPointerDragRef.current?.pointerId !== event.pointerId) return;
+    tabPointerDragRef.current = null;
     clearTabDragState();
+  }
+
+  function tabDropTargetAtPoint(
+    draggedTabId: string,
+    clientX: number,
+    clientY: number
+  ): { tabId: string; position: DocumentTabDropPosition } | null {
+    const target = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>("[data-tab-id]");
+    const targetTabId = target?.dataset.tabId;
+    if (!target || !targetTabId || targetTabId === draggedTabId) return null;
+    return {
+      tabId: targetTabId,
+      position: tabDropPositionForClientX(target, clientX)
+    };
+  }
+
+  function scrollTabListDuringPointerDrag(clientX: number) {
+    const tabList = tabListRef.current;
+    if (!tabList || tabList.scrollWidth <= tabList.clientWidth) return;
+
+    const rect = tabList.getBoundingClientRect();
+    const edgeSize = Math.min(36, rect.width / 4);
+    if (clientX < rect.left + edgeSize) tabList.scrollBy({ left: -18 });
+    else if (clientX > rect.right - edgeSize) tabList.scrollBy({ left: 18 });
+  }
+
+  function suppressTabClick(tabId: string) {
+    suppressedTabClickRef.current = tabId;
+    window.setTimeout(() => {
+      if (suppressedTabClickRef.current === tabId) suppressedTabClickRef.current = null;
+    }, 0);
+  }
+
+  function selectDocumentTab(tabId: string) {
+    if (suppressedTabClickRef.current === tabId) {
+      suppressedTabClickRef.current = null;
+      return;
+    }
+    switchDocumentTab(tabId);
   }
 
   function clearTabDragState() {
     setDraggedTabId(null);
     setTabDropTarget(null);
-  }
-
-  function isDocumentTabDrag(event: ReactDragEvent<HTMLElement>): boolean {
-    return Boolean(draggedTabId) || Array.from(event.dataTransfer.types).includes(TAB_DRAG_MIME);
   }
 
   function switchRelativeDocumentTab(direction: -1 | 1) {
@@ -7227,14 +7277,18 @@ export function App() {
                 aria-selected={active}
                 aria-grabbed={draggedTabId === tab.id ? true : undefined}
                 data-tab-id={tab.id}
-                draggable={tabs.length > 1}
                 title={tabTitle}
-                onDragStart={(event) => handleTabDragStart(event, tab.id)}
-                onDragOver={(event) => handleTabDragOver(event, tab.id)}
-                onDrop={(event) => handleTabDrop(event, tab.id)}
-                onDragEnd={handleTabDragEnd}
               >
-                <button className="tab-select" type="button" aria-label={tabTitle} onClick={() => switchDocumentTab(tab.id)}>
+                <button
+                  className={tabs.length > 1 ? "tab-select draggable" : "tab-select"}
+                  type="button"
+                  aria-label={tabTitle}
+                  onClick={() => selectDocumentTab(tab.id)}
+                  onPointerDown={(event) => handleTabPointerDown(event, tab.id)}
+                  onPointerMove={handleTabPointerMove}
+                  onPointerUp={handleTabPointerUp}
+                  onPointerCancel={handleTabPointerCancel}
+                >
                   <FileText size={14} />
                   <span>{tabDisplayName}</span>
                   {tabNeedsReview && <AlertTriangle className="tab-review-icon" size={13} aria-label={t("Disk needs review")} />}
