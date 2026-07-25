@@ -34,6 +34,7 @@ import { richMarkdownSourceFromClipboard } from "../lib/richMarkdownPaste";
 import type { Translator } from "../lib/i18n";
 import type { CopyMode } from "../types";
 import { markdownRangeToClipboardPayload } from "../lib/markdown";
+import { beginEditorInput, commitEditorInput, markStartupMilestone } from "../lib/performanceDiagnostics";
 
 const EMPTY_SEARCH_MATCHES: readonly TextRange[] = [];
 
@@ -208,6 +209,10 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
         );
       },
       handleDOMEvents: {
+        beforeinput: () => {
+          beginEditorInput("rich");
+          return false;
+        },
         click: (view, event) => {
           if (!shouldOpenRichLinkOnClick(event)) return false;
 
@@ -311,6 +316,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
     },
     onUpdate: ({ editor: currentEditor }) => {
       if (currentEditor.isDestroyed) return;
+      commitEditorInput("rich");
       lastEditSurfaceRef.current = "body";
       const source = pendingHistoryActionRef.current;
       pendingHistoryActionRef.current = "input";
@@ -326,6 +332,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
     },
     onCreate: ({ editor: currentEditor }) => {
       editorRef.current = currentEditor;
+      markStartupMilestone("rich-editor-ready");
       if (!restoreRichTextSelection(currentEditor, selectionText)) restoreRichSelection(currentEditor, selection);
       reportTableContext(currentEditor, tableActiveRef, onTableContextChangeRef);
       reportTableSelection(currentEditor, tableSelectionRef, onTableSelectionChangeRef);

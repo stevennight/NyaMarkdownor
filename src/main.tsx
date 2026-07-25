@@ -1,8 +1,10 @@
+import "./lib/performanceDiagnostics";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./ui/App";
 import { browserLanguages, createTranslator, resolveAppLocale, translateUiText } from "./lib/i18n";
 import { loadPreferences } from "./lib/preferences";
+import { markStartupMilestone } from "./lib/performanceDiagnostics";
 import "./styles.css";
 
 const startupLocale = resolveAppLocale(loadPreferences().language, browserLanguages());
@@ -51,3 +53,4 @@ createRoot(document.getElementById("root") as HTMLElement).render(
     </AppErrorBoundary>
   </React.StrictMode>
 );
+markStartupMilestone("react-render-scheduled");

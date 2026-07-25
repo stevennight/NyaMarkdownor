@@ -12,9 +12,9 @@ import {
   markdownToHtmlFragment,
   markdownToPlain,
   mermaidSourceLineForOrdinal,
-  referenceLabelsFromMarkdown,
-  renderMarkdown
+  referenceLabelsFromMarkdown
 } from "./markdown";
+import { renderMarkdownPreview as renderMarkdown } from "./markdownPreview";
 import { parseMarkdownTable } from "./tables";
 
 describe("Markdown rendering and clean copy", () => {
@@ -192,6 +192,13 @@ describe("Markdown rendering and clean copy", () => {
       [1, "Setext One", 0, "setext-one"],
       [2, "Setext Two", 3, "setext-two"]
     ]);
+    expect(renderMarkdown([
+      "# Existing ATX",
+      "---",
+      "",
+      "A | B",
+      "---"
+    ].join("\n")).headings.map((heading) => heading.text)).toEqual(["Existing ATX"]);
   });
 
   it("renders safe Markdown table cell line breaks without enabling raw HTML", () => {

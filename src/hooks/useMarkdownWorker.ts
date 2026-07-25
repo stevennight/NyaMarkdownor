@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { Heading } from "../types";
-import { extractHeadings, renderMarkdownHtml } from "../lib/markdown";
+import { extractHeadings } from "../lib/markdownHeadings";
 import type { MarkdownWorkerRequest, MarkdownWorkerResponse } from "../lib/markdownWorkerProtocol";
 import { shouldRequestPreviewRender } from "../lib/renderScheduling";
+import { markStartupMilestone } from "../lib/performanceDiagnostics";
 
 type UseMarkdownWorkerInput = {
   outlineMarkdown: string;
@@ -53,7 +54,15 @@ export function useMarkdownWorker({
     if (!worker) {
       const fallbackTimer = window.setTimeout(() => {
         if (sequenceRef.current !== id) return;
-        renderOnMainThread(id, outlineMarkdown, previewMarkdown, includePreview, lastRenderedPreviewMarkdownRef, setState);
+        void renderOnMainThread(
+          id,
+          outlineMarkdown,
+          previewMarkdown,
+          includePreview,
+          () => sequenceRef.current === id,
+          lastRenderedPreviewMarkdownRef,
+          setState
+        );
       }, 0);
 
       return () => window.clearTimeout(fallbackTimer);
@@ -62,6 +71,7 @@ export function useMarkdownWorker({
     const handleMessage = (event: MessageEvent<MarkdownWorkerResponse>) => {
       const response = event.data;
       if (response.id !== sequenceRef.current) return;
+      markStartupMilestone("markdown-worker-ready");
       if (response.includePreview && !response.error) {
         lastRenderedPreviewMarkdownRef.current = previewMarkdown;
       }
@@ -104,6 +114,7 @@ function getWorker(workerRef: { current: Worker | null }): Worker | null {
 
   try {
     workerRef.current = new Worker(new URL("../workers/markdownWorker.ts", import.meta.url), { type: "module" });
+    markStartupMilestone("markdown-worker-created");
     return workerRef.current;
   } catch (error) {
     console.warn(error);
@@ -111,16 +122,20 @@ function getWorker(workerRef: { current: Worker | null }): Worker | null {
   }
 }
 
-function renderOnMainThread(
+async function renderOnMainThread(
   id: number,
   outlineMarkdown: string,
   previewMarkdown: string,
   includePreview: boolean,
+  isCurrent: () => boolean,
   lastRenderedPreviewMarkdownRef: { current: string | null },
   setState: Dispatch<SetStateAction<MarkdownWorkerState>>
-): void {
+): Promise<void> {
   try {
-    const previewHtml = includePreview ? renderMarkdownHtml(previewMarkdown) : null;
+    const previewModule = includePreview ? await import("../lib/markdownPreview") : null;
+    if (!isCurrent()) return;
+    const previewHtml = previewModule?.renderMarkdownPreviewHtml(previewMarkdown) ?? null;
+    markStartupMilestone("markdown-worker-ready");
     if (includePreview) lastRenderedPreviewMarkdownRef.current = previewMarkdown;
     setState((current) => ({
       headings: extractHeadings(outlineMarkdown),
@@ -130,6 +145,7 @@ function renderOnMainThread(
       error: null
     }));
   } catch (error) {
+    if (!isCurrent()) return;
     setState((current) => ({
       headings: [],
       previewHtml: includePreview ? "" : current.previewHtml,

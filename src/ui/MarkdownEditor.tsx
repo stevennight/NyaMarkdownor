@@ -36,6 +36,7 @@ import {
   sourceEditorSyncDelayFor,
   type SourceEditorSyncScheduler
 } from "../lib/sourceEditorSync";
+import { beginEditorInput, commitEditorInput, markStartupMilestone } from "../lib/performanceDiagnostics";
 
 type EditorSelectionPayload = TextRange & {
   ranges: TextRange[];
@@ -153,6 +154,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
     assignRef(forwardedRef, view);
     onEditorViewChangeRef.current?.(editorSessionKeyRef.current, view);
     reportSelection(view.state, onSelectionChangeRef.current);
+    markStartupMilestone("source-editor-ready");
 
     let scrollFrame: number | null = null;
     let restoreScrollFrame: number | null = null;
@@ -281,8 +283,13 @@ function createEditorExtensions({
           sourceEditorSyncDelayFor(update.state.doc.length)
         );
       }
+      if (update.docChanged) commitEditorInput("source");
     }),
     EditorView.domEventHandlers({
+      beforeinput() {
+        beginEditorInput("source");
+        return false;
+      },
       keydown(event, view) {
         if ((event.key === "Backspace" || event.key === "Delete") && !event.ctrlKey && !event.metaKey && !event.altKey) {
           const edit = applySelectedTableCellsClear(view.state.doc.toString(), view.state.selection.ranges);

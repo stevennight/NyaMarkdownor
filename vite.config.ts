@@ -34,6 +34,9 @@ export default defineConfig({
     }
   },
   envPrefix: ["VITE_", "TAURI_"],
+  worker: {
+    format: "es"
+  },
   build: {
     target: "es2022",
     minify: "esbuild",
@@ -46,6 +49,11 @@ export default defineConfig({
           const moduleId = id.replaceAll("\\", "/");
           if (!moduleId.includes("/node_modules/")) return undefined;
           if (/\/node_modules\/(react|react-dom|scheduler)\//.test(moduleId)) return "vendor-react";
+          if (
+            /\/node_modules\/@codemirror\/(?:autocomplete|lint|lang-css|lang-html|lang-javascript|lang-markdown)\//.test(moduleId)
+            || /\/node_modules\/@lezer\/(?:css|html|javascript|markdown)\//.test(moduleId)
+          ) return "vendor-code-highlight";
+          if (moduleId.includes("/node_modules/@codemirror/merge/")) return "vendor-editor-tools";
           if (moduleId.includes("/node_modules/@codemirror/") || moduleId.includes("/node_modules/@lezer/")) return "vendor-editor";
           if (moduleId.includes("/node_modules/@tiptap/") || moduleId.includes("/node_modules/prosemirror-")) return "vendor-rich-editor";
           if (/\/node_modules\/(markdown-it|linkify-it|mdurl|entities|uc\.micro|punycode)\//.test(moduleId)) return "vendor-markdown";

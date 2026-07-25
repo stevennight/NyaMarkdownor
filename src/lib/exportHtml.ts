@@ -1,4 +1,4 @@
-import { renderMarkdownHtml } from "./markdown";
+import { renderMarkdownPreviewHtml } from "./markdownPreview";
 
 export type HtmlExportOptions = {
   title: string;
@@ -6,7 +6,7 @@ export type HtmlExportOptions = {
 
 export function createExportHtmlDocument(markdown: string, options: HtmlExportOptions): string {
   const title = escapeHtml(options.title.trim() || "Untitled");
-  const body = renderMarkdownHtml(markdown);
+  const body = renderMarkdownPreviewHtml(markdown);
 
   return [
     "<!doctype html>",

@@ -64,7 +64,8 @@ describe("document tab session storage", () => {
 
     expect(saveDocumentTabsRecord([firstTab, secondTab], "tab-b")).toBe(true);
     expect(loadDocumentTabsRecord()).toMatchObject({
-      version: 1,
+      version: 2,
+      editorStateFormat: "document-reference",
       activeTabId: "tab-b",
       tabs: [firstTab, secondTab]
     });
@@ -82,8 +83,9 @@ describe("document tab session storage", () => {
     const record = createDocumentTabsRecord([firstTab, secondTab], "missing-tab", 123);
 
     expect(record).toEqual({
-      version: 1,
+      version: 2,
       tableCellBreakFormat: "html",
+      editorStateFormat: "document-reference",
       savedAt: 123,
       activeTabId: "tab-a",
       tabs: [firstTab, secondTab]
@@ -133,8 +135,9 @@ describe("document tab session storage", () => {
     });
 
     expect(parseDocumentTabsRecord(raw)).toEqual({
-      version: 1,
+      version: 2,
       tableCellBreakFormat: "html",
+      editorStateFormat: "document-reference",
       savedAt: 321,
       activeTabId: "restored-tab-3",
       tabs: [{
@@ -228,20 +231,53 @@ describe("document tab session storage", () => {
     expect(record?.tabs[0].document.filePath).toBeNull();
   });
 
-  it("persists matching editor state snapshots with restored tabs", () => {
+  it("stores v2 editor snapshots by document reference and restores selection and history", () => {
+    const storage = createStorageMock();
+    vi.stubGlobal("localStorage", storage);
     const editorStateSnapshot = {
       doc: "# Notes",
       selection: { ranges: [{ anchor: 2, head: 2 }], main: 0 },
       history: { done: [], undone: [] },
       scrollProgress: 0.25
     };
-    const record = createDocumentTabsRecord([{
+    expect(saveDocumentTabsRecord([{
       ...firstTab,
       editorStateSnapshot
-    }], "tab-a", 789);
+    }], "tab-a")).toBe(true);
 
-    expect(record.tabs[0].editorStateSnapshot).toEqual(editorStateSnapshot);
-    expect(parseDocumentTabsRecord(JSON.stringify(record))?.tabs[0].editorStateSnapshot).toEqual(editorStateSnapshot);
+    const serialized = vi.mocked(storage.setItem).mock.calls.at(-1)?.[1];
+    expect(serialized).toEqual(expect.any(String));
+    const stored = JSON.parse(serialized ?? "");
+    expect(stored).toMatchObject({
+      version: 2,
+      tableCellBreakFormat: "html",
+      editorStateFormat: "document-reference"
+    });
+    expect(stored.tabs[0].editorStateSnapshot).not.toHaveProperty("doc");
+    expect(serialized?.match(/# Notes/g)).toHaveLength(1);
+    expect(parseDocumentTabsRecord(serialized ?? "")?.tabs[0].editorStateSnapshot).toEqual(editorStateSnapshot);
+  });
+
+  it("restores embedded editor snapshots from v1 records", () => {
+    const editorStateSnapshot = {
+      doc: "# Notes",
+      selection: { ranges: [{ anchor: 3, head: 3 }], main: 0 },
+      history: { done: [{ changes: [] }], undone: [] },
+      scrollProgress: 0.5
+    };
+    const restored = parseDocumentTabsRecord(JSON.stringify({
+      version: 1,
+      tableCellBreakFormat: "html",
+      savedAt: 788,
+      activeTabId: "tab-a",
+      tabs: [{ ...firstTab, editorStateSnapshot }]
+    }));
+
+    expect(restored).toMatchObject({
+      version: 2,
+      editorStateFormat: "document-reference"
+    });
+    expect(restored?.tabs[0].editorStateSnapshot).toEqual(editorStateSnapshot);
   });
 
   it("persists normalized visual-editor scroll progress with restored tabs", () => {

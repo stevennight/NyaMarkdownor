@@ -17,12 +17,24 @@ export type DocumentTabState = {
 };
 
 export type DocumentTabsRecord = {
-  version: 1;
+  version: 2;
   tableCellBreakFormat: "html";
+  editorStateFormat: "document-reference";
   savedAt: number;
   activeTabId: string;
   tabs: DocumentTabState[];
 };
+
+type StoredDocumentTabsRecord = {
+  version: 1 | 2;
+  tableCellBreakFormat?: unknown;
+  editorStateFormat?: unknown;
+  savedAt?: unknown;
+  activeTabId?: unknown;
+  tabs?: unknown;
+};
+
+type EditorStateStorageFormat = "embedded-document" | "document-reference";
 
 export type LiveEditorTabState = {
   tabId: string | null;
@@ -72,7 +84,11 @@ function saveDocumentTabsRecordLocal(serialized: string): boolean {
 }
 
 function serializeDocumentTabsRecord(tabs: DocumentTabState[], activeTabId: string): string {
-  return JSON.stringify(createDocumentTabsRecord(tabs, activeTabId));
+  const record = createDocumentTabsRecord(tabs, activeTabId);
+  return JSON.stringify({
+    ...record,
+    tabs: documentTabsWithReferencedEditorState(record.tabs)
+  });
 }
 
 export async function loadDesktopDocumentTabsRecord(): Promise<DocumentTabsRecord | null> {
@@ -95,18 +111,23 @@ export function createDocumentTabsRecord(
     : normalizedTabs[0]?.id ?? "";
 
   return {
-    version: 1,
+    version: 2,
     tableCellBreakFormat: "html",
+    editorStateFormat: "document-reference",
     savedAt,
     activeTabId: active,
-    tabs: normalizedTabs
+    tabs: documentTabsWithReferencedEditorState(normalizedTabs)
   };
 }
 
-function tabsForPersistence(tabs: DocumentTabState[], activeTabId: string): DocumentTabState[] {
+function tabsForPersistence(tabs: unknown[], activeTabId: string): unknown[] {
   if (tabs.length <= MAX_PERSISTED_TABS) return tabs;
 
-  const activeIndex = tabs.findIndex((tab) => tab.id === activeTabId);
+  const activeIndex = tabs.findIndex((tab) => (
+    Boolean(tab)
+    && typeof tab === "object"
+    && (tab as { id?: unknown }).id === activeTabId
+  ));
   if (activeIndex < 0) return tabs.slice(0, MAX_PERSISTED_TABS);
 
   const beforeActiveTarget = Math.floor(MAX_PERSISTED_TABS / 2);
@@ -169,24 +190,53 @@ export function parseDocumentTabsRecord(raw: string): DocumentTabsRecord | null 
 
 function normalizeDocumentTabsRecord(value: unknown): DocumentTabsRecord | null {
   if (!value || typeof value !== "object") return null;
-  const record = value as Partial<DocumentTabsRecord>;
-  if (record.version !== 1 || typeof record.savedAt !== "number" || !Number.isFinite(record.savedAt)) return null;
+  const record = value as StoredDocumentTabsRecord;
+  if (record.version !== 1 && record.version !== 2) return null;
+  if (typeof record.savedAt !== "number" || !Number.isFinite(record.savedAt)) return null;
   if (typeof record.activeTabId !== "string" || !Array.isArray(record.tabs)) return null;
+  if (
+    record.version === 2
+    && (
+      record.tableCellBreakFormat !== "html"
+      || record.editorStateFormat !== "document-reference"
+    )
+  ) return null;
 
-  return createDocumentTabsRecord(
-    record.tabs,
-    record.activeTabId,
-    record.savedAt,
-    record.tableCellBreakFormat !== "html"
+  const normalizedTabs = normalizeDocumentTabs(
+    tabsForPersistence(record.tabs, record.activeTabId),
+    record.version === 1 && record.tableCellBreakFormat !== "html",
+    record.version === 2 ? "document-reference" : "embedded-document"
   );
+  const active = normalizedTabs.some((tab) => tab.id === record.activeTabId)
+    ? record.activeTabId
+    : normalizedTabs[0]?.id ?? "";
+
+  return {
+    version: 2,
+    tableCellBreakFormat: "html",
+    editorStateFormat: "document-reference",
+    savedAt: record.savedAt,
+    activeTabId: active,
+    tabs: normalizedTabs
+  };
 }
 
-function normalizeDocumentTabs(value: unknown[], migrateLegacyTableCellBreaks = false): DocumentTabState[] {
+function normalizeDocumentTabs(
+  value: unknown[],
+  migrateLegacyTableCellBreaks = false,
+  editorStateStorageFormat: EditorStateStorageFormat = "embedded-document"
+): DocumentTabState[] {
   const usedIds = new Set<string>();
   const tabs: DocumentTabState[] = [];
 
   for (const [index, item] of value.entries()) {
-    const tab = normalizeDocumentTab(item, index, usedIds, migrateLegacyTableCellBreaks);
+    const tab = normalizeDocumentTab(
+      item,
+      index,
+      usedIds,
+      migrateLegacyTableCellBreaks,
+      editorStateStorageFormat
+    );
     if (!tab) continue;
     usedIds.add(tab.id);
     tabs.push(tab);
@@ -200,13 +250,17 @@ function normalizeDocumentTab(
   value: unknown,
   index: number,
   usedIds: Set<string>,
-  migrateLegacyTableCellBreaks = false
+  migrateLegacyTableCellBreaks = false,
+  editorStateStorageFormat: EditorStateStorageFormat = "embedded-document"
 ): DocumentTabState | null {
   if (!value || typeof value !== "object") return null;
   const tab = value as Partial<DocumentTabState>;
   const document = normalizeDraftDocument(tab.document, migrateLegacyTableCellBreaks);
   if (!document) return null;
-  const editorStateSnapshot = normalizeStoredEditorStateSnapshot(tab.editorStateSnapshot, document.markdown);
+  const snapshotValue = editorStateStorageFormat === "document-reference"
+    ? editorStateSnapshotWithDocument(tab.editorStateSnapshot, document.markdown)
+    : tab.editorStateSnapshot;
+  const editorStateSnapshot = normalizeStoredEditorStateSnapshot(snapshotValue, document.markdown);
   const richScrollProgress = normalizeRichScrollProgress(tab.richScrollProgress);
   const richSelection = normalizeRichSelection(tab.richSelection);
 
@@ -217,6 +271,25 @@ function normalizeDocumentTab(
     ...(richScrollProgress !== undefined ? { richScrollProgress } : {}),
     ...(richSelection ? { richSelection } : {}),
     createdAt: typeof tab.createdAt === "number" && Number.isFinite(tab.createdAt) ? tab.createdAt : 0
+  };
+}
+
+function documentTabsWithReferencedEditorState(tabs: DocumentTabState[]): DocumentTabState[] {
+  return tabs.map((tab) => {
+    if (!tab.editorStateSnapshot) return tab;
+    const { doc: _documentReference, ...editorStateSnapshot } = tab.editorStateSnapshot;
+    return {
+      ...tab,
+      editorStateSnapshot
+    };
+  });
+}
+
+function editorStateSnapshotWithDocument(value: unknown, markdown: string): unknown {
+  if (!value || typeof value !== "object") return value;
+  return {
+    ...value,
+    doc: markdown
   };
 }
 

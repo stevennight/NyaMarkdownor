@@ -1,5 +1,5 @@
 import MarkdownIt from "markdown-it";
-import type { Heading, MarkdownTable, RenderedMarkdown, TableBlock } from "../types";
+import type { MarkdownTable, RenderedMarkdown, TableBlock } from "../types";
 import { protectTableCellLineBreaks, restoreTableCellLineBreaks, stripInlineMarkdown, stripTableCellMarkdown } from "./text";
 import { buildMarkdownTable, parseMarkdownTable } from "./tables";
 import { slugifyHeadingText } from "./headingIds";
@@ -9,9 +9,15 @@ import { tableCellBoundaryRange, unescapedPipeIndexes } from "./tableSourceRange
 import { normalizeTextRanges } from "./textRanges";
 import { clampSelectionRangesToTableBlock, tableBlockForSelectionRanges } from "./tableSelectionRanges";
 import { splitMarkdownFrontMatter } from "./markdownFrontMatter";
-import { highlightCodeHtml } from "./codeHighlight";
 import { projectMalformedMarkdownTables } from "./markdownTableProjection";
 import { isMermaidLanguage } from "./mermaidLanguage";
+import { extractHeadings } from "./markdownHeadings";
+
+export { extractHeadings } from "./markdownHeadings";
+
+export type MarkdownHtmlRenderOptions = {
+  highlightCode?: (code: string, language: string | null | undefined) => string;
+};
 
 const markdownIt = new MarkdownIt({
   html: false,
@@ -41,6 +47,7 @@ type SelectedTableRow = {
 type MarkdownRenderEnv = {
   headingIds?: Map<string, number>;
   sourceLineOffset?: number;
+  highlightCode?: MarkdownHtmlRenderOptions["highlightCode"];
 };
 
 markdownIt.core.ruler.after("inline", "nya_task_lists", (state) => {
@@ -145,7 +152,8 @@ markdownIt.renderer.rules.fence = (tokens, index, options, env, self) => {
   const languageAttribute = language ? ` data-language="${escapeHtmlText(language)}"` : "";
   const classAttribute = language ? ` class="language-${escapeHtmlText(language)}"` : "";
   const sourceLineAttribute = mermaidSourceLineAttribute(language, token.map, env as MarkdownRenderEnv);
-  return `<pre${languageAttribute}${sourceLineAttribute}><code${classAttribute}>${highlightCodeHtml(token.content, language)}</code></pre>\n`;
+  const highlighted = (env as MarkdownRenderEnv).highlightCode?.(token.content, language) ?? escapeHtmlText(token.content);
+  return `<pre${languageAttribute}${sourceLineAttribute}><code${classAttribute}>${highlighted}</code></pre>\n`;
 };
 
 export function renderMarkdown(markdown: string): RenderedMarkdown {
@@ -155,9 +163,9 @@ export function renderMarkdown(markdown: string): RenderedMarkdown {
   };
 }
 
-export function renderMarkdownHtml(markdown: string): string {
+export function renderMarkdownHtml(markdown: string, options: MarkdownHtmlRenderOptions = {}): string {
   const { frontMatter, body } = splitMarkdownFrontMatter(markdown);
-  return `${renderFrontMatterPreview(frontMatter)}${renderMarkdownFragment(body, frontMatterLineCount(frontMatter))}`;
+  return `${renderFrontMatterPreview(frontMatter)}${renderMarkdownFragment(body, frontMatterLineCount(frontMatter), options)}`;
 }
 
 export function mermaidSourceLineForOrdinal(markdown: string, ordinal: number): number | null {
@@ -181,10 +189,15 @@ export function markdownToHtmlFragment(markdown: string): string {
   return renderMarkdownFragment(markdown, 0).trim();
 }
 
-function renderMarkdownFragment(markdown: string, sourceLineOffset: number): string {
+function renderMarkdownFragment(
+  markdown: string,
+  sourceLineOffset: number,
+  options: MarkdownHtmlRenderOptions = {}
+): string {
   return markdownIt.render(projectMalformedMarkdownTables(markdown), {
     headingIds: new Map<string, number>(),
-    sourceLineOffset
+    sourceLineOffset,
+    highlightCode: options.highlightCode
   });
 }
 
@@ -701,59 +714,8 @@ type TokenLike = {
   attrGet: (name: string) => string | null;
 };
 
-export function extractHeadings(markdown: string): Heading[] {
-  const used = new Map<string, number>();
-  const headings: Heading[] = [];
-  let fence: CodeFence | null = null;
-  const { frontMatter, body } = splitMarkdownFrontMatter(markdown);
-  const bodyLineOffset = frontMatterLineCount(frontMatter);
-  const lines = body.replace(/\r\n?/g, "\n").split("\n");
-
-  for (let lineNumber = 0; lineNumber < lines.length; lineNumber += 1) {
-    const line = lines[lineNumber];
-
-    if (fence) {
-      if (closesCodeFence(line, fence)) fence = null;
-      continue;
-    }
-
-    const openingFence = openingCodeFence(line);
-    if (openingFence) {
-      fence = openingFence;
-      continue;
-    }
-
-    const atxMatch = line.match(/^ {0,3}(#{1,6})(?:[ \t]+|$)(.*?)\s*(?:[ \t]+#+[ \t]*)?$/);
-    if (atxMatch) {
-      pushHeading(headings, used, atxMatch[1].length, stripInlineMarkdown(atxMatch[2]), lineNumber + bodyLineOffset);
-      continue;
-    }
-
-    const setextLevel = setextHeadingLevel(line);
-    const previousLine = lines[lineNumber - 1];
-    if (setextLevel && previousLine !== undefined && isSetextHeadingTextLine(previousLine)) {
-      pushHeading(headings, used, setextLevel, stripInlineMarkdown(previousLine).trim(), lineNumber - 1 + bodyLineOffset);
-    }
-  }
-
-  return headings;
-}
-
 function frontMatterLineCount(frontMatter: string): number {
   return frontMatter.match(/\n/g)?.length ?? 0;
-}
-
-function pushHeading(headings: Heading[], used: Map<string, number>, level: number, text: string, line: number): void {
-  const base = slugifyHeadingText(text);
-  const count = used.get(base) ?? 0;
-  used.set(base, count + 1);
-
-  headings.push({
-    level,
-    text,
-    line,
-    id: count === 0 ? base : `${base}-${count}`
-  });
 }
 
 function nextHeadingId(text: string, env: MarkdownRenderEnv): string {

@@ -1,4 +1,4 @@
-import { extractHeadings } from "./markdown";
+import { extractHeadings } from "./markdownHeadings";
 import type { Heading } from "../types";
 
 export type MarkdownOutlineCache = {

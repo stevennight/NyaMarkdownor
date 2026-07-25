@@ -204,7 +204,6 @@ import {
 } from "../lib/manualPreviewSnapshots";
 import { diskChangeKind, diskNeedsReview } from "../lib/fileStats";
 import { getDocumentCursorPosition, getDocumentMetrics, type DocumentCursorPosition } from "../lib/documentMetrics";
-import { createExportHtmlDocument } from "../lib/exportHtml";
 import { getScrollProgress, setScrollProgress } from "../lib/scrollSync";
 import { createEditorStateSnapshot, type EditorStateSnapshot } from "../lib/editorStateSnapshots";
 import { rewritePreviewImageSources } from "../lib/previewAssets";
@@ -289,18 +288,14 @@ import { tableActionContextFromSelection, type TableActionContext } from "../lib
 import { shouldQueueAutoSave, shouldRetryAutoSave } from "../lib/autoSave";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useMarkdownWorker } from "../hooks/useMarkdownWorker";
-import { CommandPalette } from "./CommandPalette";
-import { SettingsDialog } from "./SettingsDialog";
-import { FileHistoryManagerDialog, type FileHistoryVersionDeleteResult } from "./FileHistoryManagerDialog";
-import { BackupCompareDialog } from "./BackupCompareDialog";
-import { FindReplacePanel } from "./FindReplacePanel";
-import { InsertTableDialog, type TableSizeDraft } from "./InsertTableDialog";
-import { LinkDialog } from "./LinkDialog";
+import type { FileHistoryVersionDeleteResult } from "./FileHistoryManagerDialog";
+import type { TableSizeDraft } from "./InsertTableDialog";
 import { type CommandItem } from "../lib/commands";
 import { loadDesktopPreferencesRecord, loadPreferences, loadPreferencesRecord, normalizeBackupPreferences, savePreferences } from "../lib/preferences";
 import { normalizeRichLinkHref } from "../lib/richLinks";
 import { viewMenuFocusIndex, type ViewMenuFocusDirection } from "../lib/viewMenuNavigation";
 import { closeWindowAfterRecovery, shouldBlockBrowserUnload } from "../lib/windowClose";
+import { markStartupMilestone, measurePerformance, measurePerformanceAsync } from "../lib/performanceDiagnostics";
 import { browserLanguages, createTranslator, resolveAppLocale, translateUiText, type Translator } from "../lib/i18n";
 import { loadDesktopWorkspaceRootRecord, loadWorkspaceRoot, loadWorkspaceRootRecord, saveWorkspaceRoot } from "../lib/workspaceRoot";
 import { defaultPaneLayout, paneLayoutCssVariables, resizeEditorPreviewPaneLayout, resizeTablePaneLayout } from "../lib/paneLayout";
@@ -325,6 +320,41 @@ import {
 const RichMarkdownEditor = lazy(async () => {
   const module = await import("./RichMarkdownEditor");
   return { default: module.RichMarkdownEditor };
+});
+
+const CommandPalette = lazy(async () => {
+  const module = await import("./CommandPalette");
+  return { default: module.CommandPalette };
+});
+
+const SettingsDialog = lazy(async () => {
+  const module = await import("./SettingsDialog");
+  return { default: module.SettingsDialog };
+});
+
+const FileHistoryManagerDialog = lazy(async () => {
+  const module = await import("./FileHistoryManagerDialog");
+  return { default: module.FileHistoryManagerDialog };
+});
+
+const BackupCompareDialog = lazy(async () => {
+  const module = await import("./BackupCompareDialog");
+  return { default: module.BackupCompareDialog };
+});
+
+const FindReplacePanel = lazy(async () => {
+  const module = await import("./FindReplacePanel");
+  return { default: module.FindReplacePanel };
+});
+
+const InsertTableDialog = lazy(async () => {
+  const module = await import("./InsertTableDialog");
+  return { default: module.InsertTableDialog };
+});
+
+const LinkDialog = lazy(async () => {
+  const module = await import("./LinkDialog");
+  return { default: module.LinkDialog };
 });
 
 const LEGACY_SAMPLE_MARKDOWN = `# NyaMarkdownor
@@ -582,6 +612,10 @@ export function App() {
   const automaticUpdateCheckStartedRef = useRef(false);
   const updateInstallInFlightRef = useRef(false);
   const promptedUpdateVersionRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    markStartupMilestone("app-committed");
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -909,7 +943,10 @@ export function App() {
       } catch (error) {
         console.warn(error);
       } finally {
-        if (!cancelled) setDesktopProfileReady(true);
+        if (!cancelled) {
+          markStartupMilestone("desktop-profile-ready");
+          setDesktopProfileReady(true);
+        }
       }
     }
 
@@ -1125,6 +1162,25 @@ export function App() {
         const filePath = document.filePath;
         if (!filePath) return { tab, externalReview: null as ExternalDiskReviewState | null, hasExternalChange: false };
 
+        let currentStats: MarkdownFileStats | null | undefined;
+        try {
+          currentStats = await existingMarkdownFileStats(filePath);
+        } catch (error) {
+          console.warn(error);
+        }
+
+        if (
+          currentStats
+          && document.fileStats
+          && !diskNeedsReview(document.fileStats, currentStats)
+        ) {
+          return { tab, externalReview: null as ExternalDiskReviewState | null, hasExternalChange: false };
+        }
+
+        if (currentStats === null) {
+          return { tab, externalReview: null as ExternalDiskReviewState | null, hasExternalChange: true };
+        }
+
         try {
           const diskFile = await readMarkdownPath(filePath);
           if (!diskFile.fileStats) {
@@ -1319,7 +1375,10 @@ export function App() {
       } catch (error) {
         console.warn(error);
       } finally {
-        if (!cancelled) setDesktopRecoveryReady(true);
+        if (!cancelled) {
+          markStartupMilestone("desktop-recovery-ready");
+          setDesktopRecoveryReady(true);
+        }
       }
     }
 
@@ -1383,10 +1442,12 @@ export function App() {
     const elapsed = Date.now() - lastWorkRecoveryPersistedAtRef.current;
     const delay = elapsed >= WORK_RECOVERY_MAX_DELAY_MS ? 0 : WORK_RECOVERY_IDLE_MS;
     const timer = window.setTimeout(() => {
-      const { tabs: currentTabs, activeTabId: currentActiveTabId } = currentTabSessionForRecovery();
-      saveDocumentTabsRecord(currentTabs, currentActiveTabId);
-      saveDraftDocument(activeDocumentFromSession({ tabs: currentTabs, activeTabId: currentActiveTabId }) ?? documentState);
-      lastWorkRecoveryPersistedAtRef.current = Date.now();
+      measurePerformance("recovery-persist", () => {
+        const { tabs: currentTabs, activeTabId: currentActiveTabId } = currentTabSessionForRecovery();
+        saveDocumentTabsRecord(currentTabs, currentActiveTabId);
+        saveDraftDocument(activeDocumentFromSession({ tabs: currentTabs, activeTabId: currentActiveTabId }) ?? documentState);
+        lastWorkRecoveryPersistedAtRef.current = Date.now();
+      });
     }, delay);
 
     return () => window.clearTimeout(timer);
@@ -4653,11 +4714,12 @@ export function App() {
   async function exportHtmlDocument() {
     const document = currentActiveDocumentTabForCommand().document;
     const displayName = displayMarkdownDocumentName(document);
-    const html = createExportHtmlDocument(document.markdown, {
-      title: removeMarkdownFileExtension(displayName)
-    });
     let saved: SavedExport | null = null;
     try {
+      const { createExportHtmlDocument } = await import("../lib/exportHtml");
+      const html = createExportHtmlDocument(document.markdown, {
+        title: removeMarkdownFileExtension(displayName)
+      });
       saved = await saveHtmlExport(html, displayName);
     } catch (error) {
       console.warn(error);
@@ -4735,8 +4797,8 @@ export function App() {
   function documentTabsWithMountedEditorState(currentTabs: DocumentTab[]): DocumentTab[] {
     const view = editorViewRef.current;
     const viewTabId = editorViewTabIdRef.current;
-    const viewMarkdown = view && viewTabId ? view.state.doc.toString() : undefined;
     const viewSnapshot = view && viewTabId ? createEditorStateSnapshot(view.state, getScrollProgress(view.scrollDOM)) : undefined;
+    const viewMarkdown = typeof viewSnapshot?.doc === "string" ? viewSnapshot.doc : undefined;
 
     return documentTabsWithLiveEditorState(currentTabs, {
       tabId: viewTabId,
@@ -4763,14 +4825,16 @@ export function App() {
   }
 
   async function persistWindowCloseRecovery(): Promise<void> {
-    const { tabs: currentTabs, activeTabId: currentActiveTabId } = currentTabSessionForRecovery();
-    const activeDocument = activeDocumentFromSession({ tabs: currentTabs, activeTabId: currentActiveTabId }) ?? documentStateRef.current;
+    await measurePerformanceAsync("recovery-persist-immediate", async () => {
+      const { tabs: currentTabs, activeTabId: currentActiveTabId } = currentTabSessionForRecovery();
+      const activeDocument = activeDocumentFromSession({ tabs: currentTabs, activeTabId: currentActiveTabId }) ?? documentStateRef.current;
 
-    await Promise.all([
-      saveDocumentTabsRecordImmediately(currentTabs, currentActiveTabId),
-      saveDraftDocumentImmediately(activeDocument)
-    ]);
-    lastWorkRecoveryPersistedAtRef.current = Date.now();
+      await Promise.all([
+        saveDocumentTabsRecordImmediately(currentTabs, currentActiveTabId),
+        saveDraftDocumentImmediately(activeDocument)
+      ]);
+      lastWorkRecoveryPersistedAtRef.current = Date.now();
+    });
   }
 
   async function createLocalSnapshot() {
@@ -8223,131 +8287,157 @@ export function App() {
       )}
 
       <div className={toast ? "toast show" : "toast"}>{toast}</div>
-      <FindReplacePanel
-        open={findOpen}
-        query={findQuery}
-        replacement={replaceValue}
-        replaceVisible={replaceVisible}
-        caseSensitive={findCaseSensitive}
-        wholeWord={findWholeWord}
-        matchCount={findMatches.length}
-        activeIndex={activeFindIndex}
-        t={t}
-        onQueryChange={handleFindQueryChange}
-        onReplacementChange={setReplaceValue}
-        onReplaceVisibleChange={setReplaceVisible}
-        onCaseSensitiveChange={handleFindCaseSensitiveChange}
-        onWholeWordChange={handleFindWholeWordChange}
-        onNext={() => goToFindMatch("next")}
-        onPrevious={() => goToFindMatch("previous")}
-        onReplace={replaceCurrentFindMatch}
-        onReplaceAll={replaceAllFindMatches}
-        onClose={closeFindPanel}
-      />
-      <CommandPalette
-        open={commandPaletteOpen}
-        commands={commands}
-        locale={locale}
-        placeholder={t(workspace || recentFiles.length > 0 ? "Run command or open file..." : "Run command...")}
-        onClose={() => setCommandPaletteOpen(false)}
-      />
-      <InsertTableDialog
-        open={tableSizeDialogOpen}
-        value={tableSizeDraft}
-        t={t}
-        onChange={(value) => setTableSizeDraft(normalizeTableSizeDraft(value))}
-        onClose={() => setTableSizeDialogOpen(false)}
-        onInsert={insertSizedTable}
-      />
-      <LinkDialog
-        open={Boolean(linkDialogState)}
-        initialHref={linkDialogState?.href ?? ""}
-        canUnlink={linkDialogState?.canUnlink ?? false}
-        t={t}
-        onClose={() => setLinkDialogState(null)}
-        onApply={applyRichLink}
-        onUnlink={removeRichLink}
-      />
-      <BackupCompareDialog
-        open={backupComparison !== null}
-        fileName={backupComparison?.currentName ?? ""}
-        backupMarkdown={backupComparison?.versionMarkdown ?? ""}
-        currentMarkdown={backupComparison?.currentMarkdown ?? ""}
-        backupLabel={backupComparison?.versionLabel}
-        currentLabel={backupComparison?.currentLabel ?? backupComparison?.currentName}
-        versionTitle={backupComparison?.versionTitle}
-        currentTitle={backupComparison?.currentTitle}
-        actionLabel={backupComparison?.actionLabel}
-        actionIcon={backupComparison?.actionIcon}
-        showAction={backupComparison?.showAction}
-        restoreDisabled={backupComparison?.restoreDisabled}
-        t={t}
-        onClose={() => setBackupComparison(null)}
-        onRestore={() => {
-          const comparison = backupComparison;
-          if (!comparison) return;
-          setBackupComparison(null);
-          comparison.restore();
-        }}
-      />
-      <FileHistoryManagerDialog
-        open={historyManagerOpen}
-        documents={historyDocuments}
-        loading={backupHistoriesLoading || historySourceStatesLoading}
-        t={t}
-        onClose={() => setHistoryManagerOpen(false)}
-        onLoadDiskVersions={loadManagedFileHistoryVersions}
-        onOpenDiskVersion={openManagedDiskVersionAsDraft}
-        onOpenSnapshot={openManagedSnapshotAsDraft}
-        onCompareVersions={compareManagedHistoryVersions}
-        onDeleteDocument={deleteManagedFileHistory}
-        onDeleteDocuments={deleteManagedFileHistories}
-        onDeleteDiskVersion={deleteManagedDiskVersion}
-        onDeleteSnapshot={deleteDraftSnapshot}
-        onDeleteVersions={deleteManagedVersions}
-      />
-      <SettingsDialog
-        open={settingsOpen}
-        viewMode={viewMode}
-        theme={theme}
-        language={language}
-        sidebarVisible={sidebarVisible}
-        autoSave={autoSave}
-        autoSaveAvailable={desktopRuntime}
-        fileAssociationsAvailable={desktopRuntime}
-        copyMode={copyMode}
-        softSyntax={softSyntax}
-        editorFontSize={editorFontSize}
-        editorContentWidth={editorContentWidth}
-        editorDensity={editorDensity}
-        tableHeightMode={tableHeightMode}
-        tableMaxHeightVh={tableMaxHeightVh}
-        backupPreferences={backupPreferences}
-        backupDirectoryAvailable={desktopRuntime}
-        buildInfo={buildInfo}
-        applicationUpdate={applicationUpdate}
-        t={t}
-        onClose={() => setSettingsOpen(false)}
-        onViewModeChange={setViewMode}
-        onThemeChange={setThemeState}
-        onLanguageChange={setLanguageState}
-        onSidebarVisibleChange={setSidebarVisible}
-        onAutoSaveChange={setAutoSave}
-        onManageFileAssociation={manageFileAssociations}
-        onCopyModeChange={setCopyMode}
-        onSoftSyntaxChange={setSoftSyntax}
-        onEditorFontSizeChange={setEditorFontSize}
-        onEditorContentWidthChange={setEditorContentWidth}
-        onEditorDensityChange={setEditorDensity}
-        onTableHeightModeChange={setTableHeightMode}
-        onTableMaxHeightVhChange={setTableMaxHeightVh}
-        onChooseBackupDirectory={() => void chooseBackupDirectory()}
-        onResetBackupDirectory={resetBackupDirectory}
-        onBackupPreferencesChange={(value) => setBackupPreferencesState(normalizeBackupPreferences(value))}
-        onCheckForUpdates={() => void checkApplicationUpdates(true)}
-        onInstallUpdate={(version) => void installApplicationUpdate(version)}
-        onOpenReleasePage={() => void openApplicationReleasePage()}
-      />
+      {findOpen && (
+        <Suspense fallback={null}>
+          <FindReplacePanel
+            open
+            query={findQuery}
+            replacement={replaceValue}
+            replaceVisible={replaceVisible}
+            caseSensitive={findCaseSensitive}
+            wholeWord={findWholeWord}
+            matchCount={findMatches.length}
+            activeIndex={activeFindIndex}
+            t={t}
+            onQueryChange={handleFindQueryChange}
+            onReplacementChange={setReplaceValue}
+            onReplaceVisibleChange={setReplaceVisible}
+            onCaseSensitiveChange={handleFindCaseSensitiveChange}
+            onWholeWordChange={handleFindWholeWordChange}
+            onNext={() => goToFindMatch("next")}
+            onPrevious={() => goToFindMatch("previous")}
+            onReplace={replaceCurrentFindMatch}
+            onReplaceAll={replaceAllFindMatches}
+            onClose={closeFindPanel}
+          />
+        </Suspense>
+      )}
+      {commandPaletteOpen && (
+        <Suspense fallback={null}>
+          <CommandPalette
+            open
+            commands={commands}
+            locale={locale}
+            placeholder={t(workspace || recentFiles.length > 0 ? "Run command or open file..." : "Run command...")}
+            onClose={() => setCommandPaletteOpen(false)}
+          />
+        </Suspense>
+      )}
+      {tableSizeDialogOpen && (
+        <Suspense fallback={null}>
+          <InsertTableDialog
+            open
+            value={tableSizeDraft}
+            t={t}
+            onChange={(value) => setTableSizeDraft(normalizeTableSizeDraft(value))}
+            onClose={() => setTableSizeDialogOpen(false)}
+            onInsert={insertSizedTable}
+          />
+        </Suspense>
+      )}
+      {linkDialogState && (
+        <Suspense fallback={null}>
+          <LinkDialog
+            open
+            initialHref={linkDialogState.href}
+            canUnlink={linkDialogState.canUnlink}
+            t={t}
+            onClose={() => setLinkDialogState(null)}
+            onApply={applyRichLink}
+            onUnlink={removeRichLink}
+          />
+        </Suspense>
+      )}
+      {backupComparison && (
+        <Suspense fallback={null}>
+          <BackupCompareDialog
+            open
+            fileName={backupComparison.currentName}
+            backupMarkdown={backupComparison.versionMarkdown}
+            currentMarkdown={backupComparison.currentMarkdown}
+            backupLabel={backupComparison.versionLabel}
+            currentLabel={backupComparison.currentLabel ?? backupComparison.currentName}
+            versionTitle={backupComparison.versionTitle}
+            currentTitle={backupComparison.currentTitle}
+            actionLabel={backupComparison.actionLabel}
+            actionIcon={backupComparison.actionIcon}
+            showAction={backupComparison.showAction}
+            restoreDisabled={backupComparison.restoreDisabled}
+            t={t}
+            onClose={() => setBackupComparison(null)}
+            onRestore={() => {
+              setBackupComparison(null);
+              backupComparison.restore();
+            }}
+          />
+        </Suspense>
+      )}
+      {historyManagerOpen && (
+        <Suspense fallback={null}>
+          <FileHistoryManagerDialog
+            open
+            documents={historyDocuments}
+            loading={backupHistoriesLoading || historySourceStatesLoading}
+            t={t}
+            onClose={() => setHistoryManagerOpen(false)}
+            onLoadDiskVersions={loadManagedFileHistoryVersions}
+            onOpenDiskVersion={openManagedDiskVersionAsDraft}
+            onOpenSnapshot={openManagedSnapshotAsDraft}
+            onCompareVersions={compareManagedHistoryVersions}
+            onDeleteDocument={deleteManagedFileHistory}
+            onDeleteDocuments={deleteManagedFileHistories}
+            onDeleteDiskVersion={deleteManagedDiskVersion}
+            onDeleteSnapshot={deleteDraftSnapshot}
+            onDeleteVersions={deleteManagedVersions}
+          />
+        </Suspense>
+      )}
+      {settingsOpen && (
+        <Suspense fallback={null}>
+          <SettingsDialog
+            open
+            viewMode={viewMode}
+            theme={theme}
+            language={language}
+            sidebarVisible={sidebarVisible}
+            autoSave={autoSave}
+            autoSaveAvailable={desktopRuntime}
+            fileAssociationsAvailable={desktopRuntime}
+            copyMode={copyMode}
+            softSyntax={softSyntax}
+            editorFontSize={editorFontSize}
+            editorContentWidth={editorContentWidth}
+            editorDensity={editorDensity}
+            tableHeightMode={tableHeightMode}
+            tableMaxHeightVh={tableMaxHeightVh}
+            backupPreferences={backupPreferences}
+            backupDirectoryAvailable={desktopRuntime}
+            buildInfo={buildInfo}
+            applicationUpdate={applicationUpdate}
+            t={t}
+            onClose={() => setSettingsOpen(false)}
+            onViewModeChange={setViewMode}
+            onThemeChange={setThemeState}
+            onLanguageChange={setLanguageState}
+            onSidebarVisibleChange={setSidebarVisible}
+            onAutoSaveChange={setAutoSave}
+            onManageFileAssociation={manageFileAssociations}
+            onCopyModeChange={setCopyMode}
+            onSoftSyntaxChange={setSoftSyntax}
+            onEditorFontSizeChange={setEditorFontSize}
+            onEditorContentWidthChange={setEditorContentWidth}
+            onEditorDensityChange={setEditorDensity}
+            onTableHeightModeChange={setTableHeightMode}
+            onTableMaxHeightVhChange={setTableMaxHeightVh}
+            onChooseBackupDirectory={() => void chooseBackupDirectory()}
+            onResetBackupDirectory={resetBackupDirectory}
+            onBackupPreferencesChange={(value) => setBackupPreferencesState(normalizeBackupPreferences(value))}
+            onCheckForUpdates={() => void checkApplicationUpdates(true)}
+            onInstallUpdate={(version) => void installApplicationUpdate(version)}
+            onOpenReleasePage={() => void openApplicationReleasePage()}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }
