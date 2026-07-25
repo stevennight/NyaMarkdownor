@@ -11,6 +11,7 @@ import { clampSelectionRangesToTableBlock, tableBlockForSelectionRanges } from "
 import { splitMarkdownFrontMatter } from "./markdownFrontMatter";
 import { highlightCodeHtml } from "./codeHighlight";
 import { projectMalformedMarkdownTables } from "./markdownTableProjection";
+import { isMermaidLanguage } from "./mermaidLanguage";
 
 const markdownIt = new MarkdownIt({
   html: false,
@@ -143,7 +144,8 @@ markdownIt.renderer.rules.fence = (tokens, index, options, env, self) => {
   const language = token.info.trim().split(/\s+/, 1)[0] ?? "";
   const languageAttribute = language ? ` data-language="${escapeHtmlText(language)}"` : "";
   const classAttribute = language ? ` class="language-${escapeHtmlText(language)}"` : "";
-  return `<pre${languageAttribute}><code${classAttribute}>${highlightCodeHtml(token.content, language)}</code></pre>\n`;
+  const sourceLineAttribute = mermaidSourceLineAttribute(language, token.map, env as MarkdownRenderEnv);
+  return `<pre${languageAttribute}${sourceLineAttribute}><code${classAttribute}>${highlightCodeHtml(token.content, language)}</code></pre>\n`;
 };
 
 export function renderMarkdown(markdown: string): RenderedMarkdown {
@@ -156,6 +158,23 @@ export function renderMarkdown(markdown: string): RenderedMarkdown {
 export function renderMarkdownHtml(markdown: string): string {
   const { frontMatter, body } = splitMarkdownFrontMatter(markdown);
   return `${renderFrontMatterPreview(frontMatter)}${renderMarkdownFragment(body, frontMatterLineCount(frontMatter))}`;
+}
+
+export function mermaidSourceLineForOrdinal(markdown: string, ordinal: number): number | null {
+  if (!Number.isInteger(ordinal) || ordinal < 0) return null;
+
+  const { frontMatter, body } = splitMarkdownFrontMatter(markdown);
+  const sourceLineOffset = frontMatterLineCount(frontMatter);
+  let currentOrdinal = 0;
+
+  for (const token of markdownIt.parse(body, {})) {
+    if (token.type !== "fence") continue;
+    if (!isMermaidLanguage(token.info) || !token.map) continue;
+    if (currentOrdinal === ordinal) return token.map[0] + sourceLineOffset + 1;
+    currentOrdinal += 1;
+  }
+
+  return null;
 }
 
 export function markdownToHtmlFragment(markdown: string): string {
@@ -654,6 +673,12 @@ function escapeHtmlText(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function mermaidSourceLineAttribute(language: string, tokenMap: [number, number] | null, env: MarkdownRenderEnv): string {
+  if (!isMermaidLanguage(language) || !tokenMap) return "";
+  const sourceLineOffset = Number.isInteger(env.sourceLineOffset) ? Number(env.sourceLineOffset) : 0;
+  return ` data-source-line="${tokenMap[0] + sourceLineOffset + 1}"`;
 }
 
 function findListItemInlineToken(tokens: TokenLike[], listItemOpenIndex: number): TokenLike | null {

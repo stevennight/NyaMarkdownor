@@ -93,6 +93,7 @@ type RichMarkdownEditorProps = {
   onSelectionChange: (selection: TextRange) => void;
   onActiveHeadingIndexChange: (index: number | null) => void;
   onOpenLink: (href: string) => void;
+  onEditMermaidSource: (ordinal: number) => void;
   onToast: (message: string) => void;
   scrollProgress?: number;
   onScrollProgress?: (progress: number) => void;
@@ -103,9 +104,10 @@ type RichMarkdownEditorProps = {
 };
 
 export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, RichMarkdownEditorProps>(function RichMarkdownEditor(
-  { documentFilePath, markdown, t, copyMode, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onActiveHeadingIndexChange, onOpenLink, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
+  { documentFilePath, markdown, t, copyMode, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onActiveHeadingIndexChange, onOpenLink, onEditMermaidSource, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
   forwardedRef
 ) {
+  const tRef = useRef(t);
   const onChangeRef = useRef(onChange);
   const onHistoryActionRef = useRef(onHistoryAction);
   const onTableContextChangeRef = useRef(onTableContextChange);
@@ -113,6 +115,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   const onSelectionChangeRef = useRef(onSelectionChange);
   const onActiveHeadingIndexChangeRef = useRef(onActiveHeadingIndexChange);
   const onOpenLinkRef = useRef(onOpenLink);
+  const onEditMermaidSourceRef = useRef(onEditMermaidSource);
   const onToastRef = useRef(onToast);
   const copyModeRef = useRef(copyMode);
   const onScrollProgressRef = useRef(onScrollProgress);
@@ -127,6 +130,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   const lastEditSurfaceRef = useRef<"body" | "front-matter">("body");
   const pendingHistoryActionRef = useRef<RichMarkdownSyncSource>("input");
   const markdownSyncRef = useRef<ReturnType<typeof createRichMarkdownSyncScheduler> | null>(null);
+  tRef.current = t;
   onChangeRef.current = onChange;
   onHistoryActionRef.current = onHistoryAction;
   onTableContextChangeRef.current = onTableContextChange;
@@ -134,6 +138,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   onSelectionChangeRef.current = onSelectionChange;
   onActiveHeadingIndexChangeRef.current = onActiveHeadingIndexChange;
   onOpenLinkRef.current = onOpenLink;
+  onEditMermaidSourceRef.current = onEditMermaidSource;
   onToastRef.current = onToast;
   copyModeRef.current = copyMode;
   onScrollProgressRef.current = onScrollProgress;
@@ -163,7 +168,23 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
 
   const editor = useEditor({
     immediatelyRender: true,
-    extensions: [...createRichMarkdownExtensions(documentFilePath), richSearchHighlightExtension],
+    extensions: [
+      ...createRichMarkdownExtensions(documentFilePath, {
+        onEditMermaidSource: (ordinal) => onEditMermaidSourceRef.current(ordinal),
+        getMermaidPreviewOptions: () => ({
+          theme: document.documentElement.dataset.theme === "dark" ? "dark" : "light",
+          labels: {
+            diagram: tRef.current("Mermaid diagram"),
+            editSource: tRef.current("Edit diagram source"),
+            rendering: tRef.current("Rendering diagram..."),
+            renderFailed: tRef.current("Diagram could not be rendered."),
+            sourceTooLarge: tRef.current("Diagram source is too large to render."),
+            diagramLimitReached: tRef.current("Diagram limit reached; source is shown.")
+          }
+        })
+      }),
+      richSearchHighlightExtension
+    ],
     content: splitMarkdownFrontMatter(markdown).body,
     contentType: "markdown",
     editorProps: {

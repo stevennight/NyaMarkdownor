@@ -1609,6 +1609,144 @@ body.pane-resizing * {
   padding: 0;
 }
 
+.markdown-body .markdown-diagram {
+  position: relative;
+  overflow: hidden;
+  margin: 0.95em 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--preview-bg), var(--accent) 2%);
+  box-shadow: var(--shadow-soft);
+}
+
+.markdown-body .markdown-diagram-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-raised), transparent 18%);
+  padding: 5px 8px 5px 12px;
+}
+
+.markdown-body .markdown-diagram-badge {
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+}
+
+.markdown-body .markdown-diagram-edit {
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 22px;
+  padding: 0 7px;
+}
+
+.markdown-body .markdown-diagram-edit:hover {
+  border-color: color-mix(in srgb, var(--accent), transparent 58%);
+  background: var(--accent-soft);
+}
+
+.markdown-body .markdown-diagram-edit:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.markdown-body .markdown-diagram-canvas {
+  display: grid;
+  min-width: 0;
+  overflow: auto;
+  place-items: center;
+  padding: 20px;
+}
+
+.markdown-body .markdown-diagram-canvas svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.markdown-body .markdown-diagram-status {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 10px 14px;
+  text-align: center;
+}
+
+.markdown-body .markdown-diagram.is-rendering .markdown-diagram-canvas {
+  min-height: 132px;
+}
+
+.markdown-body .markdown-diagram.is-rendering .markdown-diagram-status::before {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 7px;
+  border: 2px solid color-mix(in srgb, var(--accent), transparent 68%);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  content: "";
+  animation: diagram-spin 700ms linear infinite;
+  vertical-align: -1px;
+}
+
+.markdown-body .markdown-diagram.is-rendering .markdown-diagram-source,
+.markdown-body .markdown-diagram.is-rendered .markdown-diagram-source,
+.markdown-body .markdown-diagram.is-rendered .markdown-diagram-status {
+  display: none;
+}
+
+.markdown-body .markdown-diagram.is-error .markdown-diagram-canvas {
+  display: none;
+}
+
+.markdown-body .markdown-diagram.is-error .markdown-diagram-status {
+  border-bottom: 1px solid color-mix(in srgb, var(--danger), transparent 72%);
+  background: color-mix(in srgb, var(--danger), transparent 92%);
+  color: var(--danger);
+  text-align: left;
+}
+
+.markdown-body .markdown-diagram .markdown-diagram-source {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.tiptap-markdown-editor .rich-mermaid-diagram {
+  margin: 0.85em 0;
+  border-radius: 10px;
+}
+
+.tiptap-markdown-editor .rich-mermaid-diagram > .markdown-diagram {
+  margin: 0;
+}
+
+.tiptap-markdown-editor .rich-mermaid-diagram.ProseMirror-selectednode > .markdown-diagram {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@keyframes diagram-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .markdown-body .markdown-diagram.is-rendering .markdown-diagram-status::before {
+    animation: none;
+  }
+}
+
 .markdown-body pre .tok-keyword,
 .tiptap-markdown-editor pre .tok-keyword {
   color: #f6b977;

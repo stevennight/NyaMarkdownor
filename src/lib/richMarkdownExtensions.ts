@@ -19,6 +19,8 @@ import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { decodeHTMLStrict } from "entities";
 import { codeHighlightClasses } from "./codeHighlight";
+import { isMermaidLanguage } from "./mermaidLanguage";
+import { mermaidRenderSkipReason, renderMermaidPreview, type MermaidPreviewOptions } from "./mermaidPreview";
 import { localImageSourceForRender } from "./previewAssets";
 import { normalizeRichLinkHref } from "./richLinks";
 import { createRichMarkdownLinkInputRule } from "./richMarkdownLinkInput";
@@ -59,6 +61,11 @@ type MarkdownRenderHelpers = {
   renderChildren: (nodes: JSONContent[]) => string;
   renderChild?: (node: JSONContent, index: number) => string;
   indent: (text: string) => string;
+};
+
+export type RichMarkdownExtensionOptions = {
+  onEditMermaidSource?: (ordinal: number) => void;
+  getMermaidPreviewOptions?: () => MermaidPreviewOptions;
 };
 
 type ReferenceDefinitionToken = MarkdownToken & {
@@ -252,6 +259,244 @@ const RichCodeBlock = CodeBlock.extend({
     return `${fences.open}${infoSuffix}\n${content}\n${fences.close}`;
   }
 });
+
+function createRichMermaidDiagram(options: RichMarkdownExtensionOptions): AnyExtension {
+  const nodeViewLimitRefreshers = new Set<() => void>();
+  const diagramOrderKey = new PluginKey<readonly object[]>("richMermaidDiagramOrder");
+
+  return Node.create({
+    name: "mermaidDiagram",
+    group: "block",
+    atom: true,
+    selectable: true,
+    isolating: true,
+    priority: 110,
+
+    addAttributes() {
+      return {
+        source: {
+          default: "",
+          rendered: false
+        },
+        language: {
+          default: "mermaid",
+          rendered: false
+        },
+        markdownFence: delimiterAttribute("```"),
+        markdownClosingFence: delimiterAttribute("```"),
+        markdownInfoSuffix: referenceAttribute(),
+        markdownInfoLanguage: referenceAttribute()
+      };
+    },
+
+    parseHTML() {
+      return [{ tag: "div[data-rich-mermaid-diagram]" }];
+    },
+
+    renderHTML({ HTMLAttributes }) {
+      return [
+        "div",
+        mergeAttributes(HTMLAttributes, {
+          "data-rich-mermaid-diagram": "",
+          contenteditable: "false"
+        })
+      ];
+    },
+
+    markdownTokenName: "code",
+
+    parseMarkdown: (token, helpers) => {
+      if (!isMermaidLanguage(token.lang)) return [];
+      const fences = codeBlockFences(token.raw ?? "");
+      if (!fences) return [];
+
+      return helpers.createNode("mermaidDiagram", {
+        source: token.text ?? "",
+        language: token.lang || "mermaid",
+        markdownFence: fences.open,
+        markdownClosingFence: fences.close,
+        markdownInfoSuffix: fences.infoSuffix,
+        markdownInfoLanguage: token.lang || "mermaid"
+      });
+    },
+
+    renderMarkdown: (node) => {
+      const source = stringAttribute(node.attrs?.source);
+      const language = stringAttribute(node.attrs?.language) || "mermaid";
+      const fences = safeCodeBlockFences(
+        node.attrs?.markdownFence,
+        node.attrs?.markdownClosingFence,
+        source
+      );
+      const infoSuffix = codeBlockInfoSuffix(node.attrs, language);
+      return `${fences.open}${infoSuffix}\n${source}\n${fences.close}`;
+    },
+
+    addProseMirrorPlugins() {
+      return [new Plugin<readonly object[]>({
+        key: diagramOrderKey,
+        state: {
+          init: (_, state) => richMermaidNodesInDocument(state.doc),
+          apply: (transaction, previous) => {
+            if (!transaction.docChanged) return previous;
+            const next = richMermaidNodesInDocument(transaction.doc);
+            return sameNodeSequence(previous, next) ? previous : next;
+          }
+        },
+        view: () => ({
+          update: (updatedView, previousState) => {
+            if (diagramOrderKey.getState(updatedView.state) === diagramOrderKey.getState(previousState)) return;
+            nodeViewLimitRefreshers.forEach((refresh) => refresh());
+          }
+        })
+      })];
+    },
+
+    addNodeView() {
+      return ({ node, view, getPos }) => {
+        let currentNode = node;
+        let previewCleanup: () => void = () => undefined;
+        let lastSkipReason: ReturnType<typeof mermaidRenderSkipReason> | undefined;
+        const dom = document.createElement("div");
+        dom.className = "rich-mermaid-diagram";
+        dom.dataset.richMermaidDiagram = "";
+        dom.contentEditable = "false";
+
+        const renderDiagram = () => {
+          previewCleanup();
+          dom.replaceChildren();
+
+          const sourceBlock = document.createElement("pre");
+          sourceBlock.dataset.language = stringAttribute(currentNode.attrs.language) || "mermaid";
+          if (options.onEditMermaidSource) sourceBlock.dataset.sourceLine = "0";
+
+          const code = document.createElement("code");
+          code.className = "language-mermaid";
+          code.textContent = stringAttribute(currentNode.attrs.source);
+          sourceBlock.append(code);
+          dom.append(sourceBlock);
+
+          const ordinal = richMermaidOrdinalBeforePosition(view, getPos);
+          lastSkipReason = mermaidRenderSkipReason(
+            stringAttribute(currentNode.attrs.source),
+            ordinal ?? Number.MAX_SAFE_INTEGER
+          );
+          previewCleanup = renderMermaidPreview(dom, {
+            ...(options.getMermaidPreviewOptions?.() ?? defaultRichMermaidPreviewOptions()),
+            diagramIndexOffset: ordinal ?? Number.MAX_SAFE_INTEGER
+          });
+        };
+
+        const refreshDiagramLimit = () => {
+          const ordinal = richMermaidOrdinalBeforePosition(view, getPos);
+          const nextSkipReason = mermaidRenderSkipReason(
+            stringAttribute(currentNode.attrs.source),
+            ordinal ?? Number.MAX_SAFE_INTEGER
+          );
+          if (nextSkipReason !== lastSkipReason) renderDiagram();
+        };
+
+        const handleClick = (event: MouseEvent) => {
+          const target = event.target;
+          if (!(target instanceof Element) || !target.closest("button[data-diagram-source-line]")) return;
+          event.preventDefault();
+          event.stopPropagation();
+
+          const ordinal = richMermaidOrdinalBeforePosition(view, getPos);
+          if (ordinal === null) return;
+          options.onEditMermaidSource?.(ordinal);
+        };
+
+        dom.addEventListener("click", handleClick);
+        nodeViewLimitRefreshers.add(refreshDiagramLimit);
+        renderDiagram();
+
+        const themeObserver = new MutationObserver((records) => {
+          if (records.some((record) => record.attributeName === "data-theme" || record.attributeName === "lang")) {
+            renderDiagram();
+          }
+        });
+        themeObserver.observe(document.documentElement, {
+          attributes: true,
+          attributeFilter: ["data-theme", "lang"]
+        });
+
+        return {
+          dom,
+          update(updatedNode) {
+            if (updatedNode.type !== currentNode.type) return false;
+            if (updatedNode.eq(currentNode)) return true;
+            currentNode = updatedNode;
+            renderDiagram();
+            return true;
+          },
+          selectNode() {
+            dom.classList.add("ProseMirror-selectednode");
+          },
+          deselectNode() {
+            dom.classList.remove("ProseMirror-selectednode");
+          },
+          stopEvent(event) {
+            const target = event.target;
+            return target instanceof Element && Boolean(target.closest("button[data-diagram-source-line]"));
+          },
+          ignoreMutation: () => true,
+          destroy() {
+            themeObserver.disconnect();
+            dom.removeEventListener("click", handleClick);
+            nodeViewLimitRefreshers.delete(refreshDiagramLimit);
+            previewCleanup();
+          }
+        };
+      };
+    }
+  });
+}
+
+function richMermaidNodesInDocument(documentNode: {
+  descendants: (callback: (node: { type: { name: string } }) => void) => void;
+}): readonly object[] {
+  const nodes: object[] = [];
+  documentNode.descendants((node) => {
+    if (node.type.name === "mermaidDiagram") nodes.push(node);
+  });
+  return nodes;
+}
+
+function sameNodeSequence(left: readonly object[], right: readonly object[]): boolean {
+  return left.length === right.length && left.every((node, index) => node === right[index]);
+}
+
+function richMermaidOrdinalBeforePosition(
+  view: { state: { doc: { nodesBetween: (from: number, to: number, callback: (node: { type: { name: string } }) => void) => void } } },
+  getPos: () => number | undefined
+): number | null {
+  const position = getPos();
+  if (typeof position !== "number") return null;
+
+  let ordinal = 0;
+  view.state.doc.nodesBetween(0, position, (candidate) => {
+    if (candidate.type.name === "mermaidDiagram") ordinal += 1;
+  });
+  return ordinal;
+}
+
+function defaultRichMermaidPreviewOptions(): MermaidPreviewOptions {
+  const theme = typeof document !== "undefined" && document.documentElement.dataset.theme === "dark"
+    ? "dark"
+    : "light";
+  return {
+    theme,
+    labels: {
+      diagram: "Mermaid diagram",
+      editSource: "Edit diagram source",
+      rendering: "Rendering diagram...",
+      renderFailed: "Diagram could not be rendered.",
+      sourceTooLarge: "Diagram source is too large to render.",
+      diagramLimitReached: "Diagram limit reached; source is shown."
+    }
+  };
+}
 
 const RichHorizontalRule = HorizontalRule.extend({
   addAttributes() {
@@ -964,7 +1209,10 @@ const ProtectedMarkdownInline = Node.create({
   }
 });
 
-export function createRichMarkdownExtensions(documentFilePath: string | null): AnyExtension[] {
+export function createRichMarkdownExtensions(
+  documentFilePath: string | null,
+  options: RichMarkdownExtensionOptions = {}
+): AnyExtension[] {
   return [
     ReferenceDefinition,
     ProtectedMarkdownBlock,
@@ -995,6 +1243,7 @@ export function createRichMarkdownExtensions(documentFilePath: string | null): A
       openOnClick: false,
       isAllowedUri: (href) => normalizeRichLinkHref(href ?? "") !== null
     }),
+    createRichMermaidDiagram(options),
     RichCodeBlock,
     RichCodeHighlight,
     RichBulletList,

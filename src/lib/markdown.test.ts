@@ -11,6 +11,7 @@ import {
   markdownTableSliceToTsv,
   markdownToHtmlFragment,
   markdownToPlain,
+  mermaidSourceLineForOrdinal,
   referenceLabelsFromMarkdown,
   renderMarkdown
 } from "./markdown";
@@ -32,6 +33,88 @@ describe("Markdown rendering and clean copy", () => {
     expect(rendered.html).toContain("tok-keyword");
     expect(rendered.html).toContain("&lt;unsafe&gt;");
     expect(rendered.html).not.toContain("<unsafe>");
+  });
+
+  it("marks Mermaid fences for source-mode editing while keeping their source inert", () => {
+    const rendered = renderMarkdown([
+      "```MERMAID",
+      "flowchart LR",
+      "  A[\"<unsafe>\"] --> B",
+      "```"
+    ].join("\n"));
+
+    expect(rendered.html).toContain('data-language="MERMAID"');
+    expect(rendered.html).toContain('data-source-line="1"');
+    expect(rendered.html).toContain("flowchart LR");
+    expect(rendered.html).toContain("&lt;unsafe&gt;");
+    expect(rendered.html).not.toContain("<unsafe>");
+  });
+
+  it("maps Mermaid source lines through front matter without annotating ordinary code", () => {
+    const rendered = renderMarkdown([
+      "---",
+      "title: Diagram",
+      "---",
+      "",
+      "```mermaid",
+      "mindmap",
+      "  root((Plan))",
+      "```",
+      "",
+      "```flowchart",
+      "A --> B",
+      "```"
+    ].join("\n"));
+
+    expect(rendered.html).toContain('<pre data-language="mermaid" data-source-line="5">');
+    expect(rendered.html).toContain('<pre data-language="flowchart"><code class="language-flowchart">');
+    expect(rendered.html.match(/data-source-line=/g)).toHaveLength(1);
+  });
+
+  it("finds Mermaid fence ordinals for visual-to-source editing", () => {
+    const source = [
+      "---",
+      "title: Diagrams",
+      "---",
+      "",
+      "```ts",
+      "const ignored = true;",
+      "```",
+      "",
+      "```mermaid",
+      "flowchart LR",
+      "  A --> B",
+      "```",
+      "",
+      "~~~MERMAID",
+      "mindmap",
+      "  root((Plan))",
+      "~~~"
+    ].join("\n");
+
+    expect(mermaidSourceLineForOrdinal(source, 0)).toBe(9);
+    expect(mermaidSourceLineForOrdinal(source, 1)).toBe(14);
+    expect(mermaidSourceLineForOrdinal(source, 2)).toBeNull();
+    expect(mermaidSourceLineForOrdinal(source, -1)).toBeNull();
+  });
+
+  it("counts Mermaid fences with additional info-string metadata consistently", () => {
+    const source = [
+      '```mermaid title="Overview"',
+      "flowchart LR",
+      "  A --> B",
+      "```",
+      "",
+      "```mermaid",
+      "sequenceDiagram",
+      "  A->>B: Next",
+      "```"
+    ].join("\n");
+
+    const rendered = renderMarkdown(source);
+    expect(rendered.html.match(/data-source-line=/g)).toHaveLength(2);
+    expect(mermaidSourceLineForOrdinal(source, 0)).toBe(1);
+    expect(mermaidSourceLineForOrdinal(source, 1)).toBe(6);
   });
 
   it("renders stable heading ids for preview anchors", () => {

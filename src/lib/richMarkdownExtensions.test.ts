@@ -411,6 +411,48 @@ describe("rich Markdown extensions", () => {
     expect(markdown.serialize(parsed)).toContain("```ts\nconst value = 1;");
   });
 
+  it("projects Mermaid diagrams as atomic visuals while preserving canonical fenced source", () => {
+    const source = [
+      "```mermaid",
+      "mindmap",
+      "  root((Plan))",
+      "    Build",
+      "    Verify",
+      "```"
+    ].join("\n");
+    const parsed = markdown.parse(source);
+    const block = protectedNodes(parsed, "mermaidDiagram")[0];
+
+    expect(block.attrs).toEqual(expect.objectContaining({
+      language: "mermaid",
+      markdownFence: "```",
+      source: "mindmap\n  root((Plan))\n    Build\n    Verify"
+    }));
+    expect(protectedNodes(parsed, "codeBlock")).toHaveLength(0);
+    expect(markdown.serialize(parsed)).toBe(source);
+
+    block.attrs = { ...block.attrs, source: String(block.attrs?.source).replace("Verify", "Ship") };
+    expect(markdown.serialize(parsed)).toBe(source.replace("Verify", "Ship"));
+  });
+
+  it("recognizes Mermaid info-string metadata without changing the fence", () => {
+    const source = [
+      '```mermaid title="Overview"',
+      "flowchart LR",
+      "  A --> B",
+      "```"
+    ].join("\n");
+    const parsed = markdown.parse(source);
+    const block = protectedNodes(parsed, "mermaidDiagram")[0];
+
+    expect(block.attrs).toEqual(expect.objectContaining({
+      language: 'mermaid title="Overview"',
+      markdownInfoSuffix: 'mermaid title="Overview"'
+    }));
+    expect(protectedNodes(parsed, "codeBlock")).toHaveLength(0);
+    expect(markdown.serialize(parsed)).toBe(source);
+  });
+
   it("preserves ordinary bullet-list and horizontal-rule markers", () => {
     const source = [
       "* alpha",

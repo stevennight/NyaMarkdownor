@@ -92,7 +92,8 @@ import { listen } from "@tauri-apps/api/event";
 import type { BackupPreferences, CopyMode, Heading, LanguagePreference, MarkdownDocument, MarkdownFileStats, MarkdownTable, PaneLayout, SidebarPage, TableAlignment, TableBlock, TableHeightMode, ThemeMode, ViewMode, WorkspaceFile, WorkspaceListing } from "../types";
 import { MarkdownEditor } from "./MarkdownEditor";
 import type { RichMarkdownEditorHandle } from "./RichMarkdownEditor";
-import { extractHeadings, markdownRangesToClipboardPayload, markdownRangesToTableCsv, markdownRangesToTableMarkdown, markdownRangesToTableTsv, markdownTableSliceToClipboardPayload, markdownTableSliceToCsv, markdownTableSliceToMarkdown, markdownTableSliceToTsv, referenceLabelsFromMarkdown } from "../lib/markdown";
+import { extractHeadings, markdownRangesToClipboardPayload, markdownRangesToTableCsv, markdownRangesToTableMarkdown, markdownRangesToTableTsv, markdownTableSliceToClipboardPayload, markdownTableSliceToCsv, markdownTableSliceToMarkdown, markdownTableSliceToTsv, mermaidSourceLineForOrdinal, referenceLabelsFromMarkdown } from "../lib/markdown";
+import { renderMermaidPreview } from "../lib/mermaidPreview";
 import {
   buildMarkdownTable,
   deleteColumn as deleteTableColumnModel,
@@ -838,6 +839,7 @@ export function App() {
     () => rewritePreviewImageSources(rawPreviewHtml, documentState.filePath),
     [documentState.filePath, rawPreviewHtml]
   );
+  const previewInnerHtml = useMemo(() => ({ __html: previewHtml }), [previewHtml]);
   const findOptions = useMemo(() => ({ caseSensitive: findCaseSensitive, wholeWord: findWholeWord }), [findCaseSensitive, findWholeWord]);
   const findMatches = useMemo(() => {
     if (!findOpen) return [];
@@ -930,6 +932,24 @@ export function App() {
   useEffect(() => {
     document.documentElement.lang = locale;
   }, [locale]);
+
+  useEffect(() => {
+    if (!previewVisible || previewPaused) return undefined;
+    const preview = previewRef.current;
+    if (!preview) return undefined;
+
+    return renderMermaidPreview(preview, {
+      theme,
+      labels: {
+        diagram: t("Mermaid diagram"),
+        editSource: t("Edit diagram source"),
+        rendering: t("Rendering diagram..."),
+        renderFailed: t("Diagram could not be rendered."),
+        sourceTooLarge: t("Diagram source is too large to render."),
+        diagramLimitReached: t("Diagram limit reached; source is shown.")
+      }
+    });
+  }, [previewHtml, previewPaused, previewVisible, t, theme]);
 
   useEffect(() => {
     viewModeRef.current = viewMode;
@@ -2459,6 +2479,16 @@ export function App() {
     const target = event.target;
     if (!(target instanceof Element)) return;
 
+    const diagramEditButton = target.closest("button[data-diagram-source-line]");
+    if (diagramEditButton && event.currentTarget.contains(diagramEditButton)) {
+      const sourceLine = Number(diagramEditButton.getAttribute("data-diagram-source-line"));
+      if (Number.isInteger(sourceLine) && sourceLine >= 0) {
+        event.preventDefault();
+        editPreviewDiagramSource(sourceLine);
+      }
+      return;
+    }
+
     const link = target.closest("a[href]");
     if (!link || !event.currentTarget.contains(link)) return;
 
@@ -2500,6 +2530,30 @@ export function App() {
     }
 
     void openLinkedMarkdownDocument(linkedTarget.path, linkedTarget.anchorIds);
+  }
+
+  function editPreviewDiagramSource(sourceLine: number) {
+    const tabId = activeTabIdRef.current;
+    if (viewModeRef.current === "preview") {
+      setViewMode("focus");
+      jumpToLineSoon(tabId, sourceLine);
+      return;
+    }
+
+    jumpToLine(sourceLine);
+  }
+
+  function editRichMermaidSource(ordinal: number) {
+    const tabId = activeTabIdRef.current;
+    richEditorRef.current?.flushMarkdownSync();
+    const sourceLine = mermaidSourceLineForOrdinal(currentActiveMarkdownForCommand(), ordinal);
+    if (sourceLine === null) {
+      showToast("Diagram source could not be located");
+      return;
+    }
+
+    setViewMode("focus");
+    jumpToLineSoon(tabId, sourceLine);
   }
 
   function scrollPreviewAnchorIntoView(href: string) {
@@ -7728,6 +7782,7 @@ export function App() {
                 onSelectionChange={(range) => rememberRichSelection(activeTab.id, range)}
                 onActiveHeadingIndexChange={rememberRichActiveHeadingIndex}
                 onOpenLink={handleRichLinkOpen}
+                onEditMermaidSource={editRichMermaidSource}
                 onToast={showToast}
                 scrollProgress={richScrollProgressRef.current.get(activeTab.id) ?? activeTab.richScrollProgress ?? 0}
                 onScrollProgress={(progress) => rememberRichScrollProgress(activeTab.id, progress)}
@@ -7877,7 +7932,7 @@ export function App() {
               onCopy={handlePreviewCopy}
               onKeyDown={handlePreviewKeyDown}
               onScroll={handlePreviewScroll}
-              dangerouslySetInnerHTML={{ __html: previewHtml }}
+              dangerouslySetInnerHTML={previewInnerHtml}
             />
           )}
         </section>
