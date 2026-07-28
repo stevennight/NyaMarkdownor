@@ -550,6 +550,7 @@ export function App() {
   const [findCaseSensitive, setFindCaseSensitive] = useState(false);
   const [findWholeWord, setFindWholeWord] = useState(false);
   const [richSelection, setRichSelection] = useState<TextRange>({ from: 0, to: 0 });
+  const [richEditorSearchReady, setRichEditorSearchReady] = useState<{ tabId: string; revision: number } | null>(null);
   const [richActiveHeadingIndex, setRichActiveHeadingIndex] = useState<number | null>(null);
   const [manualPreviewSnapshots, setManualPreviewSnapshots] = useState<ManualPreviewSnapshots>({});
   const [confirmation, setConfirmation] = useState<ConfirmationState | null>(null);
@@ -877,9 +878,12 @@ export function App() {
   const findOptions = useMemo(() => ({ caseSensitive: findCaseSensitive, wholeWord: findWholeWord }), [findCaseSensitive, findWholeWord]);
   const findMatches = useMemo(() => {
     if (!findOpen) return [];
-    if (viewMode === "wysiwyg") return richEditorRef.current?.findTextMatches(findQuery, findOptions) ?? [];
+    if (viewMode === "wysiwyg") {
+      if (richEditorSearchReady?.tabId !== activeTab.id) return [];
+      return richEditorRef.current?.findTextMatches(findQuery, findOptions) ?? [];
+    }
     return findTextMatches(documentState.markdown, findQuery, findOptions);
-  }, [documentState.markdown, findOpen, findOptions, findQuery, viewMode]);
+  }, [activeTab.id, documentState.markdown, findOpen, findOptions, findQuery, richEditorSearchReady, viewMode]);
   const activeFindIndex = useMemo(
     () => findMatchIndexAtSelection(findMatches, viewMode === "wysiwyg" ? richSelection : selection),
     [findMatches, richSelection, selection, viewMode]
@@ -7844,6 +7848,10 @@ export function App() {
                 onTableContextChange={setRichTableActive}
                 onTableSelectionChange={setRichTableSelection}
                 onSelectionChange={(range) => rememberRichSelection(activeTab.id, range)}
+                onReady={() => setRichEditorSearchReady((current) => ({
+                  tabId: activeTab.id,
+                  revision: (current?.revision ?? 0) + 1
+                }))}
                 onActiveHeadingIndexChange={rememberRichActiveHeadingIndex}
                 onOpenLink={handleRichLinkOpen}
                 onEditMermaidSource={editRichMermaidSource}

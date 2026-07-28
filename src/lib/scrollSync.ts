@@ -4,6 +4,11 @@ export type ScrollMetrics = {
   clientHeight: number;
 };
 
+export type VerticalBounds = {
+  top: number;
+  bottom: number;
+};
+
 export function getScrollProgress(element: ScrollMetrics): number {
   const maxScroll = element.scrollHeight - element.clientHeight;
   if (maxScroll <= 0) return 0;
@@ -13,6 +18,16 @@ export function getScrollProgress(element: ScrollMetrics): number {
 export function setScrollProgress(element: ScrollMetrics, progress: number): void {
   const maxScroll = element.scrollHeight - element.clientHeight;
   element.scrollTop = maxScroll <= 0 ? 0 : Math.round(maxScroll * clamp(progress));
+}
+
+export function centeredScrollTop(
+  currentScrollTop: number,
+  viewport: VerticalBounds,
+  target: VerticalBounds
+): number {
+  const viewportCenter = (viewport.top + viewport.bottom) / 2;
+  const targetCenter = (target.top + target.bottom) / 2;
+  return Math.max(0, currentScrollTop + targetCenter - viewportCenter);
 }
 
 function clamp(value: number): number {

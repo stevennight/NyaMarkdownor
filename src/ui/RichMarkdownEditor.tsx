@@ -19,7 +19,7 @@ import { richTableColumnAlignmentTransaction, type RichTableColumnAlignment } fr
 import { richTableSortTransaction } from "../lib/richTableSort";
 import { richTablePasteCapacity, richTablePasteTransaction, type RichTablePasteCapacity } from "../lib/richTablePaste";
 import type { TableSortDirection } from "../lib/tables";
-import { getScrollProgress, setScrollProgress } from "../lib/scrollSync";
+import { centeredScrollTop, getScrollProgress, setScrollProgress } from "../lib/scrollSync";
 import { activeRichHeadingIndexAtPosition, richHeadingPositionAtIndex } from "../lib/richOutlineNavigation";
 import { uniqueRichTextSelectionForText } from "../lib/richSelectionText";
 import { markdownFrontMatterEditor, promoteMarkdownFrontMatter, splitMarkdownFrontMatter, updateMarkdownFrontMatterContent, withMarkdownFrontMatter } from "../lib/markdownFrontMatter";
@@ -92,6 +92,7 @@ type RichMarkdownEditorProps = {
   onTableContextChange: (active: boolean) => void;
   onTableSelectionChange: (summary: RichTableSelectionSummary | null) => void;
   onSelectionChange: (selection: TextRange) => void;
+  onReady: () => void;
   onActiveHeadingIndexChange: (index: number | null) => void;
   onOpenLink: (href: string) => void;
   onEditMermaidSource: (ordinal: number) => void;
@@ -105,7 +106,7 @@ type RichMarkdownEditorProps = {
 };
 
 export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, RichMarkdownEditorProps>(function RichMarkdownEditor(
-  { documentFilePath, markdown, t, copyMode, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onActiveHeadingIndexChange, onOpenLink, onEditMermaidSource, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
+  { documentFilePath, markdown, t, copyMode, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onReady, onActiveHeadingIndexChange, onOpenLink, onEditMermaidSource, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
   forwardedRef
 ) {
   const tRef = useRef(t);
@@ -114,6 +115,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   const onTableContextChangeRef = useRef(onTableContextChange);
   const onTableSelectionChangeRef = useRef(onTableSelectionChange);
   const onSelectionChangeRef = useRef(onSelectionChange);
+  const onReadyRef = useRef(onReady);
   const onActiveHeadingIndexChangeRef = useRef(onActiveHeadingIndexChange);
   const onOpenLinkRef = useRef(onOpenLink);
   const onEditMermaidSourceRef = useRef(onEditMermaidSource);
@@ -137,6 +139,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   onTableContextChangeRef.current = onTableContextChange;
   onTableSelectionChangeRef.current = onTableSelectionChange;
   onSelectionChangeRef.current = onSelectionChange;
+  onReadyRef.current = onReady;
   onActiveHeadingIndexChangeRef.current = onActiveHeadingIndexChange;
   onOpenLinkRef.current = onOpenLink;
   onEditMermaidSourceRef.current = onEditMermaidSource;
@@ -354,6 +357,11 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
 
   useEffect(() => {
     if (!editor || editor.isDestroyed) return;
+    onReadyRef.current();
+  }, [editor]);
+
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return;
     if (synchronizedMarkdownRef.current === markdown) return;
     const next = splitMarkdownFrontMatter(markdown);
     markdownSyncRef.current?.cancel();
@@ -369,6 +377,9 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
 
   useEffect(() => {
     setRichSearchHighlights(editor, { matches: searchMatches, active: activeSearchRange });
+    if (editor && activeSearchRange) {
+      scrollRichTextRangeIntoView(editor, scrollHostRef.current, activeSearchRange);
+    }
   }, [activeSearchRange, editor, searchMatches]);
 
   useEffect(() => {
@@ -920,6 +931,30 @@ function replaceRichTextRange(editor: Editor | null, range: TextRange, replaceme
   const transaction = editor.state.tr.insertText(replacement, from, to);
   editor.view.dispatch(transaction);
   return editor.chain().setTextSelection({ from, to: from + replacement.length }).scrollIntoView().run();
+}
+
+function scrollRichTextRangeIntoView(
+  editor: Editor,
+  scrollHost: HTMLDivElement | null,
+  range: TextRange
+): void {
+  if (editor.isDestroyed) return;
+  const host = editor.view.dom.closest<HTMLDivElement>(".wysiwyg-editor") ?? scrollHost;
+  if (!host) return;
+
+  const maxPosition = editor.state.doc.content.size;
+  const from = Math.max(0, Math.min(range.from, maxPosition));
+  const to = Math.max(from, Math.min(range.to, maxPosition));
+  const start = editor.view.coordsAtPos(from);
+  const end = editor.view.coordsAtPos(to);
+  host.scrollTop = centeredScrollTop(
+    host.scrollTop,
+    host.getBoundingClientRect(),
+    {
+      top: Math.min(start.top, end.top),
+      bottom: Math.max(start.bottom, end.bottom)
+    }
+  );
 }
 
 function replaceAllRichTextMatches(editor: Editor | null, query: string, replacement: string, options: SearchOptions): number {

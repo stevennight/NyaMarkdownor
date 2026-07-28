@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getScrollProgress, setScrollProgress, type ScrollMetrics } from "./scrollSync";
+import { centeredScrollTop, getScrollProgress, setScrollProgress, type ScrollMetrics } from "./scrollSync";
 
 describe("scroll sync helpers", () => {
   it("returns normalized scroll progress", () => {
@@ -22,5 +22,16 @@ describe("scroll sync helpers", () => {
     expect(getScrollProgress(element)).toBe(0);
     setScrollProgress(element, 0.8);
     expect(element.scrollTop).toBe(0);
+  });
+
+  it("centers targets below and above the current viewport", () => {
+    const viewport = { top: 100, bottom: 500 };
+
+    expect(centeredScrollTop(200, viewport, { top: 700, bottom: 720 })).toBe(610);
+    expect(centeredScrollTop(610, viewport, { top: -100, bottom: -80 })).toBe(220);
+  });
+
+  it("clamps centered scroll positions at the top", () => {
+    expect(centeredScrollTop(30, { top: 100, bottom: 500 }, { top: 20, bottom: 40 })).toBe(0);
   });
 });
