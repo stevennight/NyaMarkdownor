@@ -3,6 +3,16 @@ import { explicitMarkdownFromClipboard } from "./clipboard";
 import { normalizeMarkdownLineEndings } from "./lineEndings";
 
 const MAX_PLAIN_MARKDOWN_PASTE_LENGTH = 1024 * 1024;
+const EXPLICIT_MARKDOWN_BLOCK_TYPES = new Set([
+  "blockquote",
+  "bulletList",
+  "codeBlock",
+  "heading",
+  "horizontalRule",
+  "mermaidDiagram",
+  "orderedList",
+  "taskList"
+]);
 
 export type RichMarkdownClipboardData = {
   markdown?: string | null;
@@ -37,7 +47,8 @@ function parseMarkdownSafely(
 }
 
 function containsExplicitMarkdownStructure(node: JSONContent): boolean {
-  if (node.type === "table"
+  if ((node.type && EXPLICIT_MARKDOWN_BLOCK_TYPES.has(node.type))
+    || node.type === "table"
     || node.type === "markdownAutolink"
     || node.type === "protectedReferenceLink"
     || node.type === "markdownReferenceDefinition") {

@@ -730,7 +730,8 @@ input:focus-visible {
   text-align: left;
 }
 
-.toolbar-action-menu button[role="menuitemcheckbox"] {
+.toolbar-action-menu button[role="menuitemcheckbox"],
+.toolbar-action-menu button[role="menuitemradio"] {
   grid-template-columns: 18px minmax(0, 1fr) 16px;
 }
 

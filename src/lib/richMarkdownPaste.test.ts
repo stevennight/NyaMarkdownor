@@ -48,6 +48,43 @@ describe("rich Markdown paste selection", () => {
     expect(richMarkdownSourceFromClipboard({ text: source }, parseMarkdown)).toBe(source);
   });
 
+  it("recognizes a structured Markdown task document from plain text without tables or links", () => {
+    const source = [
+      "# NyaAuthBroker development task",
+      "",
+      "## Goal",
+      "",
+      "Build an independent authentication broker.",
+      "",
+      "## Technology",
+      "",
+      "- Go 1.25",
+      "- PostgreSQL",
+      "- Prefer the standard library",
+      "",
+      "## API",
+      "",
+      "```text",
+      "POST /v1/providers/baidu/oauth/sessions",
+      "GET  /healthz",
+      "```"
+    ].join("\n");
+
+    expect(richMarkdownSourceFromClipboard({ text: source }, parseMarkdown)).toBe(source);
+  });
+
+  it.each([
+    ["heading", "# Heading"],
+    ["blockquote", "> Quoted"],
+    ["bullet list", "- First\n- Second"],
+    ["ordered list", "1. First\n2. Second"],
+    ["task list", "- [ ] First\n- [x] Second"],
+    ["fenced code block", "```text\nvalue\n```"],
+    ["horizontal rule", "---"]
+  ])("recognizes plain-text Markdown containing a %s", (_label, source) => {
+    expect(richMarkdownSourceFromClipboard({ text: source }, parseMarkdown)).toBe(source);
+  });
+
   it("conservatively recognizes plain-text Markdown links and autolinks", () => {
     expect(richMarkdownSourceFromClipboard({ text: "[Docs](https://example.com/docs)" }, parseMarkdown))
       .toBe("[Docs](https://example.com/docs)");
