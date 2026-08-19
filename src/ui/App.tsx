@@ -380,6 +380,9 @@ const WORK_RECOVERY_MAX_DELAY_MS = 5000;
 const BACKUP_HISTORY_REFRESH_MS = 30000;
 const MAX_INTERACTIVE_BACKUP_COMPARE_BYTES = 16 * 1024 * 1024;
 const TAB_POINTER_DRAG_THRESHOLD_PX = 5;
+const TAB_CONTEXT_MENU_WIDTH_PX = 248;
+const TAB_CONTEXT_MENU_HEIGHT_PX = 48;
+const TAB_CONTEXT_MENU_MARGIN_PX = 8;
 const DEFERRED_METRICS_THRESHOLD = 80_000;
 
 type ConfirmationState = {
@@ -424,6 +427,12 @@ type PaneResizeState = {
   initialLayout: PaneLayout;
   pairWidth: number;
   currentLayout: PaneLayout;
+};
+
+type TabContextMenuState = {
+  tabId: string;
+  left: number;
+  top: number;
 };
 
 type LocalImageInsertResult = {
@@ -558,11 +567,13 @@ export function App() {
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
   const [tabDropTarget, setTabDropTarget] = useState<{ tabId: string; position: DocumentTabDropPosition } | null>(null);
   const [tabListOpen, setTabListOpen] = useState(false);
+  const [tabContextMenu, setTabContextMenu] = useState<TabContextMenuState | null>(null);
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const viewMenuRef = useRef<HTMLDivElement | null>(null);
   const viewMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const tabListRef = useRef<HTMLDivElement | null>(null);
   const tabListMenuRef = useRef<HTMLDivElement | null>(null);
+  const tabContextMenuRef = useRef<HTMLDivElement | null>(null);
   const tabPointerDragRef = useRef<{
     pointerId: number;
     tabId: string;
@@ -651,6 +662,7 @@ export function App() {
   }, [applicationUpdate, backupComparison, confirmation, externalDiskReview]);
 
   const activeTab = useMemo<DocumentTab>(() => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? createDocumentTab(createDefaultDocument()), [activeTabId, tabs]);
+  const tabContextMenuTab = tabContextMenu ? tabs.find((tab) => tab.id === tabContextMenu.tabId) : undefined;
   const documentState = activeTab.document;
   const externalChange = externalChangeTabIds.has(activeTab.id);
   const manualPreviewMarkdown = manualPreviewSnapshotForTab(manualPreviewSnapshots, activeTab.id);
@@ -1020,6 +1032,36 @@ export function App() {
     document.addEventListener("pointerdown", closeTabListOnOutsidePointer);
     return () => document.removeEventListener("pointerdown", closeTabListOnOutsidePointer);
   }, [tabListOpen]);
+
+  useEffect(() => {
+    if (!tabContextMenu) return undefined;
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      tabContextMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    });
+    const closeTabContextMenu = () => setTabContextMenu(null);
+    const closeTabContextMenuOnOutsidePointer = (event: PointerEvent) => {
+      if (tabContextMenuRef.current?.contains(event.target as Node)) return;
+      closeTabContextMenu();
+    };
+    const closeTabContextMenuOnKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeTabContextMenu();
+    };
+
+    document.addEventListener("pointerdown", closeTabContextMenuOnOutsidePointer);
+    window.addEventListener("keydown", closeTabContextMenuOnKeyDown);
+    window.addEventListener("resize", closeTabContextMenu);
+    window.addEventListener("scroll", closeTabContextMenu, true);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("pointerdown", closeTabContextMenuOnOutsidePointer);
+      window.removeEventListener("keydown", closeTabContextMenuOnKeyDown);
+      window.removeEventListener("resize", closeTabContextMenu);
+      window.removeEventListener("scroll", closeTabContextMenu, true);
+    };
+  }, [tabContextMenu]);
 
   useEffect(() => () => {
     if (editorFocusTimerRef.current !== null) window.clearTimeout(editorFocusTimerRef.current);
@@ -2139,6 +2181,29 @@ export function App() {
       return;
     }
     switchDocumentTab(tabId);
+  }
+
+  function openTabContextMenu(event: ReactMouseEvent<HTMLDivElement>, tabId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    setTabListOpen(false);
+    setTabContextMenu({
+      tabId,
+      left: Math.max(
+        TAB_CONTEXT_MENU_MARGIN_PX,
+        Math.min(
+          event.clientX,
+          window.innerWidth - TAB_CONTEXT_MENU_WIDTH_PX - TAB_CONTEXT_MENU_MARGIN_PX
+        )
+      ),
+      top: Math.max(
+        TAB_CONTEXT_MENU_MARGIN_PX,
+        Math.min(
+          event.clientY,
+          window.innerHeight - TAB_CONTEXT_MENU_HEIGHT_PX - TAB_CONTEXT_MENU_MARGIN_PX
+        )
+      )
+    });
   }
 
   function clearTabDragState() {
@@ -4978,8 +5043,9 @@ export function App() {
     showToast(copied ? "Copied file path" : "Clipboard write failed");
   }
 
-  async function revealDocumentInFolder() {
-    const document = currentActiveDocumentTabForCommand().document;
+  async function revealDocumentInFolder(tabId = activeTabIdRef.current) {
+    const document = tabsRef.current.find((tab) => tab.id === tabId)?.document;
+    if (!document) return;
     if (!document.filePath) {
       showToast("No file path yet");
       return;
@@ -7407,6 +7473,7 @@ export function App() {
                 aria-grabbed={draggedTabId === tab.id ? true : undefined}
                 data-tab-id={tab.id}
                 title={tabTitle}
+                onContextMenu={(event) => openTabContextMenu(event, tab.id)}
               >
                 <button
                   className={tabs.length > 1 ? "tab-select draggable" : "tab-select"}
@@ -7436,9 +7503,37 @@ export function App() {
                   <X size={13} />
                 </button>
               </div>
-            );
-          })}
+              );
+            })}
         </div>
+        {tabContextMenu && tabContextMenuTab && (
+          <div
+            ref={tabContextMenuRef}
+            className="tab-context-menu"
+            role="menu"
+            aria-label={t("Tab actions")}
+            style={{ left: tabContextMenu.left, top: tabContextMenu.top }}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!tabContextMenuTab.document.filePath || !desktopRuntime}
+              title={!tabContextMenuTab.document.filePath
+                ? t("No file path yet")
+                : !desktopRuntime
+                  ? t("Desktop app required to reveal files")
+                  : t("Reveal in Folder")}
+              onClick={() => {
+                const targetTabId = tabContextMenuTab.id;
+                setTabContextMenu(null);
+                void revealDocumentInFolder(targetTabId);
+              }}
+            >
+              <FolderOpen size={16} />
+              <span>{t("Reveal in Folder")}</span>
+            </button>
+          </div>
+        )}
         <div className="tab-list-menu" ref={tabListMenuRef}>
           <button
             className={tabListOpen ? "tab-list-trigger active" : "tab-list-trigger"}
@@ -7801,7 +7896,7 @@ export function App() {
                   <button
                     className="file-path-icon-button"
                     type="button"
-                    onClick={revealDocumentInFolder}
+                    onClick={() => void revealDocumentInFolder()}
                     title={t("Reveal in folder")}
                     aria-label={t("Reveal in folder")}
                   >

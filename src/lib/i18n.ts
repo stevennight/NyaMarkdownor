@@ -348,6 +348,7 @@ const zhCN: Record<string, string> = {
   "Scroll tabs left": "向左滚动标签页",
   "Scroll tabs right": "向右滚动标签页",
   "Open tab list": "打开标签页列表",
+  "Tab actions": "标签页操作",
   "Close tab": "关闭标签页",
   "New tab": "新建标签页",
   "Outline": "大纲",
