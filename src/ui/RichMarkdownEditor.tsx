@@ -417,7 +417,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   }, []);
 
   useImperativeHandle(forwardedRef, () => ({
-    focus: () => editor?.commands.focus(),
+    focus: () => editor?.commands.focus(null, { scrollIntoView: false }),
     scrollToHeading: (headingIndex) => scrollToRichHeading(editor, headingPositionsRef.current, headingIndex),
     flushMarkdownSync: () => markdownSyncRef.current?.flush() ?? false,
     getScrollProgress: () => scrollHostRef.current ? getScrollProgress(scrollHostRef.current) : null,
