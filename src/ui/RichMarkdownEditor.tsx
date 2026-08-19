@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type MutableRefObject } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type MutableRefObject } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import { type Editor } from "@tiptap/core";
 import { Trash2 } from "lucide-react";
@@ -170,25 +170,28 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
     });
   }
 
+  const richMarkdownExtensions = useMemo(() => createRichMarkdownExtensions(documentFilePath, {
+    onEditMermaidSource: (ordinal) => onEditMermaidSourceRef.current(ordinal),
+    getMermaidPreviewOptions: () => ({
+      theme: document.documentElement.dataset.theme === "dark" ? "dark" : "light",
+      labels: {
+        diagram: tRef.current("Mermaid diagram"),
+        editSource: tRef.current("Edit diagram source"),
+        rendering: tRef.current("Rendering diagram..."),
+        renderFailed: tRef.current("Diagram could not be rendered."),
+        sourceTooLarge: tRef.current("Diagram source is too large to render."),
+        diagramLimitReached: tRef.current("Diagram limit reached; source is shown.")
+      }
+    })
+  }), [documentFilePath]);
+  const editorExtensions = useMemo(
+    () => [...richMarkdownExtensions, richSearchHighlightExtension],
+    [richMarkdownExtensions]
+  );
+
   const editor = useEditor({
     immediatelyRender: true,
-    extensions: [
-      ...createRichMarkdownExtensions(documentFilePath, {
-        onEditMermaidSource: (ordinal) => onEditMermaidSourceRef.current(ordinal),
-        getMermaidPreviewOptions: () => ({
-          theme: document.documentElement.dataset.theme === "dark" ? "dark" : "light",
-          labels: {
-            diagram: tRef.current("Mermaid diagram"),
-            editSource: tRef.current("Edit diagram source"),
-            rendering: tRef.current("Rendering diagram..."),
-            renderFailed: tRef.current("Diagram could not be rendered."),
-            sourceTooLarge: tRef.current("Diagram source is too large to render."),
-            diagramLimitReached: tRef.current("Diagram limit reached; source is shown.")
-          }
-        })
-      }),
-      richSearchHighlightExtension
-    ],
+    extensions: editorExtensions,
     content: splitMarkdownFrontMatter(markdown).body,
     contentType: "markdown",
     editorProps: {

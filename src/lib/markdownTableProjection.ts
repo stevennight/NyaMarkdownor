@@ -23,8 +23,18 @@ type CodeFence = {
   length: number;
 };
 
+type MarkdownStartContext = {
+  lexer?: object;
+};
+
+type TableStartCacheState = {
+  cacheNegativeResult: boolean;
+  noMatch: boolean;
+};
+
 const API_TABLE_CONTINUATION_PREFIX = /^ {8,}(?=\|)/;
 const DESCRIPTION_HEADER = /(?:说明|描述|备注|\bdescription\b|\bnotes?\b)/i;
+const tableStartCache = new WeakMap<object, TableStartCacheState>();
 
 /**
  * Builds a parse-only projection for a narrow class of malformed API-export
@@ -48,27 +58,63 @@ export function projectMalformedMarkdownTables(markdown: string): string {
   return projected;
 }
 
-export function malformedMarkdownTableProjectionStart(markdown: string): number {
-  const lines = sourceLines(markdown);
-  let offset = 0;
+export function malformedMarkdownTableProjectionStart(this: MarkdownStartContext | void, markdown: string): number {
+  const cache = tableStartCacheFor(this?.lexer, markdown);
+  if (cache?.noMatch) return -1;
+
+  let scanOffset = 0;
+  let searchOffset = 0;
   let fence: CodeFence | null = null;
 
-  for (const line of lines) {
-    if (fence) {
-      if (closesCodeFence(line.text, fence)) fence = null;
-    } else {
-      const openingFence = openingCodeFence(line.text);
-      if (openingFence) {
-        fence = openingFence;
-      } else if (malformedMarkdownTableProjectionAtStart(markdown.slice(offset))) {
-        return offset;
-      }
+  while (true) {
+    const candidate = nextPipeLineStart(markdown, searchOffset);
+    if (candidate < 0) {
+      if (cache?.cacheNegativeResult) cache.noMatch = true;
+      return -1;
     }
 
-    offset = line.end;
-  }
+    while (scanOffset <= candidate) {
+      const lineEnd = lineEndAt(markdown, scanOffset);
+      const line = markdown.slice(scanOffset, lineEnd);
+      const nextOffset = lineBreakEndAt(markdown, lineEnd);
 
-  return -1;
+      if (fence) {
+        if (closesCodeFence(line, fence)) fence = null;
+      } else {
+        const openingFence = openingCodeFence(line);
+        if (openingFence) fence = openingFence;
+      }
+
+      if (scanOffset !== candidate) {
+        scanOffset = nextOffset;
+        continue;
+      }
+
+      if (!fence
+        && nextLineStartsWithPipe(markdown, lineEnd)
+        && malformedMarkdownTableProjectionAtStart(markdown.slice(candidate))) {
+        return candidate;
+      }
+
+      searchOffset = candidate + 1;
+      scanOffset = nextOffset;
+      break;
+    }
+  }
+}
+
+function tableStartCacheFor(lexer: object | undefined, source: string): TableStartCacheState | null {
+  if (!lexer) return null;
+
+  let cache = tableStartCache.get(lexer);
+  if (cache) return cache;
+
+  cache = {
+    cacheNegativeResult: !hasNestedBlockStart(source),
+    noMatch: false
+  };
+  tableStartCache.set(lexer, cache);
+  return cache;
 }
 
 export function malformedMarkdownTableProjectionAtStart(source: string): MalformedMarkdownTableProjection | null {
@@ -216,6 +262,36 @@ function openingCodeFence(line: string): CodeFence | null {
 function closesCodeFence(line: string, fence: CodeFence): boolean {
   const match = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
   return Boolean(match && match[1][0] === fence.char && match[1].length >= fence.length);
+}
+
+function lineEndAt(source: string, start: number): number {
+  let end = start;
+  while (end < source.length && source[end] !== "\r" && source[end] !== "\n") end += 1;
+  return end;
+}
+
+function lineBreakEndAt(source: string, lineEnd: number): number {
+  if (source[lineEnd] === "\r" && source[lineEnd + 1] === "\n") return lineEnd + 2;
+  if (source[lineEnd] === "\r" || source[lineEnd] === "\n") return lineEnd + 1;
+  return lineEnd;
+}
+
+function nextLineStartsWithPipe(source: string, lineEnd: number): boolean {
+  const nextLineStart = lineBreakEndAt(source, lineEnd);
+  return nextLineStart > lineEnd && source[nextLineStart] === "|";
+}
+
+function nextPipeLineStart(source: string, searchStart: number): number {
+  let pipeIndex = source.indexOf("|", searchStart);
+  while (pipeIndex >= 0) {
+    if (pipeIndex === 0 || source[pipeIndex - 1] === "\r" || source[pipeIndex - 1] === "\n") return pipeIndex;
+    pipeIndex = source.indexOf("|", pipeIndex + 1);
+  }
+  return -1;
+}
+
+function hasNestedBlockStart(source: string): boolean {
+  return /^ {0,3}>|^ {0,3}(?:[*+-]|\d{1,9}[.)])[ \t]/m.test(source);
 }
 
 function sourceLines(source: string, limit = Number.POSITIVE_INFINITY): SourceLine[] {

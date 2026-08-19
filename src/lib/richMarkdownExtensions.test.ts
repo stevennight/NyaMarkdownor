@@ -11,6 +11,24 @@ const extensions = createRichMarkdownExtensions(null);
 const markdown = new MarkdownManager({ extensions });
 
 describe("rich Markdown extensions", () => {
+  it("keeps Marked tokenizer registries isolated between extension sets", () => {
+    const firstExtensions = createRichMarkdownExtensions(null);
+    const secondExtensions = createRichMarkdownExtensions(null);
+    const firstMarked = firstExtensions.find((extension) => extension.name === "markdown")?.options.marked;
+    const secondMarked = secondExtensions.find((extension) => extension.name === "markdown")?.options.marked;
+
+    expect(firstMarked).toBeDefined();
+    expect(secondMarked).toBeDefined();
+    expect(firstMarked).not.toBe(secondMarked);
+
+    const firstManager = new MarkdownManager({ marked: firstMarked, extensions: firstExtensions });
+    const secondManager = new MarkdownManager({ marked: secondMarked, extensions: secondExtensions });
+    const firstBlockStarts = firstManager.instance.defaults.extensions?.startBlock ?? [];
+    const secondBlockStarts = secondManager.instance.defaults.extensions?.startBlock ?? [];
+    expect(secondBlockStarts).toHaveLength(firstBlockStarts.length);
+    expect(secondBlockStarts).not.toBe(firstBlockStarts);
+  });
+
   it("keeps normal URL linking enabled", () => {
     const link = extensions.find((extension) => extension.name === "link");
     expect(link?.options).toEqual(expect.objectContaining({
@@ -116,6 +134,26 @@ describe("rich Markdown extensions", () => {
       })
     ]);
     expect(markdown.serialize(parsed)).toContain("Body[^alpha].\n\n[^alpha]: First line\n    continued line");
+  });
+
+  it("keeps protected blocks inside blockquotes", () => {
+    const source = [
+      "> Quoted context",
+      ">",
+      "> [^alpha]: Quoted definition"
+    ].join("\n");
+    const parsed = markdown.parse(source);
+
+    expect(protectedNodes(parsed, "protectedMarkdownBlock")).toEqual([
+      expect.objectContaining({
+        attrs: expect.objectContaining({
+          kind: "footnote",
+          label: "alpha",
+          raw: "[^alpha]: Quoted definition"
+        })
+      })
+    ]);
+    expect(markdown.serialize(parsed)).toBe(source);
   });
 
   it("round-trips block and inline HTML without rendering or escaping it", () => {

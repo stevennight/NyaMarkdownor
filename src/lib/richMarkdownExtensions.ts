@@ -18,6 +18,7 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { decodeHTMLStrict } from "entities";
+import { Marked } from "marked";
 import { codeHighlightClasses } from "./codeHighlight";
 import { isMermaidLanguage } from "./mermaidLanguage";
 import { mermaidRenderSkipReason, renderMermaidPreview, type MermaidPreviewOptions } from "./mermaidPreview";
@@ -63,6 +64,15 @@ type MarkdownRenderHelpers = {
   indent: (text: string) => string;
 };
 
+type MarkdownStartContext = {
+  lexer?: object;
+};
+
+type BlockStartCacheState = {
+  cacheNegativeResult: boolean;
+  noMatch: boolean;
+};
+
 export type RichMarkdownExtensionOptions = {
   onEditMermaidSource?: (ordinal: number) => void;
   getMermaidPreviewOptions?: () => MermaidPreviewOptions;
@@ -92,7 +102,10 @@ const BLOCK_HTML_TAGS = new Set([
 const VOID_HTML_TAGS = new Set(["base", "basefont", "col", "frame", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
 const MAX_PRESERVED_TABLE_SOURCE_LENGTH = 256 * 1024;
 const TABLE_CELL_LINE_SEPARATOR = "<br>";
+const RICH_CODE_HIGHLIGHT_DELAY_MS = 50;
 const richCodeHighlightPluginKey = new PluginKey<DecorationSet>("richCodeHighlight");
+const protectedBlockStartCache = new WeakMap<object, BlockStartCacheState>();
+const malformedTableStartCache = new WeakMap<object, BlockStartCacheState>();
 
 const RichCodeHighlight = Extension.create({
   name: "richCodeHighlight",
@@ -101,13 +114,55 @@ const RichCodeHighlight = Extension.create({
     return [new Plugin<DecorationSet>({
       key: richCodeHighlightPluginKey,
       state: {
-        init: (_config, state) => richCodeHighlightDecorations(state.doc),
-        apply: (transaction, decorations, _oldState, newState) => (
-          transaction.docChanged ? richCodeHighlightDecorations(newState.doc) : decorations
-        )
+        init: () => DecorationSet.empty,
+        apply: (transaction, decorations, _oldState, newState) => {
+          if (transaction.getMeta(richCodeHighlightPluginKey) === "refresh") {
+            return richCodeHighlightDecorations(newState.doc);
+          }
+          return transaction.docChanged ? DecorationSet.empty : decorations;
+        }
       },
       props: {
         decorations: (state) => richCodeHighlightPluginKey.getState(state) ?? DecorationSet.empty
+      },
+      view: (view) => {
+        // Highlighting is visual enhancement; defer it until the editor can paint and coalesce edits.
+        let animationFrame: number | null = null;
+        let refreshTimer: number | null = null;
+
+        const cancelScheduledRefresh = () => {
+          if (animationFrame !== null) {
+            window.cancelAnimationFrame(animationFrame);
+            animationFrame = null;
+          }
+          if (refreshTimer !== null) {
+            window.clearTimeout(refreshTimer);
+            refreshTimer = null;
+          }
+        };
+
+        const dispatchRefresh = () => {
+          refreshTimer = null;
+          if (!view.isDestroyed) {
+            view.dispatch(view.state.tr.setMeta(richCodeHighlightPluginKey, "refresh"));
+          }
+        };
+
+        const scheduleRefresh = () => {
+          cancelScheduledRefresh();
+          animationFrame = window.requestAnimationFrame(() => {
+            animationFrame = null;
+            refreshTimer = window.setTimeout(dispatchRefresh, RICH_CODE_HIGHLIGHT_DELAY_MS);
+          });
+        };
+
+        scheduleRefresh();
+        return {
+          update(updatedView, previousState) {
+            if (updatedView.state.doc !== previousState.doc) scheduleRefresh();
+          },
+          destroy: cancelScheduledRefresh
+        };
       }
     })];
   }
@@ -1323,7 +1378,7 @@ export function createRichMarkdownExtensions(
         };
       }
     }),
-    Markdown
+    Markdown.configure({ marked: new Marked() as unknown as typeof import("marked").marked })
   ];
 }
 
@@ -1440,17 +1495,17 @@ function htmlBlockAtStart(src: string): ProtectedMatch | null {
   return htmlBlockMatch(consumed);
 }
 
-function protectedBlockStart(src: string): number {
-  const indexes = [
-    src.search(/^ {0,3}\[\^[^\]\r\n]+\]:/m),
-    src.search(/^ {0,3}(?:<!--|<![A-Z]|<\?|<[A-Za-z][A-Za-z0-9-]*(?:\s|\/?>))/m)
-  ].filter((index) => index >= 0);
-  return indexes.length ? Math.min(...indexes) : -1;
+function protectedBlockStart(this: MarkdownStartContext | void, src: string): number {
+  const cache = blockStartCacheFor(this?.lexer, protectedBlockStartCache, src);
+  if (cache?.noMatch) return -1;
+
+  const result = src.search(/^ {0,3}(?:\[\^[^\]\r\n]+\]:|<!--|<![A-Z]|<\?|<[A-Za-z][A-Za-z0-9-]*(?:\s|\/?>))/m);
+  if (result < 0 && cache?.cacheNegativeResult) cache.noMatch = true;
+  return result;
 }
 
 function protectedInlineStart(src: string): number {
-  const indexes = [src.search(/\[\^[^\]\r\n]+\]/), src.search(/(?:<!--|<\/?[A-Za-z]|<![A-Z]|<\?)/)].filter((index) => index >= 0);
-  return indexes.length ? Math.min(...indexes) : -1;
+  return src.search(/(?:\[\^[^\]\r\n]+\]|<!--|<\/?[A-Za-z]|<![A-Z]|<\?)/);
 }
 
 function protectedToken(type: string, match: ProtectedMatch): ProtectedMarkdownToken {
@@ -1461,6 +1516,28 @@ function protectedToken(type: string, match: ProtectedMatch): ProtectedMarkdownT
     protectedLabel: match.label,
     protectedRaw: match.raw
   } as ProtectedMarkdownToken;
+}
+
+function blockStartCacheFor(
+  lexer: object | undefined,
+  caches: WeakMap<object, BlockStartCacheState>,
+  source: string
+): BlockStartCacheState | null {
+  if (!lexer) return null;
+
+  let cache = caches.get(lexer);
+  if (cache) return cache;
+
+  cache = {
+    cacheNegativeResult: !hasNestedBlockStart(source),
+    noMatch: false
+  };
+  caches.set(lexer, cache);
+  return cache;
+}
+
+function hasNestedBlockStart(source: string): boolean {
+  return /^ {0,3}>|^ {0,3}(?:[*+-]|\d{1,9}[.)])[ \t]/m.test(source);
 }
 
 function protectedMarkdownAttributes() {
