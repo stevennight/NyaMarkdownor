@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "nya-markdownor"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "dunce",
  "reqwest",
