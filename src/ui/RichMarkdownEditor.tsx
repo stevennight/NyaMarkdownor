@@ -10,7 +10,7 @@ import type { TableDocumentCommand } from "../lib/tableDocumentCommands";
 import type { SearchMatch, SearchOptions } from "../lib/search";
 import type { TextRange } from "../lib/editorCommands";
 import { createRichMarkdownSyncScheduler, richMarkdownSyncDelayFor, type RichMarkdownSyncSource } from "../lib/richMarkdownSync";
-import { richTableClipboardFormats, type RichTableClipboardFormats } from "../lib/richTableClipboard";
+import { richTableCellText, richTableClipboardFormats, type RichTableClipboardFormats } from "../lib/richTableClipboard";
 import { clipboardPayloadForCopyMode, trimClipboardBoundaryLineBreaks, writeClipboardEventData } from "../lib/clipboard";
 import { clipboardRowsForTablePaste, type ClipboardTableSource } from "../lib/clipboardTableRows";
 import type { RichDocumentHistoryAction } from "../lib/richDocumentHistory";
@@ -699,7 +699,7 @@ function richTableClipboardContent(editor: Editor | null): RichTableClipboardCon
       const cellPosition = map.map[row * map.width + column];
       const cell = editor.state.doc.nodeAt(tableStart + cellPosition);
       if (!cell || Number(cell.attrs.colspan ?? 1) !== 1 || Number(cell.attrs.rowspan ?? 1) !== 1) return null;
-      cells.push(cell.textBetween(0, cell.content.size, "\n"));
+      cells.push(richTableCellText(cell));
     }
     rows.push(cells);
   }

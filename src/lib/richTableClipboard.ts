@@ -1,3 +1,5 @@
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+
 export type RichTableClipboardFormats = {
   csv: string;
   html: string;
@@ -5,6 +7,15 @@ export type RichTableClipboardFormats = {
   plainText: string;
   tsv: string;
 };
+
+export function richTableCellText(cell: ProseMirrorNode): string {
+  const chunks: string[] = [];
+  cell.forEach((child, _offset, index) => {
+    if (index > 0) chunks.push("\n");
+    appendRichTableText(child, chunks);
+  });
+  return chunks.join("");
+}
 
 export function richTableClipboardFormats(rows: readonly (readonly string[])[]): RichTableClipboardFormats | null {
   if (!rows.length || !rows[0].length) return null;
@@ -31,6 +42,25 @@ function tableHtml(rows: readonly (readonly string[])[]): string {
   const headerHtml = header.map((cell) => `<th>${htmlCell(cell)}</th>`).join("");
   const bodyHtml = body.map((row) => `<tr>${row.map((cell) => `<td>${htmlCell(cell)}</td>`).join("")}</tr>`).join("");
   return `<table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>`;
+}
+
+function appendRichTableText(node: ProseMirrorNode, chunks: string[]): void {
+  if (node.isText) {
+    chunks.push(node.text ?? "");
+    return;
+  }
+
+  if (node.type.name === "hardBreak") {
+    chunks.push("\n");
+    return;
+  }
+
+  if (node.isLeaf) return;
+
+  node.forEach((child, _offset, index) => {
+    if (index > 0 && child.isBlock) chunks.push("\n");
+    appendRichTableText(child, chunks);
+  });
 }
 
 function htmlCell(value: string): string {

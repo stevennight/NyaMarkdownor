@@ -25,6 +25,7 @@ import { mermaidRenderSkipReason, renderMermaidPreview, type MermaidPreviewOptio
 import { localImageSourceForRender } from "./previewAssets";
 import { normalizeRichLinkHref } from "./richLinks";
 import { createRichMarkdownLinkInputRule } from "./richMarkdownLinkInput";
+import { createRichMarkdownBreakInputRule } from "./richMarkdownBreakInput";
 import {
   malformedMarkdownTableProjectionAtStart,
   malformedMarkdownTableProjectionStart
@@ -1376,6 +1377,10 @@ const ProtectedMarkdownInline = Node.create({
 
   renderMarkdown(node) {
     return protectedRaw(node.attrs?.raw);
+  },
+
+  addInputRules() {
+    return [createRichMarkdownBreakInputRule(this.type, this.editor.schema.nodes.hardBreak)];
   }
 });
 

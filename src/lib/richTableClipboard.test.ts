@@ -1,7 +1,23 @@
+import { getSchema } from "@tiptap/core";
+import { createRichMarkdownExtensions } from "./richMarkdownExtensions";
 import { describe, expect, it } from "vitest";
-import { richTableClipboardFormats } from "./richTableClipboard";
+import { richTableCellText, richTableClipboardFormats } from "./richTableClipboard";
+
+const schema = getSchema(createRichMarkdownExtensions(null));
 
 describe("rich table clipboard formats", () => {
+  it("preserves hard breaks when extracting a rich table cell", () => {
+    const cell = schema.node("tableCell", null, [
+      schema.node("paragraph", null, [
+        schema.text("Line one"),
+        schema.node("hardBreak", { markdownMarker: "<br>" }),
+        schema.text("Line two")
+      ])
+    ]);
+
+    expect(richTableCellText(cell)).toBe("Line one\nLine two");
+  });
+
   it("exports rectangular visual-table selections as CSV, TSV, and Markdown", () => {
     expect(richTableClipboardFormats([
       ["Name", "Note"],
