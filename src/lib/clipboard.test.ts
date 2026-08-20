@@ -34,9 +34,80 @@ describe("clipboard helpers", () => {
     });
   });
 
+  it("normalizes generated Markdown spacing for every copy mode that carries Markdown", () => {
+    const payload = {
+      plainText: "First\nSecond",
+      html: "<p>First</p><p>Second</p>",
+      markdown: "First\n\n\nSecond"
+    };
+
+    expect(clipboardPayloadForCopyMode(payload, "markdown")).toEqual({
+      plainText: "First\n\nSecond",
+      markdown: "First\n\nSecond"
+    });
+    expect(clipboardPayloadForCopyMode(payload, "smart")).toEqual({
+      ...payload,
+      markdown: "First\n\nSecond"
+    });
+    expect(clipboardPayloadForCopyMode(payload, "plain")).toEqual({
+      plainText: "First\nSecond"
+    });
+  });
+
   it("removes editor-generated line breaks only at rich clipboard boundaries", () => {
     expect(trimClipboardBoundaryLineBreaks("\r\n# Heading\r\n\r\nBody\r\n\r\n")).toBe("# Heading\n\nBody");
     expect(trimClipboardBoundaryLineBreaks("  code  ")).toBe("  code  ");
+  });
+
+  it("collapses generated paragraph spacing without touching fenced code or HTML blocks", () => {
+    expect(trimClipboardBoundaryLineBreaks([
+      "First",
+      "",
+      "",
+      "",
+      "Second",
+      "",
+      "```text",
+      "line 1",
+      "",
+      "",
+      "line 2",
+      "```",
+      "",
+      "",
+      "<div>",
+      "",
+      "",
+      "inside HTML",
+      "</div>",
+      "",
+      "",
+      "After"
+    ].join("\n"))).toBe([
+      "First",
+      "",
+      "Second",
+      "",
+      "```text",
+      "line 1",
+      "",
+      "",
+      "line 2",
+      "```",
+      "",
+      "<div>",
+      "",
+      "",
+      "inside HTML",
+      "</div>",
+      "",
+      "After"
+    ].join("\n"));
+  });
+
+  it("does not treat HTML void elements as an open block", () => {
+    expect(trimClipboardBoundaryLineBreaks("First\n\n\n<br>\n\n\nSecond"))
+      .toBe("First\n\n<br>\n\nSecond");
   });
 
   it("keeps explicit Markdown source ahead of clean clipboard representations", () => {
@@ -90,6 +161,22 @@ describe("clipboard helpers", () => {
     expect(clipboardData.setData).toHaveBeenCalledWith("text/markdown", "**Plain**");
     expect(clipboardPlugin.writeHtml).not.toHaveBeenCalled();
     expect(clipboardPlugin.writeText).not.toHaveBeenCalled();
+  });
+
+  it("normalizes Markdown spacing before direct copy helpers write it", async () => {
+    const clipboardData = createClipboardData();
+    const copyEvent = createClipboardEvent(clipboardData);
+    const document = createCopyDocument(copyEvent);
+    vi.stubGlobal("document", document);
+
+    const mode = await copyRichContent({
+      plainText: "First\n\n\nSecond",
+      markdown: "First\n\n\nSecond"
+    });
+
+    expect(mode).toBe("plain");
+    expect(clipboardData.setData).toHaveBeenCalledWith("text/plain", "First\n\nSecond");
+    expect(clipboardData.setData).toHaveBeenCalledWith("text/markdown", "First\n\nSecond");
   });
 });
 

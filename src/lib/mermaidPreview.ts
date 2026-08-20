@@ -12,6 +12,8 @@ type MermaidApi = typeof import("mermaid")["default"];
 export type MermaidPreviewLabels = {
   diagram: string;
   editSource: string;
+  cancel: string;
+  save: string;
   rendering: string;
   renderFailed: string;
   sourceTooLarge: string;

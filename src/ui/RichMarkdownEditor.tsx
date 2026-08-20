@@ -3,7 +3,7 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import { type Editor } from "@tiptap/core";
 import { Trash2 } from "lucide-react";
 import { type Node as ProseMirrorNode } from "@tiptap/pm/model";
-import type { SelectionBookmark } from "@tiptap/pm/state";
+import { TextSelection, type SelectionBookmark } from "@tiptap/pm/state";
 import { CellSelection, TableMap } from "@tiptap/pm/tables";
 import type { MarkdownBlockCommand, MarkdownListIndentDirection, MarkdownTextCommand } from "../lib/editorCommands";
 import type { TableDocumentCommand } from "../lib/tableDocumentCommands";
@@ -26,7 +26,7 @@ import { markdownFrontMatterEditor, promoteMarkdownFrontMatter, splitMarkdownFro
 import { shouldHandleDefaultCopy } from "../lib/selectionCopy";
 import { richTableStructureTransaction, type RichTableStructureCommand } from "../lib/richTableStructure";
 import { createRichMarkdownExtensions } from "../lib/richMarkdownExtensions";
-import { withoutGeneratedTrailingParagraph } from "../lib/richMarkdownDocument";
+import { normalizeRichOrderedLists, withoutGeneratedTrailingParagraph } from "../lib/richMarkdownDocument";
 import { shouldOpenRichLinkOnClick } from "../lib/richLinks";
 import { browserTitleLinkFromClipboard } from "../lib/richLinkPaste";
 import { findRichTextMatches, richSearchHighlightExtension, setRichSearchHighlights } from "../lib/richSearch";
@@ -95,7 +95,8 @@ type RichMarkdownEditorProps = {
   onReady: () => void;
   onActiveHeadingIndexChange: (index: number | null) => void;
   onOpenLink: (href: string) => void;
-  onEditMermaidSource: (ordinal: number) => void;
+  onEditLink: (href: string, canUnlink: boolean) => void;
+  onTableContextMenu?: (position: { left: number; top: number }) => void;
   onToast: (message: string) => void;
   scrollProgress?: number;
   onScrollProgress?: (progress: number) => void;
@@ -106,7 +107,7 @@ type RichMarkdownEditorProps = {
 };
 
 export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, RichMarkdownEditorProps>(function RichMarkdownEditor(
-  { documentFilePath, markdown, t, copyMode, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onReady, onActiveHeadingIndexChange, onOpenLink, onEditMermaidSource, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
+  { documentFilePath, markdown, t, copyMode, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onReady, onActiveHeadingIndexChange, onOpenLink, onEditLink, onTableContextMenu, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
   forwardedRef
 ) {
   const tRef = useRef(t);
@@ -118,7 +119,8 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   const onReadyRef = useRef(onReady);
   const onActiveHeadingIndexChangeRef = useRef(onActiveHeadingIndexChange);
   const onOpenLinkRef = useRef(onOpenLink);
-  const onEditMermaidSourceRef = useRef(onEditMermaidSource);
+  const onEditLinkRef = useRef(onEditLink);
+  const onTableContextMenuRef = useRef(onTableContextMenu);
   const onToastRef = useRef(onToast);
   const copyModeRef = useRef(copyMode);
   const onScrollProgressRef = useRef(onScrollProgress);
@@ -142,7 +144,8 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   onReadyRef.current = onReady;
   onActiveHeadingIndexChangeRef.current = onActiveHeadingIndexChange;
   onOpenLinkRef.current = onOpenLink;
-  onEditMermaidSourceRef.current = onEditMermaidSource;
+  onEditLinkRef.current = onEditLink;
+  onTableContextMenuRef.current = onTableContextMenu;
   onToastRef.current = onToast;
   copyModeRef.current = copyMode;
   onScrollProgressRef.current = onScrollProgress;
@@ -171,12 +174,13 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   }
 
   const richMarkdownExtensions = useMemo(() => createRichMarkdownExtensions(documentFilePath, {
-    onEditMermaidSource: (ordinal) => onEditMermaidSourceRef.current(ordinal),
     getMermaidPreviewOptions: () => ({
       theme: document.documentElement.dataset.theme === "dark" ? "dark" : "light",
       labels: {
         diagram: tRef.current("Mermaid diagram"),
         editSource: tRef.current("Edit diagram source"),
+        cancel: tRef.current("Cancel"),
+        save: tRef.current("Save diagram"),
         rendering: tRef.current("Rendering diagram..."),
         renderFailed: tRef.current("Diagram could not be rendered."),
         sourceTooLarge: tRef.current("Diagram source is too large to render."),
@@ -200,6 +204,15 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
         spellcheck: "true"
       },
       handleKeyDown: (_view, event) => {
+        if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "k") {
+          const link = richLinkState(editorRef.current);
+          if (!link) return false;
+
+          event.preventDefault();
+          onEditLinkRef.current(link.href, link.active);
+          return true;
+        }
+
         const action = richHistoryActionForKeyEvent(event);
         if (!action) return false;
         if (lastEditSurfaceRef.current === "front-matter") {
@@ -220,8 +233,6 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
           return false;
         },
         click: (view, event) => {
-          if (!shouldOpenRichLinkOnClick(event)) return false;
-
           const target = event.target;
           if (!(target instanceof Element)) return false;
           const link = target.closest<HTMLAnchorElement>("a[href]");
@@ -231,7 +242,32 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
           if (!href) return false;
 
           event.preventDefault();
-          onOpenLinkRef.current(href);
+          if (shouldOpenRichLinkOnClick(event)) {
+            onOpenLinkRef.current(href);
+          } else {
+            onEditLinkRef.current(href, true);
+          }
+          return true;
+        },
+        contextmenu: (view, event) => {
+          const target = event.target;
+          if (!(target instanceof Element) || !target.closest("td, th")) return false;
+
+          const coords = view.posAtCoords({ left: event.clientX, top: event.clientY });
+          if (coords) {
+            const resolved = view.state.doc.resolve(coords.pos);
+            let cellDepth = resolved.depth;
+            while (cellDepth > 0 && !isRichTableCellNode(resolved.node(cellDepth))) cellDepth -= 1;
+            if (cellDepth > 0) {
+              const cellStart = resolved.start(cellDepth);
+              const cell = resolved.node(cellDepth);
+              const position = Math.max(cellStart, Math.min(cellStart + cell.content.size, coords.pos));
+              view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(position))));
+            }
+          }
+
+          event.preventDefault();
+          onTableContextMenuRef.current?.({ left: event.clientX, top: event.clientY });
           return true;
         },
         copy: (_view, event) => {
@@ -700,6 +736,10 @@ function richTableContext(editor: Editor, selectedCells: boolean): {
   return null;
 }
 
+function isRichTableCellNode(node: ProseMirrorNode): boolean {
+  return node.type.spec.tableRole === "cell" || node.type.spec.tableRole === "header_cell";
+}
+
 function expandRichTableForPaste(editor: Editor, capacity: RichTablePasteCapacity): boolean {
   for (let index = 0; index < capacity.additionalColumns; index += 1) {
     const context = richTableContext(editor, true);
@@ -764,7 +804,7 @@ function serializeRichMarkdown(editor: Editor, fallback: string): string {
 
   try {
     return editor.markdown?.serialize(
-      withoutGeneratedTrailingParagraph(editor.getJSON())
+      withoutGeneratedTrailingParagraph(normalizeRichOrderedLists(editor.getJSON()))
     ) ?? editor.getMarkdown();
   } catch {
     return fallback;

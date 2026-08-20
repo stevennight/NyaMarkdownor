@@ -11,15 +11,85 @@ export type ClipboardPayload = {
 
 export type ClipboardWriteMode = "rich" | "html" | "plain";
 
+const HTML_BLOCK_TAGS = new Set([
+  "address", "article", "aside", "blockquote", "body", "caption", "center", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "html", "iframe", "legend", "li", "main", "menu", "menuitem", "nav", "ol", "p", "pre", "script", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "title", "tr", "track", "ul", "style", "textarea"
+]);
+
+const HTML_VOID_TAGS = new Set([
+  "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"
+]);
+
 export function trimClipboardBoundaryLineBreaks(text: string): string {
-  return normalizeMarkdownLineEndings(text).replace(/^\n+|\n+$/g, "");
+  const normalized = normalizeMarkdownLineEndings(text).replace(/^\n+|\n+$/g, "");
+  return normalizeClipboardMarkdownSpacing(normalized);
+}
+
+function normalizeClipboardMarkdownSpacing(text: string): string {
+  if (!text) return text;
+
+  const lines = text.split("\n");
+  const output: string[] = [];
+  let fence: { char: "`" | "~"; length: number } | null = null;
+  let htmlBlock: { tag?: string; comment: boolean } | null = null;
+
+  for (const line of lines) {
+    if (fence) {
+      output.push(line);
+      const closing = line.match(new RegExp(`^ {0,3}(${fence.char}{${fence.length},})[ \\t]*$`));
+      if (closing) fence = null;
+      continue;
+    }
+
+    if (htmlBlock) {
+      output.push(line);
+      if (htmlBlock.comment ? line.includes("-->") : htmlBlock.tag && new RegExp(`</${htmlBlock.tag}\\s*>`, "i").test(line)) {
+        htmlBlock = null;
+      }
+      continue;
+    }
+
+    const openingFence = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (openingFence) {
+      output.push(line);
+      fence = { char: openingFence[1][0] as "`" | "~", length: openingFence[1].length };
+      continue;
+    }
+
+    const openingComment = /^ {0,3}<!--/.test(line) && !line.includes("-->");
+    const openingHtml = line.match(/^ {0,3}<([A-Za-z][A-Za-z0-9-]*)\b[^>]*>/);
+    const htmlTag = openingHtml?.[1].toLowerCase();
+    const htmlIsBlock = Boolean(htmlTag && HTML_BLOCK_TAGS.has(htmlTag));
+    const htmlIsSelfClosing = Boolean(htmlTag && (HTML_VOID_TAGS.has(htmlTag) || /\/\\s*>$/.test(line)));
+    const htmlHasInlineClose = Boolean(htmlTag && new RegExp(`</${htmlTag}\\s*>`, "i").test(line));
+    if (openingComment || (openingHtml && htmlIsBlock && !htmlIsSelfClosing && !htmlHasInlineClose)) {
+      htmlBlock = openingComment ? { comment: true } : { tag: openingHtml?.[1], comment: false };
+      output.push(line);
+      continue;
+    }
+
+    if (/^[ \\t]*$/.test(line)) {
+      if (output.at(-1) !== "") output.push("");
+      continue;
+    }
+
+    output.push(line);
+  }
+
+  return output.join("\n");
 }
 
 export function clipboardPayloadForCopyMode(payload: ClipboardPayload, copyMode: CopyMode): ClipboardPayload {
-  if (copyMode === "smart") return payload;
+  const normalizedMarkdown = payload.markdown === undefined
+    ? undefined
+    : trimClipboardBoundaryLineBreaks(payload.markdown);
+  const normalizedPayload = normalizedMarkdown === payload.markdown
+    ? payload
+    : { ...payload, markdown: normalizedMarkdown };
+
+  if (copyMode === "smart") return normalizedPayload;
   if (copyMode === "plain") return { plainText: payload.plainText };
 
-  const markdown = payload.markdown ?? payload.plainText;
+  const markdown = normalizedPayload.markdown ?? payload.plainText;
   return {
     plainText: markdown,
     markdown
@@ -60,29 +130,43 @@ export async function copyText(text: string): Promise<boolean> {
 }
 
 export async function copyRichContent(payload: ClipboardPayload): Promise<ClipboardWriteMode | null> {
-  const eventMode = copyViaClipboardEvent(payload);
+  const normalizedPayload = normalizeClipboardPayload(payload);
+  const eventMode = copyViaClipboardEvent(normalizedPayload);
   if (eventMode) return eventMode;
 
-  if (payload.html && isTauriRuntime()) {
-    await writeClipboardHtml(payload.html, payload.plainText);
+  if (normalizedPayload.html && isTauriRuntime()) {
+    await writeClipboardHtml(normalizedPayload.html, normalizedPayload.plainText);
     return "html";
   }
 
-  if (!payload.html && payload.markdown && isTauriRuntime()) {
-    await writeClipboardText(payload.markdown);
+  if (!normalizedPayload.html && normalizedPayload.markdown && isTauriRuntime()) {
+    await writeClipboardText(normalizedPayload.markdown);
     return "plain";
   }
 
-  if (payload.html && navigator.clipboard && typeof ClipboardItem !== "undefined") {
-    const richMode = await writeBrowserClipboardItem(payload, true);
+  if (normalizedPayload.html && navigator.clipboard && typeof ClipboardItem !== "undefined") {
+    const richMode = await writeBrowserClipboardItem(normalizedPayload, true);
     if (richMode) return richMode;
 
-    const htmlMode = await writeBrowserClipboardItem(payload, false);
+    const htmlMode = await writeBrowserClipboardItem(normalizedPayload, false);
     if (htmlMode) return htmlMode;
   }
 
-  const copied = await copyText(payload.markdown ?? payload.plainText);
+  const copied = await copyText(normalizedPayload.markdown ?? normalizedPayload.plainText);
   return copied ? "plain" : null;
+}
+
+function normalizeClipboardPayload(payload: ClipboardPayload): ClipboardPayload {
+  if (payload.markdown === undefined) return payload;
+
+  const markdown = trimClipboardBoundaryLineBreaks(payload.markdown);
+  if (markdown === payload.markdown) return payload;
+
+  return {
+    ...payload,
+    plainText: payload.plainText === payload.markdown ? markdown : payload.plainText,
+    markdown
+  };
 }
 
 function setClipboardData(clipboardData: DataTransfer, payload: ClipboardPayload): ClipboardWriteMode {

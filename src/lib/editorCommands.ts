@@ -266,6 +266,77 @@ export function applyMarkdownListIndentation(
   };
 }
 
+export function normalizeMarkdownOrderedListNumbers(markdown: string): string {
+  const changes = orderedListNumberChanges(markdown);
+  let normalized = markdown;
+  for (let index = changes.length - 1; index >= 0; index -= 1) {
+    const change = changes[index];
+    normalized = applyTextChange(normalized, change);
+  }
+  return normalized;
+}
+
+export function orderedListNumberChanges(markdown: string): TextChange[] {
+  const changes: TextChange[] = [];
+  const counters = new Map<string, { next: number; quoteDepth: number; indentWidth: number }>();
+  let fence: { char: "`" | "~"; length: number } | null = null;
+  let lineStart = 0;
+
+  for (const line of markdown.split("\n")) {
+    if (fence) {
+      const closing = line.match(new RegExp(`^ {0,3}(${fence.char}{${fence.length},})[ \\t]*$`));
+      if (closing) fence = null;
+      lineStart += line.length + 1;
+      continue;
+    }
+
+    const openingFence = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (openingFence) {
+      fence = { char: openingFence[1][0] as "`" | "~", length: openingFence[1].length };
+      lineStart += line.length + 1;
+      continue;
+    }
+
+    const ordered = parseOrderedLine(line, lineStart);
+    if (!ordered) {
+      if (line.trim()) {
+        const structure = markdownLineStructure(line);
+        const isNestedContinuation = [...counters.values()].some((counter) => (
+          structure.quoteDepth >= counter.quoteDepth && structure.indentWidth > counter.indentWidth
+        ));
+        if (!isNestedContinuation) counters.clear();
+      }
+      lineStart += line.length + 1;
+      continue;
+    }
+
+    for (const [key, counter] of counters) {
+      const sameIndent = counter.quoteDepth === ordered.quoteDepth && counter.indentWidth === ordered.indentWidth;
+      const deeper = counter.quoteDepth > ordered.quoteDepth
+        || (counter.quoteDepth === ordered.quoteDepth && counter.indentWidth > ordered.indentWidth);
+      if (deeper || (sameIndent && key !== `${ordered.prefix}\u0000${ordered.delimiter}`)) counters.delete(key);
+    }
+
+    const key = `${ordered.prefix}\u0000${ordered.delimiter}`;
+    const expected = counters.get(key)?.next ?? ordered.number;
+    if (ordered.number !== expected) {
+      changes.push({
+        from: ordered.markerFrom,
+        to: ordered.markerTo,
+        insert: String(expected)
+      });
+    }
+    counters.set(key, {
+      next: expected + 1,
+      quoteDepth: ordered.quoteDepth,
+      indentWidth: ordered.indentWidth
+    });
+    lineStart += line.length + 1;
+  }
+
+  return changes;
+}
+
 export function applyMarkdownListBackspace(markdown: string, selection: TextRange): TextEdit | null {
   if (selection.from !== selection.to) return null;
 

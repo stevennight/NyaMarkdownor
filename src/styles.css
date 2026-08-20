@@ -1278,6 +1278,75 @@ body.pane-resizing * {
   background-repeat: no-repeat;
 }
 
+.table-context-menu {
+  position: fixed;
+  z-index: 90;
+  display: grid;
+  gap: 2px;
+  width: min(286px, calc(100vw - 16px));
+  max-height: min(560px, calc(100vh - 16px));
+  overflow-y: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-solid);
+  padding: 5px;
+  box-shadow: var(--shadow);
+  scrollbar-gutter: stable;
+}
+
+.table-context-menu-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  border-bottom: 1px solid var(--line);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 760;
+  padding: 0 9px 4px;
+}
+
+.table-context-menu-heading svg {
+  flex: 0 0 auto;
+}
+
+.table-context-menu button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0 9px;
+  text-align: left;
+}
+
+.table-context-menu button svg {
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+}
+
+.table-context-menu button:hover {
+  background: var(--accent-soft);
+}
+
+.table-context-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.table-context-menu button.danger {
+  color: var(--danger);
+}
+
+.table-context-menu button.danger svg {
+  color: currentColor;
+}
+
 .table-floatbar {
   position: absolute;
   top: 70px;
@@ -1778,6 +1847,89 @@ body.pane-resizing * {
 .tiptap-markdown-editor .rich-mermaid-diagram.ProseMirror-selectednode > .markdown-diagram {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+.tiptap-markdown-editor .rich-mermaid-editor {
+  display: grid;
+  gap: 10px;
+  margin: 0.85em 0;
+  border: 1px solid color-mix(in srgb, var(--accent), transparent 48%);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  padding: 12px;
+  box-shadow: var(--shadow);
+}
+
+.rich-mermaid-editor-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rich-mermaid-editor-header strong {
+  color: var(--text);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.rich-mermaid-editor-header span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.rich-mermaid-editor-input {
+  display: block;
+  width: 100%;
+  min-height: 108px;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  outline: none;
+  background: var(--editor-bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.88em;
+  line-height: 1.55;
+  padding: 10px;
+}
+
+.rich-mermaid-editor-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.rich-mermaid-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.rich-mermaid-editor-actions button {
+  min-height: 30px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-solid);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 680;
+  padding: 0 10px;
+}
+
+.rich-mermaid-editor-actions button:hover {
+  background: var(--accent-soft);
+}
+
+.rich-mermaid-editor-actions button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.rich-mermaid-editor-actions button.primary:hover {
+  background: var(--accent-strong);
 }
 
 @keyframes diagram-spin {

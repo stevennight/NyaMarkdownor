@@ -24,6 +24,7 @@ const zhCN: Record<string, string> = {
   "Preview": "预览",
   "Mermaid diagram": "Mermaid 图表",
   "Edit diagram source": "编辑图表源码",
+  "Save diagram": "保存图表",
   "Rendering diagram...": "正在渲染图表...",
   "Diagram could not be rendered.": "无法渲染图表。",
   "Diagram source is too large to render.": "图表源码过大，无法渲染。",

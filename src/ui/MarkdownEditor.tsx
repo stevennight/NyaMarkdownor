@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useRef, type ForwardedRef, type MutableRefObject } from "react";
-import { Compartment, EditorState, type Extension } from "@codemirror/state";
+import { ChangeSet, Compartment, EditorState, Transaction, type Extension } from "@codemirror/state";
 import {
   crosshairCursor,
   drawSelection,
@@ -15,7 +15,9 @@ import {
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
-import { applyMarkdownBlockquoteBackspace, applyMarkdownLineContinuation, applyMarkdownListBackspace, applyMarkdownListIndentation, applyMarkdownListItemLineBreak, applyMarkdownTextCommand, applyTextChange, type MarkdownTextCommand, type TextEdit } from "../lib/editorCommands";
+import { applyMarkdownBlockquoteBackspace, applyMarkdownLineContinuation, applyMarkdownListBackspace, applyMarkdownListIndentation, applyMarkdownListItemLineBreak, applyMarkdownTextCommand, applyTextChange, orderedListNumberChanges, type MarkdownTextCommand, type TextEdit } from "../lib/editorCommands";
+import { findTableAtOffset } from "../lib/tables";
+import { sourceLinkAtPosition } from "../lib/sourceLinks";
 import { markdownRangesToClipboardPayload } from "../lib/markdown";
 import { applySelectedTableCellsClear, applySelectedTableCellsPaste, applyTableCellLineBreak, applyTableCellNavigation, applyTableCsvPaste, applyTableDocumentCommand, applyTableRowsPaste, applyTableTsvPaste, type TableDocumentCommand } from "../lib/tableDocumentCommands";
 import { clipboardRowsForTablePaste, type ClipboardTableSource } from "../lib/clipboardTableRows";
@@ -60,6 +62,8 @@ type MarkdownEditorProps = {
   searchMatches?: TextRange[];
   activeSearchRange?: TextRange | null;
   onInsertTableRequest?: () => void;
+  onTableContextMenu?: (position: { left: number; top: number }) => void;
+  onOpenLink?: (href: string) => void;
   onToast: (message: string) => void;
 };
 
@@ -81,6 +85,8 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
     searchMatches = [],
     activeSearchRange = null,
     onInsertTableRequest,
+    onTableContextMenu,
+    onOpenLink,
     onToast
   },
   forwardedRef
@@ -98,6 +104,8 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
   const onScrollProgressRef = useRef(onScrollProgress);
   const onInitialSelectionTextResolvedRef = useRef(onInitialSelectionTextResolved);
   const onInsertTableRequestRef = useRef(onInsertTableRequest);
+  const onTableContextMenuRef = useRef(onTableContextMenu);
+  const onOpenLinkRef = useRef(onOpenLink);
   const onToastRef = useRef(onToast);
   const placeholderCompartmentRef = useRef(new Compartment());
   const sourceEditorSyncRef = useRef<SourceEditorSyncScheduler<EditorState> | null>(null);
@@ -112,6 +120,8 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
   onScrollProgressRef.current = onScrollProgress;
   onInitialSelectionTextResolvedRef.current = onInitialSelectionTextResolved;
   onInsertTableRequestRef.current = onInsertTableRequest;
+  onTableContextMenuRef.current = onTableContextMenu;
+  onOpenLinkRef.current = onOpenLink;
   onToastRef.current = onToast;
   if (!sourceEditorSyncRef.current) {
     sourceEditorSyncRef.current = createSourceEditorSyncScheduler(
@@ -130,6 +140,8 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
 
     const extensions = createEditorExtensions({
       onInsertTableRequestRef,
+      onTableContextMenuRef,
+      onOpenLinkRef,
       onToastRef,
       copyModeRef,
       placeholderCompartment: placeholderCompartmentRef.current,
@@ -229,6 +241,8 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
 type EditorExtensionRefs = {
   copyModeRef: MutableRefObject<CopyMode>;
   onInsertTableRequestRef: MutableRefObject<(() => void) | undefined>;
+  onTableContextMenuRef: MutableRefObject<((position: { left: number; top: number }) => void) | undefined>;
+  onOpenLinkRef: MutableRefObject<((href: string) => void) | undefined>;
   onToastRef: MutableRefObject<(message: string) => void>;
   sourceEditorSync: SourceEditorSyncScheduler<EditorState>;
   placeholderCompartment: Compartment;
@@ -238,6 +252,8 @@ type EditorExtensionRefs = {
 function createEditorExtensions({
   copyModeRef,
   onInsertTableRequestRef,
+  onTableContextMenuRef,
+  onOpenLinkRef,
   onToastRef,
   placeholderCompartment,
   placeholderText,
@@ -246,6 +262,24 @@ function createEditorExtensions({
   return [
     lineNumbers(),
     EditorState.allowMultipleSelections.of(true),
+    EditorState.transactionFilter.of((transaction) => {
+      if (!transaction.docChanged || transaction.annotation(Transaction.addToHistory) === false) return transaction;
+
+      const changes = orderedListNumberChanges(transaction.newDoc.toString());
+      if (!changes.length) return transaction;
+
+      const repair = ChangeSet.of(changes, transaction.newDoc.length);
+      return [
+        transaction,
+        {
+          changes: repair,
+          selection: transaction.newSelection.map(repair),
+          sequential: true,
+          filter: false,
+          annotations: Transaction.addToHistory.of(false)
+        }
+      ];
+    }),
     highlightActiveLineGutter(),
     history(),
     drawSelection(),
@@ -289,6 +323,27 @@ function createEditorExtensions({
       beforeinput() {
         beginEditorInput("source");
         return false;
+      },
+      click(event, view) {
+        if (!(event.ctrlKey || event.metaKey) || event.button !== 0) return false;
+        const position = view.posAtCoords({ x: event.clientX, y: event.clientY });
+        const href = position === null ? null : sourceLinkAtPosition(view.state.doc.toString(), position);
+        if (!href) return false;
+
+        event.preventDefault();
+        onOpenLinkRef.current?.(href);
+        return true;
+      },
+      contextmenu(event, view) {
+        const position = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
+        if (!findTableAtOffset(view.state.doc.toString(), position)) return false;
+
+        if (position !== view.state.selection.main.head) {
+          view.dispatch({ selection: { anchor: position }, scrollIntoView: false });
+        }
+        event.preventDefault();
+        onTableContextMenuRef.current?.({ left: event.clientX, top: event.clientY });
+        return true;
       },
       keydown(event, view) {
         if ((event.key === "Backspace" || event.key === "Delete") && !event.ctrlKey && !event.metaKey && !event.altKey) {

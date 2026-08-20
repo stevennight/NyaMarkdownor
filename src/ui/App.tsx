@@ -58,7 +58,6 @@ import {
   ListOrdered,
   Moon,
   Eye,
-  Ellipsis,
   ListFilter,
   PanelLeft,
   PanelTop,
@@ -92,7 +91,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { BackupPreferences, CopyMode, Heading, LanguagePreference, MarkdownDocument, MarkdownFileStats, MarkdownTable, PaneLayout, SidebarPage, TableAlignment, TableBlock, TableHeightMode, ThemeMode, ViewMode, WorkspaceFile, WorkspaceListing } from "../types";
 import { MarkdownEditor } from "./MarkdownEditor";
 import type { RichMarkdownEditorHandle } from "./RichMarkdownEditor";
-import { extractHeadings, markdownRangesToClipboardPayload, markdownRangesToTableCsv, markdownRangesToTableMarkdown, markdownRangesToTableTsv, markdownTableSliceToClipboardPayload, markdownTableSliceToCsv, markdownTableSliceToMarkdown, markdownTableSliceToTsv, mermaidSourceLineForOrdinal, referenceLabelsFromMarkdown } from "../lib/markdown";
+import { extractHeadings, markdownRangesToClipboardPayload, markdownRangesToTableCsv, markdownRangesToTableMarkdown, markdownRangesToTableTsv, markdownTableSliceToClipboardPayload, markdownTableSliceToCsv, markdownTableSliceToMarkdown, markdownTableSliceToTsv, referenceLabelsFromMarkdown } from "../lib/markdown";
 import { renderMermaidPreview } from "../lib/mermaidPreview";
 import {
   buildMarkdownTable,
@@ -435,6 +434,12 @@ type TabContextMenuState = {
   top: number;
 };
 
+type TableContextMenuState = {
+  surface: "rich" | "source";
+  left: number;
+  top: number;
+};
+
 type LocalImageInsertResult = {
   insertedCount: number;
   skippedCount: number;
@@ -568,12 +573,14 @@ export function App() {
   const [tabDropTarget, setTabDropTarget] = useState<{ tabId: string; position: DocumentTabDropPosition } | null>(null);
   const [tabListOpen, setTabListOpen] = useState(false);
   const [tabContextMenu, setTabContextMenu] = useState<TabContextMenuState | null>(null);
+  const [tableContextMenu, setTableContextMenu] = useState<TableContextMenuState | null>(null);
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const viewMenuRef = useRef<HTMLDivElement | null>(null);
   const viewMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const tabListRef = useRef<HTMLDivElement | null>(null);
   const tabListMenuRef = useRef<HTMLDivElement | null>(null);
   const tabContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const tableContextMenuRef = useRef<HTMLDivElement | null>(null);
   const tabPointerDragRef = useRef<{
     pointerId: number;
     tabId: string;
@@ -996,6 +1003,8 @@ export function App() {
       labels: {
         diagram: t("Mermaid diagram"),
         editSource: t("Edit diagram source"),
+        cancel: t("Cancel"),
+        save: t("Save diagram"),
         rendering: t("Rendering diagram..."),
         renderFailed: t("Diagram could not be rendered."),
         sourceTooLarge: t("Diagram source is too large to render."),
@@ -1062,6 +1071,41 @@ export function App() {
       window.removeEventListener("scroll", closeTabContextMenu, true);
     };
   }, [tabContextMenu]);
+
+  useEffect(() => {
+    if (!tableContextMenu) return undefined;
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      tableContextMenuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+    });
+    const closeTableContextMenu = () => setTableContextMenu(null);
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (tableContextMenuRef.current?.contains(event.target as Node)) return;
+      closeTableContextMenu();
+    };
+    const closeOnKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeTableContextMenu();
+    };
+    const closeOnScroll = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Node && tableContextMenuRef.current?.contains(target)) return;
+      closeTableContextMenu();
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    window.addEventListener("keydown", closeOnKeyDown);
+    window.addEventListener("resize", closeTableContextMenu);
+    window.addEventListener("scroll", closeOnScroll, true);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      window.removeEventListener("keydown", closeOnKeyDown);
+      window.removeEventListener("resize", closeTableContextMenu);
+      window.removeEventListener("scroll", closeOnScroll, true);
+    };
+  }, [tableContextMenu]);
 
   useEffect(() => () => {
     if (editorFocusTimerRef.current !== null) window.clearTimeout(editorFocusTimerRef.current);
@@ -2673,19 +2717,6 @@ export function App() {
     jumpToLine(sourceLine);
   }
 
-  function editRichMermaidSource(ordinal: number) {
-    const tabId = activeTabIdRef.current;
-    richEditorRef.current?.flushMarkdownSync();
-    const sourceLine = mermaidSourceLineForOrdinal(currentActiveMarkdownForCommand(), ordinal);
-    if (sourceLine === null) {
-      showToast("Diagram source could not be located");
-      return;
-    }
-
-    setViewMode("focus");
-    jumpToLineSoon(tabId, sourceLine);
-  }
-
   function scrollPreviewAnchorIntoView(href: string) {
     const ids = previewAnchorIdCandidatesFromHref(href);
     const preview = previewRef.current;
@@ -3451,6 +3482,17 @@ export function App() {
     closeOpenToolbarMenus(target);
   }
 
+  function openTableContextMenu(surface: TableContextMenuState["surface"], position: { left: number; top: number }) {
+    closeOpenToolbarMenus();
+    const menuWidth = Math.min(286, Math.max(0, window.innerWidth - 16));
+    const menuHeight = Math.min(560, Math.max(0, window.innerHeight - 16));
+    setTableContextMenu({
+      surface,
+      left: Math.max(8, Math.min(position.left, window.innerWidth - menuWidth - 8)),
+      top: Math.max(8, Math.min(position.top, window.innerHeight - menuHeight - 8))
+    });
+  }
+
   function runTextCommand(command: MarkdownTextCommand) {
     if (viewMode === "wysiwyg") {
       if (command === "link") {
@@ -3484,6 +3526,14 @@ export function App() {
     }
 
     showToast(textCommandLabel(command));
+  }
+
+  function openRichLinkEditor(href: string, canUnlink: boolean) {
+    const current = richEditorRef.current?.getLinkState();
+    setLinkDialogState({
+      href: current?.active ? current.href : href,
+      canUnlink: canUnlink || Boolean(current?.active)
+    });
   }
 
   function applyRichLink(href: string) {
@@ -7608,6 +7658,59 @@ export function App() {
         </button>
       </nav>
 
+      {tableContextMenu && (
+        <div
+          ref={tableContextMenuRef}
+          className="table-context-menu"
+          role="menu"
+          aria-label={t("Table context actions")}
+          style={{ left: tableContextMenu.left, top: tableContextMenu.top }}
+          onClick={(event) => {
+            if (event.target instanceof Element && event.target.closest("button")) setTableContextMenu(null);
+          }}
+        >
+          <div className="table-context-menu-heading">
+            <Table2 size={15} />
+            <span>{t(tableContextMenu.surface === "rich" ? "Visual table" : "Markdown table")}</span>
+          </div>
+          <MenuSectionLabel>{t("Selection")}</MenuSectionLabel>
+          <ContextTableMenuItem label={t("Select cell")} icon={<TextSelect />} onClick={() => selectTableCell()} />
+          <ContextTableMenuItem label={t("Select row")} icon={<Rows3 />} disabled={tableContextMenu.surface === "source" && activeTable?.position.row === 1} onClick={() => selectTableRow()} />
+          <ContextTableMenuItem label={t("Select column")} icon={<Columns3 />} onClick={() => selectTableColumn()} />
+          <ContextTableMenuItem label={t("Select table")} icon={<SquareMousePointer />} onClick={() => selectActiveTable()} />
+          <ContextTableMenuItem label={t("Copy cell content")} icon={<ClipboardCopy />} onClick={() => copyActiveTableCell()} />
+          <ContextTableMenuItem label={t("Copy table")} icon={<Copy />} onClick={() => copyCurrentTable()} />
+
+          <MenuSectionLabel>{t("Rows")}</MenuSectionLabel>
+          <ContextTableMenuItem label={t("Add row above")} icon={<ArrowUp />} onClick={() => addRowBefore()} />
+          <ContextTableMenuItem label={t("Add row below")} icon={<ArrowDown />} onClick={() => addRow()} />
+          <ContextTableMenuItem label={t("Duplicate row")} icon={<CopyPlus />} disabled={tableContextMenu.surface === "source" && (activeTable?.position.row ?? 1) < 2} onClick={() => duplicateRow()} />
+          <ContextTableMenuItem label={t("Move row up")} icon={<ArrowUp />} disabled={tableContextMenu.surface === "source" && (activeTable?.position.row ?? 2) <= 2} onClick={() => moveRowUp()} />
+          <ContextTableMenuItem label={t("Move row down")} icon={<ArrowDown />} disabled={tableContextMenu.surface === "source" && Boolean(activeTable && (activeTable.position.row < 2 || activeTable.position.row >= activeTable.table.rows.length + 1))} onClick={() => moveRowDown()} />
+
+          <MenuSectionLabel>{t("Columns")}</MenuSectionLabel>
+          <ContextTableMenuItem label={t("Add column left")} icon={<ArrowLeft />} onClick={() => addColumnBefore()} />
+          <ContextTableMenuItem label={t("Add column right")} icon={<ArrowRight />} onClick={() => addColumn()} />
+          <ContextTableMenuItem label={t("Duplicate column")} icon={<CopyPlus />} onClick={() => duplicateColumn()} />
+          <ContextTableMenuItem label={t("Move column left")} icon={<ArrowLeft />} disabled={tableContextMenu.surface === "source" && (activeTable?.position.col ?? 0) <= 0} onClick={() => moveColumnLeft()} />
+          <ContextTableMenuItem label={t("Move column right")} icon={<ArrowRight />} disabled={tableContextMenu.surface === "source" && Boolean(activeTable && activeTable.position.col >= activeTable.table.headers.length - 1)} onClick={() => moveColumnRight()} />
+
+          <MenuSectionLabel>{t("Alignment")}</MenuSectionLabel>
+          {tableContextMenu.surface === "source" && <ContextTableMenuItem label={t("Align table")} icon={<AlignJustify />} onClick={() => normalizeTable()} />}
+          <ContextTableMenuItem label={t("Default alignment")} icon={<AlignJustify />} onClick={() => alignActiveColumn("none")} />
+          <ContextTableMenuItem label={t("Align left")} icon={<AlignLeft />} onClick={() => alignActiveColumn("left")} />
+          <ContextTableMenuItem label={t("Align center")} icon={<AlignCenter />} onClick={() => alignActiveColumn("center")} />
+          <ContextTableMenuItem label={t("Align right")} icon={<AlignRight />} onClick={() => alignActiveColumn("right")} />
+          <ContextTableMenuItem label={t("Sort ascending")} icon={<ArrowDownAZ />} disabled={tableContextMenu.surface === "source" && Boolean(activeTable && activeTable.table.rows.length < 2)} onClick={() => sortColumnAscending()} />
+          <ContextTableMenuItem label={t("Sort descending")} icon={<ArrowDownZA />} disabled={tableContextMenu.surface === "source" && Boolean(activeTable && activeTable.table.rows.length < 2)} onClick={() => sortColumnDescending()} />
+
+          <MenuSectionLabel>{t("Danger zone")}</MenuSectionLabel>
+          <ContextTableMenuItem label={t("Delete row")} icon={<ScissorsLineDashed />} disabled={tableContextMenu.surface === "source" && (activeTable?.position.row ?? 1) < 2} onClick={() => removeRow()} danger />
+          <ContextTableMenuItem label={t("Delete column")} icon={<Trash2 />} disabled={tableContextMenu.surface === "source" && Boolean(activeTable && activeTable.table.headers.length <= 1)} onClick={() => removeColumn()} danger />
+          <ContextTableMenuItem label={t("Delete table")} icon={<Trash2 />} onClick={() => removeTable()} danger />
+        </div>
+      )}
+
       <main className="workspace" ref={workspaceRef}>
         <button
           className="sidebar-scrim"
@@ -7949,7 +8052,8 @@ export function App() {
                 }))}
                 onActiveHeadingIndexChange={rememberRichActiveHeadingIndex}
                 onOpenLink={handleRichLinkOpen}
-                onEditMermaidSource={editRichMermaidSource}
+                onEditLink={openRichLinkEditor}
+                onTableContextMenu={(position) => openTableContextMenu("rich", position)}
                 onToast={showToast}
                 scrollProgress={richScrollProgressRef.current.get(activeTab.id) ?? activeTab.richScrollProgress ?? 0}
                 onScrollProgress={(progress) => rememberRichScrollProgress(activeTab.id, progress)}
@@ -7980,83 +8084,10 @@ export function App() {
               activeSearchRange={findOpen && activeFindIndex >= 0 ? findMatches[activeFindIndex] : null}
               copyMode={copyMode}
               onInsertTableRequest={openInsertTableDialog}
+              onTableContextMenu={(position) => openTableContextMenu("source", position)}
+              onOpenLink={handleRichLinkOpen}
               onToast={showToast}
             />
-          )}
-          {viewMode === "wysiwyg" && richTableActive ? (
-            <div className="table-floatbar" role="toolbar" aria-label={t("Visual table quick actions")} onMouseDown={preserveRichEditorSelectionOnToolbarMouseDown}>
-              {richTableSelection && (
-                <span
-                  className="table-selection-count"
-                  title={richTableSelectionStatusLabel(richTableSelection, t)}
-                >
-                  {t(richTableSelection.cellCount === 1 ? "1 cell selected" : "{count} cells selected", { count: richTableSelection.cellCount })}
-                </span>
-              )}
-              <IconButton label={t("Select cell")} icon={<TextSelect />} onClick={selectTableCell} />
-              <IconButton label={t("Select table")} icon={<SquareMousePointer />} onClick={selectActiveTable} />
-              <IconButton label={t("Copy cell content")} icon={<ClipboardCopy />} onClick={() => void copyActiveTableCell()} />
-              <IconButton label={t("Copy table")} icon={<Copy />} onClick={copyCurrentTable} />
-              <TableActionMenu label={t("Visual table actions")}>
-                <MenuSectionLabel>{t("Selection")}</MenuSectionLabel>
-                <TableMenuItem label={t("Select row")} icon={<Rows3 />} onClick={selectTableRow} />
-                <TableMenuItem label={t("Select column")} icon={<Columns3 />} onClick={selectTableColumn} />
-                <MenuSectionLabel>{t("Rows")}</MenuSectionLabel>
-                <TableMenuItem label={t("Add row above")} icon={<ArrowUp />} onClick={addRowBefore} />
-                <TableMenuItem label={t("Add row below")} icon={<ArrowDown />} onClick={addRow} />
-                <TableMenuItem label={t("Duplicate row")} icon={<CopyPlus />} onClick={duplicateRow} />
-                <TableMenuItem label={t("Move row up")} icon={<ArrowUp />} onClick={moveRowUp} />
-                <TableMenuItem label={t("Move row down")} icon={<ArrowDown />} onClick={moveRowDown} />
-                <MenuSectionLabel>{t("Columns")}</MenuSectionLabel>
-                <TableMenuItem label={t("Add column left")} icon={<ArrowLeft />} onClick={addColumnBefore} />
-                <TableMenuItem label={t("Add column right")} icon={<ArrowRight />} onClick={addColumn} />
-                <TableMenuItem label={t("Duplicate column")} icon={<CopyPlus />} onClick={duplicateColumn} />
-                <TableMenuItem label={t("Move column left")} icon={<ArrowLeft />} onClick={moveColumnLeft} />
-                <TableMenuItem label={t("Move column right")} icon={<ArrowRight />} onClick={moveColumnRight} />
-                <MenuSectionLabel>{t("Alignment")}</MenuSectionLabel>
-                <TableMenuItem label={t("Default alignment")} icon={<AlignJustify />} onClick={() => alignActiveColumn("none")} />
-                <TableMenuItem label={t("Align left")} icon={<AlignLeft />} onClick={() => alignActiveColumn("left")} />
-                <TableMenuItem label={t("Align center")} icon={<AlignCenter />} onClick={() => alignActiveColumn("center")} />
-                <TableMenuItem label={t("Align right")} icon={<AlignRight />} onClick={() => alignActiveColumn("right")} />
-                <TableMenuItem label={t("Sort ascending")} icon={<ArrowDownAZ />} onClick={sortColumnAscending} />
-                <TableMenuItem label={t("Sort descending")} icon={<ArrowDownZA />} onClick={sortColumnDescending} />
-                <MenuSectionLabel>{t("Danger zone")}</MenuSectionLabel>
-                <TableMenuItem label={t("Delete row")} icon={<ScissorsLineDashed />} onClick={removeRow} danger />
-                <TableMenuItem label={t("Delete column")} icon={<Trash2 />} onClick={removeColumn} danger />
-                <TableMenuItem label={t("Delete table")} icon={<Trash2 />} onClick={removeTable} danger />
-              </TableActionMenu>
-            </div>
-          ) : activeTable && (
-            <div className="table-floatbar" role="toolbar" aria-label={t("Table quick actions")} onMouseDown={preserveRichEditorSelectionOnToolbarMouseDown}>
-              <IconButton label={t("Select cell")} icon={<TextSelect />} onClick={selectTableCell} />
-              <IconButton label={t("Select table")} icon={<SquareMousePointer />} onClick={selectActiveTable} />
-              <IconButton label={t("Copy cell content")} icon={<ClipboardCopy />} onClick={() => void copyActiveTableCell()} />
-              <IconButton label={t("Copy table")} icon={<Copy />} onClick={copyCurrentTable} />
-              <TableActionMenu label={t("Table actions")}>
-                <TableMenuItem label={t("Align table")} icon={<AlignJustify />} onClick={normalizeTable} />
-                <MenuSectionLabel>{t("Selection")}</MenuSectionLabel>
-                <TableMenuItem label={t("Select row")} icon={<Rows3 />} onClick={selectTableRow} disabled={activeTable.position.row === 1} />
-                <TableMenuItem label={t("Select column")} icon={<Columns3 />} onClick={selectTableColumn} />
-                <MenuSectionLabel>{t("Rows")}</MenuSectionLabel>
-                <TableMenuItem label={t("Add row above")} icon={<ArrowUp />} onClick={addRowBefore} />
-                <TableMenuItem label={t("Add row below")} icon={<ArrowDown />} onClick={addRow} />
-                <TableMenuItem label={t("Duplicate row")} icon={<CopyPlus />} onClick={duplicateRow} disabled={activeTable.position.row < 2} />
-                <TableMenuItem label={t("Move row up")} icon={<ArrowUp />} onClick={moveRowUp} disabled={activeTable.position.row <= 2} />
-                <TableMenuItem label={t("Move row down")} icon={<ArrowDown />} onClick={moveRowDown} disabled={activeTable.position.row < 2 || activeTable.position.row >= activeTable.table.rows.length + 1} />
-                <MenuSectionLabel>{t("Columns")}</MenuSectionLabel>
-                <TableMenuItem label={t("Add column left")} icon={<ArrowLeft />} onClick={addColumnBefore} />
-                <TableMenuItem label={t("Add column right")} icon={<ArrowRight />} onClick={addColumn} />
-                <TableMenuItem label={t("Duplicate column")} icon={<CopyPlus />} onClick={duplicateColumn} />
-                <TableMenuItem label={t("Move column left")} icon={<ArrowLeft />} onClick={moveColumnLeft} disabled={activeTable.position.col <= 0} />
-                <TableMenuItem label={t("Move column right")} icon={<ArrowRight />} onClick={moveColumnRight} disabled={activeTable.position.col >= activeTable.table.headers.length - 1} />
-                <TableMenuItem label={t("Sort ascending")} icon={<ArrowDownAZ />} onClick={sortColumnAscending} disabled={activeTable.table.rows.length < 2} />
-                <TableMenuItem label={t("Sort descending")} icon={<ArrowDownZA />} onClick={sortColumnDescending} disabled={activeTable.table.rows.length < 2} />
-                <MenuSectionLabel>{t("Danger zone")}</MenuSectionLabel>
-                <TableMenuItem label={t("Delete row")} icon={<ScissorsLineDashed />} onClick={removeRow} disabled={activeTable.position.row < 2} danger />
-                <TableMenuItem label={t("Delete column")} icon={<Trash2 />} onClick={removeColumn} disabled={activeTable.table.headers.length <= 1} danger />
-                <TableMenuItem label={t("Delete table")} icon={<Trash2 />} onClick={removeTable} danger />
-              </TableActionMenu>
-            </div>
           )}
         </section>
 
@@ -9124,36 +9155,6 @@ function ToolbarMenuChoice({ label, icon, checked, disabled, onSelect }: Toolbar
   );
 }
 
-type TableActionMenuProps = {
-  label: string;
-  children: ReactNode;
-};
-
-function TableActionMenu({ label, children }: TableActionMenuProps) {
-  return (
-    <details
-      className="table-action-menu-wrap"
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute("open");
-      }}
-      onKeyDown={(event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        event.currentTarget.removeAttribute("open");
-        event.currentTarget.querySelector<HTMLElement>("summary")?.focus();
-      }}
-    >
-      <summary className="tool-button" title={label} aria-label={label} aria-haspopup="menu">
-        <Ellipsis />
-        <span>{label}</span>
-      </summary>
-      <div className="table-action-menu" role="menu" aria-label={label}>
-        {children}
-      </div>
-    </details>
-  );
-}
-
 type TableMenuItemProps = IconButtonProps & {
   danger?: boolean;
 };
@@ -9170,6 +9171,19 @@ function TableMenuItem({ label, icon, disabled, onClick, danger = false }: Table
         onClick();
       }}
     >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+type ContextTableMenuItemProps = Omit<TableMenuItemProps, "onClick"> & {
+  onClick: () => void | Promise<void>;
+};
+
+function ContextTableMenuItem({ label, icon, disabled, onClick, danger = false }: ContextTableMenuItemProps) {
+  return (
+    <button className={danger ? "danger" : undefined} type="button" role="menuitem" disabled={disabled} onClick={() => void onClick()}>
       {icon}
       <span>{label}</span>
     </button>

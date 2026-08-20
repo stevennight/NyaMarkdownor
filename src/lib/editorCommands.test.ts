@@ -8,10 +8,23 @@ import {
   applyMarkdownListIndentation,
   applyMarkdownTextCommand,
   applyTaskCheckboxToggle,
-  applyTextChange
+  applyTextChange,
+  normalizeMarkdownOrderedListNumbers
 } from "./editorCommands";
 
 describe("Markdown text commands", () => {
+  it("repairs gaps and duplicate ordered-list numbers after source edits", () => {
+    expect(normalizeMarkdownOrderedListNumbers("1. first\n3. third\n3. fourth"))
+      .toBe("1. first\n2. third\n3. fourth");
+    expect(normalizeMarkdownOrderedListNumbers("4) first\n5) second"))
+      .toBe("4) first\n5) second");
+  });
+
+  it("does not renumber ordered-looking lines inside fenced code", () => {
+    const source = ["1. item", "2. next", "", "```text", "1. literal", "3. literal", "```"].join("\n");
+    expect(normalizeMarkdownOrderedListNumbers(source)).toBe(source);
+  });
+
   it("wraps selected text in bold markers", () => {
     expect(applyMarkdownTextCommand("hello world", { from: 6, to: 11 }, "bold")).toEqual({
       markdown: "hello **world**",

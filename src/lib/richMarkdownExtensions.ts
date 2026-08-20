@@ -74,7 +74,6 @@ type BlockStartCacheState = {
 };
 
 export type RichMarkdownExtensionOptions = {
-  onEditMermaidSource?: (ordinal: number) => void;
   getMermaidPreviewOptions?: () => MermaidPreviewOptions;
 };
 
@@ -410,6 +409,7 @@ function createRichMermaidDiagram(options: RichMarkdownExtensionOptions): AnyExt
     addNodeView() {
       return ({ node, view, getPos }) => {
         let currentNode = node;
+        let editing = false;
         let previewCleanup: () => void = () => undefined;
         let lastSkipReason: ReturnType<typeof mermaidRenderSkipReason> | undefined;
         const dom = document.createElement("div");
@@ -423,7 +423,7 @@ function createRichMermaidDiagram(options: RichMarkdownExtensionOptions): AnyExt
 
           const sourceBlock = document.createElement("pre");
           sourceBlock.dataset.language = stringAttribute(currentNode.attrs.language) || "mermaid";
-          if (options.onEditMermaidSource) sourceBlock.dataset.sourceLine = "0";
+          sourceBlock.dataset.sourceLine = "0";
 
           const code = document.createElement("code");
           code.className = "language-mermaid";
@@ -443,6 +443,7 @@ function createRichMermaidDiagram(options: RichMarkdownExtensionOptions): AnyExt
         };
 
         const refreshDiagramLimit = () => {
+          if (editing) return;
           const ordinal = richMermaidOrdinalBeforePosition(view, getPos);
           const nextSkipReason = mermaidRenderSkipReason(
             stringAttribute(currentNode.attrs.source),
@@ -456,10 +457,82 @@ function createRichMermaidDiagram(options: RichMarkdownExtensionOptions): AnyExt
           if (!(target instanceof Element) || !target.closest("button[data-diagram-source-line]")) return;
           event.preventDefault();
           event.stopPropagation();
+          renderEditor();
+        };
 
-          const ordinal = richMermaidOrdinalBeforePosition(view, getPos);
-          if (ordinal === null) return;
-          options.onEditMermaidSource?.(ordinal);
+        function renderEditor() {
+          editing = true;
+          previewCleanup();
+          dom.replaceChildren();
+
+          const panel = document.createElement("div");
+          panel.className = "rich-mermaid-editor";
+
+          const header = document.createElement("div");
+          header.className = "rich-mermaid-editor-header";
+          const title = document.createElement("strong");
+          title.textContent = "Mermaid";
+          const hint = document.createElement("span");
+          const labels = (options.getMermaidPreviewOptions?.() ?? defaultRichMermaidPreviewOptions()).labels;
+          hint.textContent = labels.editSource;
+          header.append(title, hint);
+
+          const textarea = document.createElement("textarea");
+          textarea.className = "rich-mermaid-editor-input";
+          textarea.value = stringAttribute(currentNode.attrs.source);
+          textarea.setAttribute("aria-label", labels.editSource);
+          textarea.spellcheck = false;
+          textarea.rows = Math.max(5, Math.min(18, textarea.value.split("\n").length + 1));
+
+          const actions = document.createElement("div");
+          actions.className = "rich-mermaid-editor-actions";
+          const cancel = document.createElement("button");
+          cancel.type = "button";
+          cancel.className = "secondary";
+          cancel.textContent = labels.cancel;
+          const save = document.createElement("button");
+          save.type = "button";
+          save.className = "primary";
+          save.textContent = labels.save;
+          actions.append(cancel, save);
+          panel.append(header, textarea, actions);
+          dom.append(panel);
+
+          const close = () => {
+            editing = false;
+            renderDiagram();
+          };
+          const saveSource = () => {
+            const position = getPos();
+            if (typeof position !== "number") return;
+
+            const source = textarea.value;
+            editing = false;
+            if (source === stringAttribute(currentNode.attrs.source)) {
+              renderDiagram();
+              return;
+            }
+
+            view.dispatch(view.state.tr.setNodeMarkup(position, undefined, {
+              ...currentNode.attrs,
+              source
+            }));
+          };
+
+          cancel.addEventListener("click", close);
+          save.addEventListener("click", saveSource);
+          textarea.addEventListener("keydown", (event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              close();
+            } else if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+              event.preventDefault();
+              saveSource();
+            }
+          });
+
+          textarea.focus();
+          textarea.setSelectionRange(textarea.value.length, textarea.value.length);
         };
 
         dom.addEventListener("click", handleClick);
@@ -468,7 +541,7 @@ function createRichMermaidDiagram(options: RichMarkdownExtensionOptions): AnyExt
 
         const themeObserver = new MutationObserver((records) => {
           if (records.some((record) => record.attributeName === "data-theme" || record.attributeName === "lang")) {
-            renderDiagram();
+            if (!editing) renderDiagram();
           }
         });
         themeObserver.observe(document.documentElement, {
@@ -482,7 +555,7 @@ function createRichMermaidDiagram(options: RichMarkdownExtensionOptions): AnyExt
             if (updatedNode.type !== currentNode.type) return false;
             if (updatedNode.eq(currentNode)) return true;
             currentNode = updatedNode;
-            renderDiagram();
+            if (!editing) renderDiagram();
             return true;
           },
           selectNode() {
@@ -493,7 +566,7 @@ function createRichMermaidDiagram(options: RichMarkdownExtensionOptions): AnyExt
           },
           stopEvent(event) {
             const target = event.target;
-            return target instanceof Element && Boolean(target.closest("button[data-diagram-source-line]"));
+            return target instanceof Element && Boolean(target.closest("button, textarea"));
           },
           ignoreMutation: () => true,
           destroy() {
@@ -545,6 +618,8 @@ function defaultRichMermaidPreviewOptions(): MermaidPreviewOptions {
     labels: {
       diagram: "Mermaid diagram",
       editSource: "Edit diagram source",
+      cancel: "Cancel",
+      save: "Save diagram",
       rendering: "Rendering diagram...",
       renderFailed: "Diagram could not be rendered.",
       sourceTooLarge: "Diagram source is too large to render.",
@@ -701,6 +776,46 @@ function renderListItemMarkdown(
   });
 
   return output;
+}
+
+const RichOrderedListNormalization = Extension.create({
+  name: "richOrderedListNormalization",
+
+  addProseMirrorPlugins() {
+    return [new Plugin({
+      appendTransaction: (transactions, _oldState, newState) => {
+        if (!transactions.some((transaction) => transaction.docChanged)) return null;
+
+        const boundary = richAdjacentOrderedListBoundary(newState.doc);
+        if (boundary === null) return null;
+
+        try {
+          return newState.tr.join(boundary).setMeta("addToHistory", false);
+        } catch {
+          return null;
+        }
+      }
+    })];
+  }
+});
+
+function richAdjacentOrderedListBoundary(document: ProseMirrorNode): number | null {
+  let boundary: number | null = null;
+  document.descendants((node, position, parent, index) => {
+    if (boundary !== null || !parent || index === 0 || node.type.name !== "orderedList") return;
+
+    const previous = parent.child(index - 1);
+    if (previous.type.name !== "orderedList") return;
+    if (richOrderedListAttrs(previous.attrs, node.attrs)) boundary = position;
+  });
+  return boundary;
+}
+
+function richOrderedListAttrs(left: Record<string, unknown>, right: Record<string, unknown>): boolean {
+  return (left.start ?? 1) === (right.start ?? 1)
+    && (left.markdownDelimiter ?? ".") === (right.markdownDelimiter ?? ".")
+    && (left.markdownLoose ?? false) === (right.markdownLoose ?? false)
+    && (left.type ?? null) === (right.type ?? null);
 }
 
 const RichTaskList = TaskList.extend({
@@ -1304,6 +1419,7 @@ export function createRichMarkdownExtensions(
     RichBulletList,
     RichOrderedList,
     RichListItem,
+    RichOrderedListNormalization,
     RichTaskList,
     RichTaskItem.configure({ nested: true }),
     Image.extend({
