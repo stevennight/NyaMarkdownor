@@ -1,6 +1,6 @@
 [package]
 name = "nya-markdownor"
-version = "1.0.22"
+version = "1.0.23"
 description = "A local-first Markdown editor."
 authors = ["NyaMarkdownor Contributors"]
 edition = "2021"
@@ -26,5 +26,5 @@ semver = "1"
 dunce = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Globalization"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Globalization", "Win32_Storage_FileSystem"] }
 winreg = "0.55"

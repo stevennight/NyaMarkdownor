@@ -1806,33 +1806,103 @@ fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("document.md");
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temp_path = parent.join(format!(".{file_name}.{nonce}.tmp"));
-    let rollback_path = parent.join(format!(".{file_name}.{nonce}.rollback"));
 
-    {
-        let mut temp_file = fs::File::create(&temp_path)?;
-        temp_file.write_all(content)?;
-        temp_file.sync_all()?;
-    }
+    let stage = create_checked_write_stage(parent, file_name, content)?;
 
     if path.exists() {
-        preserve_existing_file_permissions(path, &temp_path)?;
-        fs::rename(path, &rollback_path)?;
-        if let Err(error) = fs::rename(&temp_path, path) {
-            let _ = fs::rename(&rollback_path, path);
-            let _ = fs::remove_file(&temp_path);
+        if let Err(error) = preserve_existing_file_permissions(path, &stage.temp_path) {
+            cleanup_checked_write_stage(&stage, false);
             return Err(error);
         }
-        let _ = fs::remove_file(&rollback_path);
+
+        let result = replace_existing_staged_file(path, &stage.temp_path, &stage.rollback_path);
+        let remove_rollback =
+            result.is_ok() || !path_entry_exists(&stage.rollback_path).unwrap_or(false);
+        cleanup_checked_write_stage(&stage, remove_rollback);
+        if result.is_ok() {
+            sync_parent_directory(parent);
+        }
+        result
     } else {
-        fs::rename(&temp_path, path)?;
+        let result = fs::rename(&stage.temp_path, path);
+        cleanup_checked_write_stage(&stage, false);
+        if result.is_ok() {
+            sync_parent_directory(parent);
+        }
+        result
+    }
+}
+
+#[cfg(windows)]
+fn replace_file_windows(
+    replaced_path: &Path,
+    replacement_path: &Path,
+    backup_path: Option<&Path>,
+) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    if let Some(backup_path) = backup_path {
+        // Keep the old inode reachable without removing the destination entry first.
+        fs::hard_link(replaced_path, backup_path).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                file_changed_during_checked_write()
+            } else {
+                error
+            }
+        })?;
     }
 
-    Ok(())
+    let replaced_path_wide = replaced_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let replacement_path_wide = replacement_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+
+    let replaced = unsafe {
+        MoveFileExW(
+            replacement_path_wide.as_ptr(),
+            replaced_path_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn replace_existing_staged_file(
+    path: &Path,
+    replacement_path: &Path,
+    rollback_path: &Path,
+) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let _ = rollback_path;
+        replace_file_windows(path, replacement_path, None)?;
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
+    {
+        fs::rename(path, rollback_path)?;
+        if let Err(error) = fs::rename(replacement_path, path) {
+            let _ = fs::rename(rollback_path, path);
+            let _ = fs::remove_file(replacement_path);
+            return Err(error);
+        }
+        let _ = fs::remove_file(rollback_path);
+        Ok(())
+    }
 }
 
 fn atomic_write_checked(
@@ -1840,9 +1910,120 @@ fn atomic_write_checked(
     content: &[u8],
     expected_source_stats: Option<FileStats>,
 ) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        return atomic_write_checked_windows(path, content, expected_source_stats);
+    }
+
+    #[cfg(not(windows))]
     atomic_write_checked_with_hook(path, content, expected_source_stats, |_, _| Ok(()))
 }
 
+#[cfg(windows)]
+fn atomic_write_checked_windows(
+    path: &Path,
+    content: &[u8],
+    expected_source_stats: Option<FileStats>,
+) -> std::io::Result<()> {
+    let parent = ensure_writable_parent(path)?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("document.md");
+    let stage = create_checked_write_stage(parent, file_name, content)?;
+
+    match expected_source_stats {
+        None => {
+            let result =
+                publish_staged_file_no_clobber(&stage.temp_path, path, &|source, destination| {
+                    fs::hard_link(source, destination)
+                });
+            cleanup_checked_write_stage(&stage, false);
+            if result.is_ok() {
+                sync_parent_directory(parent);
+            }
+            result
+        }
+        Some(expected_stats) => {
+            match path_entry_exists(&stage.rollback_path) {
+                Ok(false) => {}
+                Ok(true) => {
+                    cleanup_checked_write_stage(&stage, false);
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "Checked-write rollback path is unexpectedly occupied.",
+                    ));
+                }
+                Err(error) => {
+                    cleanup_checked_write_stage(&stage, false);
+                    return Err(error);
+                }
+            }
+
+            let mut replacement_published = false;
+            let result = (|| {
+                verify_expected_file_stats(path, expected_stats)
+                    .map_err(|_| file_changed_during_checked_write())?;
+                preserve_existing_file_permissions(path, &stage.temp_path)?;
+                replace_file_windows(path, &stage.temp_path, Some(&stage.rollback_path))?;
+                replacement_published = true;
+
+                let rollback_matches = file_stats_for(&stage.rollback_path)
+                    .map(|stats| stats == expected_stats)
+                    .unwrap_or(false);
+                if !rollback_matches {
+                    return Err(file_changed_during_checked_write());
+                }
+                if !file_content_matches_bytes(path, content)? {
+                    return Err(file_changed_during_checked_write());
+                }
+                Ok(())
+            })();
+
+            match result {
+                Ok(()) => {
+                    cleanup_checked_write_stage(&stage, true);
+                    sync_parent_directory(parent);
+                    Ok(())
+                }
+                Err(error) => {
+                    let target_matches_replacement = replacement_published
+                        && file_content_matches_bytes(path, content).unwrap_or(false);
+
+                    if target_matches_replacement {
+                        match replace_file_windows(path, &stage.rollback_path, None) {
+                            Ok(()) => {
+                                cleanup_checked_write_stage(&stage, true);
+                                sync_parent_directory(parent);
+                                return Err(error);
+                            }
+                            Err(restore_error) => {
+                                let error = checked_write_error_with_rollback(
+                                    error,
+                                    &stage.rollback_path,
+                                    Some(restore_error),
+                                );
+                                cleanup_checked_write_stage(&stage, false);
+                                return Err(error);
+                            }
+                        }
+                    }
+
+                    let retain_rollback = path_entry_exists(&stage.rollback_path).unwrap_or(false);
+                    let error = if retain_rollback {
+                        checked_write_error_with_rollback(error, &stage.rollback_path, None)
+                    } else {
+                        error
+                    };
+                    cleanup_checked_write_stage(&stage, !retain_rollback);
+                    Err(error)
+                }
+            }
+        }
+    }
+}
+
+#[cfg_attr(windows, allow(dead_code))]
 fn atomic_write_checked_with_hook<F>(
     path: &Path,
     content: &[u8],
@@ -1861,6 +2042,7 @@ where
     )
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn atomic_write_checked_with_ops<F, H>(
     path: &Path,
     content: &[u8],
@@ -2012,6 +2194,7 @@ fn create_checked_write_stage(
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn probe_checked_hard_link_support<H>(
     stage: &CheckedWriteStage,
     hard_link: &H,
@@ -2041,12 +2224,14 @@ where
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 enum RollbackRestore {
     Restored,
     DestinationOccupied,
     Failed(io::Error),
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn restore_rollback_no_clobber<H>(
     rollback_path: &Path,
     path: &Path,
@@ -2073,6 +2258,7 @@ where
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn checked_write_failure(
     error: io::Error,
     restore: RollbackRestore,
@@ -2109,6 +2295,25 @@ fn checked_write_failure(
     }
 }
 
+#[cfg(windows)]
+fn checked_write_error_with_rollback(
+    error: io::Error,
+    rollback_path: &Path,
+    restore_error: Option<io::Error>,
+) -> io::Error {
+    let kind = error.kind();
+    let restore_message = restore_error
+        .map(|restore_error| format!(" Failed to restore the original file ({restore_error})."))
+        .unwrap_or_default();
+    io::Error::new(
+        kind,
+        format!(
+            "{error}{restore_message} The original file is preserved at '{}'.",
+            rollback_path.display()
+        ),
+    )
+}
+
 fn cleanup_checked_write_stage(stage: &CheckedWriteStage, remove_rollback: bool) {
     let _ = fs::remove_file(&stage.probe_path);
     let _ = fs::remove_file(&stage.temp_path);
@@ -2137,7 +2342,25 @@ fn make_checked_write_directory_private(directory: &Path) -> std::io::Result<()>
     fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn make_checked_write_directory_private(directory: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN};
+
+    let directory = directory
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let updated = unsafe { SetFileAttributesW(directory.as_ptr(), FILE_ATTRIBUTE_HIDDEN) };
+    if updated == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn make_checked_write_directory_private(_directory: &Path) -> std::io::Result<()> {
     Ok(())
 }
@@ -4123,6 +4346,47 @@ mod tests {
         atomic_write_checked(&path, b"# Updated", Some(expected_stats)).unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Updated");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_checked_write_keeps_the_target_present_during_native_replacement() {
+        let root = temporary_test_dir("windows-native-replacement");
+        let path = root.join("Draft.md");
+        std::fs::write(&path, "# Original").unwrap();
+        let expected_stats = file_stats_for(&path).unwrap();
+
+        atomic_write_checked(&path, b"# Updated", Some(expected_stats)).unwrap();
+
+        assert!(path.is_file());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Updated");
+        let entries = std::fs::read_dir(&root)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path(), path);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_checked_write_rejects_a_changed_target_before_replacement() {
+        let root = temporary_test_dir("windows-native-replacement-conflict");
+        let path = root.join("Draft.md");
+        std::fs::write(&path, "# Original").unwrap();
+        let expected_stats = file_stats_for(&path).unwrap();
+        std::fs::write(&path, "# External change").unwrap();
+
+        let error =
+            atomic_write_checked(&path, b"# App content", Some(expected_stats)).unwrap_err();
+
+        assert_eq!(error.to_string(), FILE_CHANGED_DURING_SAVE_ERROR);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# External change");
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
 
         std::fs::remove_dir_all(root).unwrap();
