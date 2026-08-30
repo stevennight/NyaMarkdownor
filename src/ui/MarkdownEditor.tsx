@@ -18,6 +18,7 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { applyMarkdownBlockquoteBackspace, applyMarkdownLineContinuation, applyMarkdownListBackspace, applyMarkdownListIndentation, applyMarkdownListItemLineBreak, applyMarkdownTextCommand, applyTextChange, orderedListNumberChanges, type MarkdownTextCommand, type TextEdit } from "../lib/editorCommands";
 import { findTableAtOffset } from "../lib/tables";
 import { sourceLinkAtPosition } from "../lib/sourceLinks";
+import { positionInsideNonEmptySelection } from "../lib/selectionRanges";
 import { markdownRangesToClipboardPayload } from "../lib/markdown";
 import { applySelectedTableCellsClear, applySelectedTableCellsPaste, applyTableCellLineBreak, applyTableCellNavigation, applyTableCsvPaste, applyTableDocumentCommand, applyTableRowsPaste, applyTableTsvPaste, type TableDocumentCommand } from "../lib/tableDocumentCommands";
 import { clipboardRowsForTablePaste, type ClipboardTableSource } from "../lib/clipboardTableRows";
@@ -338,7 +339,7 @@ function createEditorExtensions({
         const position = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head;
         if (!findTableAtOffset(view.state.doc.toString(), position)) return false;
 
-        if (position !== view.state.selection.main.head) {
+        if (!positionInsideNonEmptySelection(position, view.state.selection.ranges)) {
           view.dispatch({ selection: { anchor: position }, scrollIntoView: false });
         }
         event.preventDefault();
@@ -410,8 +411,10 @@ function createEditorExtensions({
         if (!copied) return false;
 
         event.preventDefault();
-        onToastRef.current(copyModeRef.current === "markdown"
-          ? "Copied Markdown selection"
+        onToastRef.current(copyModeRef.current === "compact"
+          ? "Copied compact Markdown selection"
+          : copyModeRef.current === "source"
+            ? "Copied Markdown selection"
           : copyModeRef.current === "smart"
             ? "Copied clean text, HTML, and Markdown"
             : "Copied clean text selection");
@@ -451,8 +454,10 @@ function createEditorExtensions({
           scrollIntoView: true
         });
         event.preventDefault();
-        onToastRef.current(copyModeRef.current === "markdown"
-          ? "Cut Markdown"
+        onToastRef.current(copyModeRef.current === "compact"
+          ? "Cut compact Markdown"
+          : copyModeRef.current === "source"
+            ? "Cut Markdown"
           : copyModeRef.current === "smart"
             ? "Cut clean text, HTML, and Markdown"
             : "Cut clean text");

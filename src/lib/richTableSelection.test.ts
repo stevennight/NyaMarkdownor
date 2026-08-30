@@ -1,7 +1,7 @@
 import { CellSelection, tableNodes } from "@tiptap/pm/tables";
 import { EditorState } from "@tiptap/pm/state";
 import { describe, expect, it } from "vitest";
-import { richTableSelectionFor, richTableSelectionSummary } from "./richTableSelection";
+import { nextRichTableSelectAllSelection, richTableSelectionFor, richTableSelectionSummary, shouldPreserveRichTableContextSelection } from "./richTableSelection";
 import { tableState } from "./richTableSelection.testHelpers";
 
 function selectedCellCount(selection: CellSelection): number {
@@ -66,9 +66,64 @@ describe("rich table selection", () => {
       cellCount: 4
     });
   });
+
+  it("expands Ctrl+A through cell text, cell, table, then the document", () => {
+    let state = tableState();
+
+    const cellText = nextRichTableSelectAllSelection(state);
+    expect(cellText).not.toBeInstanceOf(CellSelection);
+    expect(state.doc.textBetween(cellText!.from, cellText!.to)).toBe("A");
+
+    state = EditorState.create({ doc: state.doc, selection: cellText! });
+    const cell = nextRichTableSelectAllSelection(state);
+    expect(cell).toBeInstanceOf(CellSelection);
+    expect(selectedCellCount(cell as CellSelection)).toBe(1);
+
+    state = EditorState.create({ doc: state.doc, selection: cell! });
+    const table = nextRichTableSelectAllSelection(state);
+    expect(table).toBeInstanceOf(CellSelection);
+    expect(selectedCellCount(table as CellSelection)).toBe(4);
+
+    state = EditorState.create({ doc: state.doc, selection: table! });
+    expect(nextRichTableSelectAllSelection(state)).toBeNull();
+  });
+
+  it("preserves a structural selection when right-clicking one of its selected cells", () => {
+    const state = tableState();
+    const positions = tableCellPositions(state);
+    const cellSelection = richTableSelectionFor(state, "select-cell")!;
+    const selectedCellState = EditorState.create({ doc: state.doc, selection: cellSelection });
+
+    expect(shouldPreserveRichTableContextSelection(selectedCellState, positions[0] + 2)).toBe(true);
+    expect(shouldPreserveRichTableContextSelection(selectedCellState, positions[1])).toBe(false);
+    expect(shouldPreserveRichTableContextSelection(selectedCellState, positions[1] + 2)).toBe(false);
+
+    const tableSelection = richTableSelectionFor(selectedCellState, "select-table")!;
+    const selectedTableState = EditorState.create({ doc: state.doc, selection: tableSelection });
+    expect(shouldPreserveRichTableContextSelection(selectedTableState, positions[3] + 2)).toBe(true);
+  });
+
+  it("preserves selected cell text only when right-clicking inside the text selection", () => {
+    const state = tableState();
+    const positions = tableCellPositions(state);
+    const textSelection = nextRichTableSelectAllSelection(state)!;
+    const selectedTextState = EditorState.create({ doc: state.doc, selection: textSelection });
+
+    expect(shouldPreserveRichTableContextSelection(selectedTextState, textSelection.from)).toBe(true);
+    expect(shouldPreserveRichTableContextSelection(selectedTextState, textSelection.to)).toBe(true);
+    expect(shouldPreserveRichTableContextSelection(selectedTextState, positions[1] + 2)).toBe(false);
+  });
 });
 
 function summaryFor(state: EditorState, command: Parameters<typeof richTableSelectionFor>[1]) {
   const selection = richTableSelectionFor(state, command)!;
   return richTableSelectionSummary(EditorState.create({ doc: state.doc, selection }));
+}
+
+function tableCellPositions(state: EditorState): number[] {
+  const positions: number[] = [];
+  state.doc.descendants((node, position) => {
+    if (node.type.spec.tableRole === "cell") positions.push(position);
+  });
+  return positions;
 }

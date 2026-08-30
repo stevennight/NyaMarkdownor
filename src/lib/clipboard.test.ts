@@ -7,7 +7,7 @@ const clipboardPlugin = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => clipboardPlugin);
 
-import { clipboardPayloadForCopyMode, copyRichContent, explicitMarkdownFromClipboard, trimClipboardBoundaryLineBreaks, writeClipboardEventData } from "./clipboard";
+import { clipboardPayloadForCopyMode, compactMarkdownForClipboard, copyRichContent, explicitMarkdownFromClipboard, trimClipboardBoundaryLineBreaks, writeClipboardEventData } from "./clipboard";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -24,7 +24,11 @@ describe("clipboard helpers", () => {
       markdown: "# Heading"
     };
 
-    expect(clipboardPayloadForCopyMode(payload, "markdown")).toEqual({
+    expect(clipboardPayloadForCopyMode(payload, "source")).toEqual({
+      plainText: "# Heading",
+      markdown: "# Heading"
+    });
+    expect(clipboardPayloadForCopyMode(payload, "compact")).toEqual({
       plainText: "# Heading",
       markdown: "# Heading"
     });
@@ -34,6 +38,76 @@ describe("clipboard helpers", () => {
     });
   });
 
+  it("copies compact Markdown without block-separator blank lines", () => {
+    const markdown = [
+      "# Heading",
+      "",
+      "Paragraph",
+      "",
+      "- First",
+      "- Second",
+      "",
+      "| Name |",
+      "| --- |",
+      "| Alpha |"
+    ].join("\n");
+
+    expect(compactMarkdownForClipboard(markdown)).toBe([
+      "# Heading",
+      "Paragraph",
+      "- First",
+      "- Second",
+      "| Name |",
+      "| --- |",
+      "| Alpha |"
+    ].join("\n"));
+    expect(clipboardPayloadForCopyMode({ plainText: "Clean", markdown }, "compact")).toEqual({
+      plainText: compactMarkdownForClipboard(markdown),
+      markdown
+    });
+  });
+
+  it("preserves literal blank lines in compact Markdown code, HTML, and front matter", () => {
+    const markdown = [
+      "---",
+      "title: Example",
+      "",
+      "tags: []",
+      "---",
+      "",
+      "```text",
+      "line 1",
+      "",
+      "line 2",
+      "```",
+      "",
+      "<div>",
+      "",
+      "inside",
+      "</div>",
+      "",
+      "After"
+    ].join("\n");
+
+    expect(compactMarkdownForClipboard(markdown)).toBe([
+      "---",
+      "title: Example",
+      "",
+      "tags: []",
+      "---",
+      "```text",
+      "line 1",
+      "",
+      "line 2",
+      "```",
+      "<div>",
+      "",
+      "inside",
+      "</div>",
+      "After"
+    ].join("\n"));
+  });
+
   it("normalizes generated Markdown spacing for every copy mode that carries Markdown", () => {
     const payload = {
       plainText: "First\nSecond",
@@ -41,7 +115,7 @@ describe("clipboard helpers", () => {
       markdown: "First\n\n\nSecond"
     };
 
-    expect(clipboardPayloadForCopyMode(payload, "markdown")).toEqual({
+    expect(clipboardPayloadForCopyMode(payload, "source")).toEqual({
       plainText: "First\n\nSecond",
       markdown: "First\n\nSecond"
     });
@@ -178,6 +252,37 @@ describe("clipboard helpers", () => {
     expect(clipboardData.setData).toHaveBeenCalledWith("text/plain", "First\n\nSecond");
     expect(clipboardData.setData).toHaveBeenCalledWith("text/markdown", "First\n\nSecond");
   });
+
+  it("keeps compact plain text when the Tauri clipboard falls back to text only", async () => {
+    const clipboardData = createClipboardData();
+    const copyEvent = createClipboardEvent(clipboardData);
+    vi.stubGlobal("document", createCopyDocument(copyEvent, false));
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+
+    const mode = await copyRichContent({
+      plainText: "First\nSecond",
+      markdown: "First\n\nSecond"
+    });
+
+    expect(mode).toBe("plain");
+    expect(clipboardPlugin.writeText).toHaveBeenCalledWith("First\nSecond");
+  });
+
+  it("keeps compact plain text when the browser clipboard falls back to writeText", async () => {
+    const clipboardData = createClipboardData();
+    const copyEvent = createClipboardEvent(clipboardData);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("document", createCopyDocument(copyEvent, false));
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+
+    const mode = await copyRichContent({
+      plainText: "First\nSecond",
+      markdown: "First\n\nSecond"
+    });
+
+    expect(mode).toBe("plain");
+    expect(writeText).toHaveBeenCalledWith("First\nSecond");
+  });
 });
 
 function createClipboardData(): DataTransfer {
@@ -193,7 +298,7 @@ function createClipboardEvent(clipboardData: DataTransfer): ClipboardEvent {
   } as unknown as ClipboardEvent;
 }
 
-function createCopyDocument(copyEvent: ClipboardEvent): Document {
+function createCopyDocument(copyEvent: ClipboardEvent, copied = true): Document {
   let copyHandler: ((event: ClipboardEvent) => void) | null = null;
   const scratch = {
     value: "",
@@ -220,7 +325,7 @@ function createCopyDocument(copyEvent: ClipboardEvent): Document {
     removeEventListener: vi.fn(),
     execCommand: vi.fn((command: string) => {
       if (command === "copy") copyHandler?.(copyEvent);
-      return true;
+      return copied;
     })
   } as unknown as Document;
 }

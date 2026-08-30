@@ -299,7 +299,8 @@ export function SettingsDialog({
                     <SegmentedControl
                       value={copyMode}
                       options={[
-                        ["markdown", t("Markdown")],
+                        ["compact", t("Compact MD")],
+                        ["source", t("Source MD")],
                         ["smart", t("Multi-format")],
                         ["plain", t("Plain text")]
                       ]}

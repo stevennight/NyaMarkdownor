@@ -1,7 +1,8 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type MutableRefObject } from "react";
-import { EditorContent, useEditor } from "@tiptap/react";
-import { type Editor } from "@tiptap/core";
-import { Trash2 } from "lucide-react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type MutableRefObject, type ReactNode } from "react";
+import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
+import { BubbleMenu } from "@tiptap/react/menus";
+import { type Editor, type JSONContent } from "@tiptap/core";
+import { BetweenHorizontalEnd, BetweenVerticalEnd, Bold, Code2, Columns3, ExternalLink, Italic, Link2, Link2Off, List, ListOrdered, Rows3, SquareMousePointer, TextQuote, Trash2 } from "lucide-react";
 import { type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { TextSelection, type SelectionBookmark } from "@tiptap/pm/state";
 import { CellSelection, TableMap } from "@tiptap/pm/tables";
@@ -14,7 +15,7 @@ import { richTableCellText, richTableClipboardFormats, type RichTableClipboardFo
 import { clipboardPayloadForCopyMode, trimClipboardBoundaryLineBreaks, writeClipboardEventData } from "../lib/clipboard";
 import { clipboardRowsForTablePaste, type ClipboardTableSource } from "../lib/clipboardTableRows";
 import type { RichDocumentHistoryAction } from "../lib/richDocumentHistory";
-import { richTableSelectionFor, richTableSelectionSummary, type RichTableSelectionCommand, type RichTableSelectionSummary } from "../lib/richTableSelection";
+import { nextRichTableSelectAllSelection, richTableSelectionFor, richTableSelectionSummary, shouldPreserveRichTableContextSelection, type RichTableSelectionCommand, type RichTableSelectionSummary } from "../lib/richTableSelection";
 import { richTableColumnAlignmentTransaction, type RichTableColumnAlignment } from "../lib/richTableAlignment";
 import { richTableSortTransaction } from "../lib/richTableSort";
 import { richTablePasteCapacity, richTablePasteTransaction, type RichTablePasteCapacity } from "../lib/richTablePaste";
@@ -27,10 +28,11 @@ import { shouldHandleDefaultCopy } from "../lib/selectionCopy";
 import { richTableStructureTransaction, type RichTableStructureCommand } from "../lib/richTableStructure";
 import { createRichMarkdownExtensions } from "../lib/richMarkdownExtensions";
 import { normalizeRichOrderedLists, withoutGeneratedTrailingParagraph } from "../lib/richMarkdownDocument";
-import { shouldOpenRichLinkOnClick } from "../lib/richLinks";
+import { richLinkClickSelectionRange, shouldOpenRichLinkOnClick } from "../lib/richLinks";
+import { activeRichAutolink, richLinkEditState, richLinkEditTransaction } from "../lib/richLinkEditing";
 import { browserTitleLinkFromClipboard } from "../lib/richLinkPaste";
 import { findRichTextMatches, richSearchHighlightExtension, setRichSearchHighlights } from "../lib/richSearch";
-import { richMarkdownSourceFromClipboard } from "../lib/richMarkdownPaste";
+import { richMarkdownPasteTransaction, richMarkdownSourceFromClipboard } from "../lib/richMarkdownPaste";
 import type { Translator } from "../lib/i18n";
 import type { CopyMode } from "../types";
 import { markdownRangeToClipboardPayload } from "../lib/markdown";
@@ -50,8 +52,8 @@ export type RichMarkdownEditorHandle = {
   getScrollProgress: () => number | null;
   runHistoryAction: (action: RichDocumentHistoryAction) => boolean;
   runTextCommand: (command: MarkdownTextCommand) => boolean;
-  getLinkState: () => { href: string; active: boolean } | null;
-  setLink: (href: string) => boolean;
+  getLinkState: () => { href: string; text: string; active: boolean } | null;
+  setLink: (href: string, text: string) => boolean;
   unsetLink: () => boolean;
   getSelectionRange: () => TextRange | null;
   getSelectedText: () => string;
@@ -204,6 +206,16 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
         spellcheck: "true"
       },
       handleKeyDown: (_view, event) => {
+        if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "a") {
+          const currentEditor = editorRef.current;
+          const nextSelection = currentEditor ? nextRichTableSelectAllSelection(currentEditor.state) : null;
+          if (!currentEditor || !nextSelection) return false;
+
+          event.preventDefault();
+          currentEditor.view.dispatch(currentEditor.state.tr.setSelection(nextSelection).scrollIntoView());
+          return true;
+        }
+
         if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "k") {
           const link = richLinkState(editorRef.current);
           if (!link) return false;
@@ -241,12 +253,14 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
           const href = link.getAttribute("href")?.trim();
           if (!href) return false;
 
-          event.preventDefault();
           if (shouldOpenRichLinkOnClick(event)) {
+            event.preventDefault();
             onOpenLinkRef.current(href);
-          } else {
-            onEditLinkRef.current(href, true);
+            return true;
           }
+
+          event.preventDefault();
+          selectRichLinkFromDom(view, link, event);
           return true;
         },
         contextmenu: (view, event) => {
@@ -254,7 +268,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
           if (!(target instanceof Element) || !target.closest("td, th")) return false;
 
           const coords = view.posAtCoords({ left: event.clientX, top: event.clientY });
-          if (coords) {
+          if (coords && !shouldPreserveRichTableContextSelection(view.state, coords.pos)) {
             const resolved = view.state.doc.resolve(coords.pos);
             let cellDepth = resolved.depth;
             while (cellDepth > 0 && !isRichTableCellNode(resolved.node(cellDepth))) cellDepth -= 1;
@@ -281,8 +295,10 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
           if (!copied) return false;
 
           event.preventDefault();
-          onToastRef.current(copyModeRef.current === "markdown"
-            ? "Copied Markdown selection"
+          onToastRef.current(copyModeRef.current === "compact"
+            ? "Copied compact Markdown selection"
+            : copyModeRef.current === "source"
+              ? "Copied Markdown selection"
             : copyModeRef.current === "smart"
               ? "Copied clean text, HTML, and Markdown"
               : "Copied clean text selection");
@@ -321,7 +337,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
           );
           if (markdownSource) {
             const parsed = currentEditor.markdown?.parse(markdownSource);
-            if (parsed?.content?.length && currentEditor.chain().insertContent(parsed.content).run()) {
+            if (parsed?.content?.length && insertParsedRichMarkdown(currentEditor, parsed)) {
               event.preventDefault();
               return true;
             }
@@ -347,7 +363,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
           const parsed = currentEditor.markdown?.parse(table.markdownTable);
           if (!parsed?.content?.length) return false;
 
-          const inserted = currentEditor.chain().focus().insertContent(parsed.content).run();
+          const inserted = insertParsedRichMarkdown(currentEditor, parsed);
           if (!inserted) return false;
 
           event.preventDefault();
@@ -393,6 +409,19 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   // Keep the instance available even during the short window before Tiptap's
   // onCreate callback runs. Input can arrive as soon as the editor is painted.
   editorRef.current = editor;
+
+  const contextState = useEditorState({
+    editor,
+    selector: ({ editor: currentEditor }) => ({
+      bold: currentEditor.isActive("bold"),
+      blockquote: currentEditor.isActive("blockquote"),
+      bulletList: currentEditor.isActive("bulletList"),
+      code: currentEditor.isActive("code"),
+      italic: currentEditor.isActive("italic"),
+      link: richLinkState(currentEditor)?.active ?? false,
+      orderedList: currentEditor.isActive("orderedList")
+    })
+  });
 
   useEffect(() => {
     if (!editor || editor.isDestroyed) return;
@@ -466,7 +495,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
     },
     runTextCommand: (command) => runRichTextCommand(editor, command),
     getLinkState: () => richLinkState(editor),
-    setLink: (href) => setRichLink(editor, href),
+    setLink: (href, text) => setRichLink(editor, href, text),
     unsetLink: () => unsetRichLink(editor),
     getSelectionRange: () => richSelectionRange(editor),
     getSelectedText: () => richSelectedText(editor),
@@ -583,10 +612,143 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
           />
         </section>
       )}
+      {editor && (
+        <>
+          <BubbleMenu
+            editor={editor}
+            pluginKey="rich-text-context-menu"
+            className="rich-context-toolbar"
+            updateDelay={40}
+            options={{ strategy: "fixed", placement: "top", offset: 8, shift: { padding: 10 } }}
+            shouldShow={({ editor: currentEditor, state }) => (
+              currentEditor.isEditable
+              && !(state.selection instanceof CellSelection)
+              && (
+                !state.selection.empty
+                || Boolean(richLinkState(currentEditor)?.active)
+                || (!currentEditor.isActive("table") && (
+                  currentEditor.isActive("bulletList")
+                  || currentEditor.isActive("orderedList")
+                  || currentEditor.isActive("blockquote")
+                ))
+              )
+            )}
+            onMouseDown={(event) => event.preventDefault()}
+          >
+            <RichContextButton
+              label={t("Bold")}
+              icon={<Bold />}
+              active={contextState?.bold}
+              onClick={() => editor.chain().focus().toggleBold().run()}
+            />
+            <RichContextButton
+              label={t("Italic")}
+              icon={<Italic />}
+              active={contextState?.italic}
+              onClick={() => editor.chain().focus().toggleItalic().run()}
+            />
+            <RichContextButton
+              label={t("Inline code")}
+              icon={<Code2 />}
+              active={contextState?.code}
+              onClick={() => editor.chain().focus().toggleCode().run()}
+            />
+            <span className="rich-context-divider" aria-hidden="true" />
+            <RichContextButton
+              label={t(contextState?.link ? "Edit link" : "Link")}
+              icon={<Link2 />}
+              active={contextState?.link}
+              onClick={() => {
+                const link = richLinkState(editor);
+                onEditLinkRef.current(link?.href ?? "", link?.active ?? false);
+              }}
+            />
+            {contextState?.link && (
+              <>
+                <RichContextButton
+                  label={t("Open link")}
+                  icon={<ExternalLink />}
+                  onClick={() => {
+                    const href = richLinkState(editor)?.href;
+                    if (href) onOpenLinkRef.current(href);
+                  }}
+                />
+                <RichContextButton label={t("Remove link")} icon={<Link2Off />} onClick={() => unsetRichLink(editor)} />
+              </>
+            )}
+            <span className="rich-context-divider" aria-hidden="true" />
+            <RichContextButton
+              label={t("Bullet list")}
+              icon={<List />}
+              active={contextState?.bulletList}
+              onClick={() => editor.chain().focus().toggleBulletList().run()}
+            />
+            <RichContextButton
+              label={t("Ordered list")}
+              icon={<ListOrdered />}
+              active={contextState?.orderedList}
+              onClick={() => editor.chain().focus().toggleOrderedList().run()}
+            />
+            <RichContextButton
+              label={t("Blockquote")}
+              icon={<TextQuote />}
+              active={contextState?.blockquote}
+              onClick={() => editor.chain().focus().toggleBlockquote().run()}
+            />
+          </BubbleMenu>
+
+          <BubbleMenu
+            editor={editor}
+            pluginKey="rich-table-context-menu"
+            className="rich-context-toolbar rich-table-context-toolbar"
+            updateDelay={40}
+            options={{ strategy: "fixed", placement: "top", offset: 8, shift: { padding: 10 } }}
+            shouldShow={({ editor: currentEditor, state }) => (
+              currentEditor.isEditable
+              && (currentEditor.isActive("table") || state.selection instanceof CellSelection)
+              && !Boolean(richLinkState(currentEditor)?.active)
+              && (state.selection.empty || state.selection instanceof CellSelection)
+            )}
+            onMouseDown={(event) => event.preventDefault()}
+          >
+            <RichContextButton label={t("Add row below")} icon={<BetweenHorizontalEnd />} onClick={() => editor.chain().focus().addRowAfter().run()} />
+            <RichContextButton label={t("Add column right")} icon={<BetweenVerticalEnd />} onClick={() => editor.chain().focus().addColumnAfter().run()} />
+            <span className="rich-context-divider" aria-hidden="true" />
+            <RichContextButton label={t("Select row")} icon={<Rows3 />} onClick={() => runRichTableSelectionCommand(editor, "select-row")} />
+            <RichContextButton label={t("Select column")} icon={<Columns3 />} onClick={() => runRichTableSelectionCommand(editor, "select-column")} />
+            <RichContextButton label={t("Select table")} icon={<SquareMousePointer />} onClick={() => runRichTableSelectionCommand(editor, "select-table")} />
+          </BubbleMenu>
+        </>
+      )}
       <EditorContent editor={editor} />
     </div>
   );
 });
+
+function RichContextButton({
+  active = false,
+  icon,
+  label,
+  onClick
+}: {
+  active?: boolean;
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={active ? "active" : undefined}
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={active || undefined}
+      onClick={onClick}
+    >
+      {icon}
+    </button>
+  );
+}
 
 function reportTableContext(
   editor: Editor,
@@ -828,33 +990,35 @@ function clipboardTableSourceLabel(source: ClipboardTableSource): string {
   }
 }
 
-function richLinkState(editor: Editor | null): { href: string; active: boolean } | null {
+function richLinkState(editor: Editor | null): { href: string; text: string; active: boolean } | null {
   if (!editor) return null;
-  const autolink = activeRichAutolink(editor);
-  if (autolink) {
-    return {
-      href: typeof autolink.node.attrs.href === "string" ? autolink.node.attrs.href : "",
-      active: true
-    };
-  }
-  const href = editor.getAttributes("link").href;
-  return {
-    href: typeof href === "string" ? href : "",
-    active: editor.isActive("link")
-  };
+  return richLinkEditState(editor.state);
 }
 
-function setRichLink(editor: Editor | null, href: string): boolean {
-  if (!editor) return false;
-  const autolink = activeRichAutolink(editor);
-  if (!autolink) return editor.chain().focus().extendMarkRange("link").setLink({ href }).run();
+function selectRichLinkFromDom(
+  view: Editor["view"],
+  link: HTMLAnchorElement,
+  event: MouseEvent
+): void {
+  try {
+    const linkStart = view.posAtDOM(link, 0);
+    const linkEnd = view.posAtDOM(link, link.childNodes.length);
+    const clicked = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ?? linkStart;
+    const range = richLinkClickSelectionRange(linkStart, linkEnd, clicked);
+    if (!range) return;
 
-  const transaction = editor.state.tr.setNodeMarkup(autolink.position, undefined, {
-    ...autolink.node.attrs,
-    raw: "",
-    href,
-    title: ""
-  });
+    const selection = TextSelection.create(view.state.doc, range.from, range.to);
+    view.dispatch(view.state.tr.setSelection(selection));
+    view.focus();
+  } catch {
+    // The DOM mapping can disappear when a node view replaces itself during the click.
+  }
+}
+
+function setRichLink(editor: Editor | null, href: string, text: string): boolean {
+  if (!editor) return false;
+  const transaction = richLinkEditTransaction(editor.state, href, text);
+  if (!transaction) return false;
   editor.view.dispatch(transaction);
   editor.commands.focus();
   return true;
@@ -862,7 +1026,7 @@ function setRichLink(editor: Editor | null, href: string): boolean {
 
 function unsetRichLink(editor: Editor | null): boolean {
   if (!editor) return false;
-  const autolink = activeRichAutolink(editor);
+  const autolink = activeRichAutolink(editor.state);
   if (!autolink) return editor.chain().focus().unsetLink().run();
 
   const text = autolink.node.textContent;
@@ -877,22 +1041,6 @@ function unsetRichLink(editor: Editor | null): boolean {
   editor.view.dispatch(transaction);
   editor.commands.focus();
   return true;
-}
-
-function activeRichAutolink(editor: Editor): { position: number; node: ProseMirrorNode } | null {
-  const { selection, doc } = editor.state;
-  const selectedNode = doc.nodeAt(selection.from);
-  if (selectedNode?.type.name === "markdownAutolink") {
-    return { position: selection.from, node: selectedNode };
-  }
-
-  for (let depth = selection.$from.depth; depth > 0; depth -= 1) {
-    const node = selection.$from.node(depth);
-    if (node.type.name === "markdownAutolink") {
-      return { position: selection.$from.before(depth), node };
-    }
-  }
-  return null;
 }
 
 function richSelectionRange(editor: Editor | null): TextRange | null {
@@ -1016,7 +1164,18 @@ function insertRichMarkdown(editor: Editor | null, markdown: string): boolean {
   const parsed = editor?.markdown?.parse(markdown.trim());
   if (!editor || !parsed?.content?.length) return false;
 
-  return editor.chain().focus().insertContent(parsed.content).run();
+  return insertParsedRichMarkdown(editor, parsed);
+}
+
+function insertParsedRichMarkdown(editor: Editor, parsed: JSONContent): boolean {
+  const transaction = richMarkdownPasteTransaction(editor.state, parsed);
+  if (transaction) {
+    editor.view.dispatch(transaction);
+    editor.commands.focus();
+    return true;
+  }
+
+  return editor.chain().focus().insertContent(parsed.content ?? []).run();
 }
 
 function runRichTextCommand(editor: Editor | null, command: MarkdownTextCommand): boolean {

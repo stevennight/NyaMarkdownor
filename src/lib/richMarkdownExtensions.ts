@@ -906,12 +906,12 @@ const RichTable = Table.extend({
     const raw = stringAttribute(node.attrs?.markdownRaw);
     const fingerprint = stringAttribute(node.attrs?.markdownFingerprint);
     if (raw && fingerprint && fingerprint === tableMarkdownFingerprint(node)) return raw;
-    return renderTableToMarkdown(tableWithMarkdownCellBreaks(node), {
+    return stripBoundaryLineBreaks(renderTableToMarkdown(tableWithMarkdownCellBreaks(node), {
       ...helpers,
       renderChildren: (children, context) => escapeTableCellPipes(helpers.renderChildren(children, context))
     }, {
       cellLineSeparator: TABLE_CELL_LINE_SEPARATOR
-    });
+    }));
   }
 });
 
@@ -1491,11 +1491,17 @@ export function createRichMarkdownExtensions(
       priority: 1100,
 
       addKeyboardShortcuts() {
+        const insertTableCellBreak = () => (
+          Boolean(findParentNode((node) => node.type.spec.tableRole === "cell" || node.type.spec.tableRole === "header_cell")(this.editor.state.selection))
+          && this.editor.commands.insertContent({
+            type: "hardBreak",
+            attrs: { markdownMarker: TABLE_CELL_LINE_SEPARATOR }
+          })
+        );
+
         return {
-          Enter: () => (
-            Boolean(findParentNode((node) => node.type.spec.tableRole === "cell" || node.type.spec.tableRole === "header_cell")(this.editor.state.selection))
-            && this.editor.commands.setHardBreak()
-          )
+          Enter: insertTableCellBreak,
+          "Shift-Enter": insertTableCellBreak
         };
       }
     }),
@@ -1722,6 +1728,10 @@ function stripTrailingLineBreaks(value: string): string {
   return value.replace(/(?:\r?\n)+$/, "");
 }
 
+function stripBoundaryLineBreaks(value: string): string {
+  return stripTrailingLineBreaks(value).replace(/^(?:\r?\n)+/, "");
+}
+
 function protectedKind(value: unknown): ProtectedMarkdownKind {
   return value === "footnote" ? "footnote" : "html";
 }
@@ -1912,6 +1922,8 @@ function tableFingerprintValue(value: unknown, key = ""): unknown {
   const output: Record<string, unknown> = {};
   for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))) {
     if (childKey.startsWith("markdown") || childKey === "colwidth" || childKey === "width" || childKey === "height") continue;
+    if ((childKey === "align" && childValue == null)
+      || ((childKey === "colspan" || childKey === "rowspan") && childValue === 1)) continue;
     const normalized = tableFingerprintValue(childValue, childKey);
     if (normalized !== undefined) output[childKey] = normalized;
   }

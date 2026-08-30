@@ -9,7 +9,13 @@ const schema = new Schema({
     doc: { content: "block+" },
     paragraph: { content: "inline*", group: "block" },
     text: { group: "inline" },
-    hardBreak: { inline: true, group: "inline", selectable: false, linebreakReplacement: true },
+    hardBreak: {
+      inline: true,
+      group: "inline",
+      selectable: false,
+      linebreakReplacement: true,
+      attrs: { markdownMarker: { default: "  " } }
+    },
     ...tableNodes({ tableGroup: "block", cellContent: "paragraph+", cellAttributes: {} })
   }
 });
@@ -45,6 +51,7 @@ describe("rich table paste", () => {
 
     expect(firstCell?.textContent).toBe("Line oneLine two");
     expect(firstCell?.firstChild?.childCount).toBe(3);
+    expect(firstCell?.firstChild?.child(1).attrs.markdownMarker).toBe("<br>");
   });
 
   it("does not truncate data when the pasted grid exceeds the current table", () => {

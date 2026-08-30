@@ -1,7 +1,9 @@
+import { getSchema } from "@tiptap/core";
 import { MarkdownManager } from "@tiptap/markdown";
+import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { describe, expect, it } from "vitest";
 import { createRichMarkdownExtensions } from "./richMarkdownExtensions";
-import { richMarkdownSourceFromClipboard } from "./richMarkdownPaste";
+import { richMarkdownPasteTransaction, richMarkdownSourceFromClipboard } from "./richMarkdownPaste";
 
 const markdown = new MarkdownManager({ extensions: createRichMarkdownExtensions(null) });
 const parseMarkdown = (source: string) => markdown.parse(source);
@@ -14,6 +16,12 @@ describe("rich Markdown paste selection", () => {
       markdown: source,
       text: "https://example.com/path"
     }, parseMarkdown)).toBe(source);
+  });
+
+  it("drops clipboard-only boundary newlines without collapsing intentional spacing", () => {
+    expect(richMarkdownSourceFromClipboard({
+      markdown: "\n\nFirst\n\n\nSecond\n\n"
+    }, parseMarkdown)).toBe("First\n\n\nSecond");
   });
 
   it("keeps a complete mixed Markdown document instead of extracting its table", () => {
@@ -97,5 +105,36 @@ describe("rich Markdown paste selection", () => {
       text: "See [brackets] and https://example.com/docs"
     }, parseMarkdown)).toBeNull();
     expect(richMarkdownSourceFromClipboard({ text: "https://example.com/docs" }, parseMarkdown)).toBeNull();
+  });
+
+  it("replaces an empty top-level paragraph when inserting Markdown blocks", () => {
+    const schema = getSchema(createRichMarkdownExtensions(null));
+    const emptyDocument = schema.node("doc", null, [schema.node("paragraph")]);
+    const state = EditorState.create({
+      schema,
+      doc: emptyDocument,
+      selection: TextSelection.create(emptyDocument, 1)
+    });
+    const parsed = markdown.parse("# Heading\n\nBody");
+    const transaction = richMarkdownPasteTransaction(state, parsed);
+
+    expect(transaction).not.toBeNull();
+    expect(transaction?.doc.childCount).toBe(2);
+    expect(transaction?.doc.firstChild?.type.name).toBe("heading");
+    expect(transaction?.doc.lastChild?.textContent).toBe("Body");
+    expect(transaction?.selection.eq(TextSelection.atEnd(transaction.doc))).toBe(true);
+  });
+
+  it("leaves non-empty and nested paragraphs on the normal insertion path", () => {
+    const schema = getSchema(createRichMarkdownExtensions(null));
+    const paragraph = schema.node("paragraph", null, [schema.text("Before")]);
+    const document = schema.node("doc", null, [paragraph]);
+    const state = EditorState.create({
+      schema,
+      doc: document,
+      selection: TextSelection.atEnd(document)
+    });
+
+    expect(richMarkdownPasteTransaction(state, markdown.parse("# Heading"))).toBeNull();
   });
 });

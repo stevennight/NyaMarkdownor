@@ -24,15 +24,27 @@ export function trimClipboardBoundaryLineBreaks(text: string): string {
   return normalizeClipboardMarkdownSpacing(normalized);
 }
 
-function normalizeClipboardMarkdownSpacing(text: string): string {
+export function compactMarkdownForClipboard(text: string): string {
+  const normalized = normalizeMarkdownLineEndings(text).replace(/^\n+|\n+$/g, "");
+  return normalizeClipboardMarkdownSpacing(normalized, true);
+}
+
+function normalizeClipboardMarkdownSpacing(text: string, compact = false): string {
   if (!text) return text;
 
   const lines = text.split("\n");
   const output: string[] = [];
   let fence: { char: "`" | "~"; length: number } | null = null;
   let htmlBlock: { tag?: string; comment: boolean } | null = null;
+  const frontMatterEnd = clipboardFrontMatterEnd(lines);
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (frontMatterEnd !== null && index <= frontMatterEnd) {
+      output.push(line);
+      continue;
+    }
+
     if (fence) {
       output.push(line);
       const closing = line.match(new RegExp(`^ {0,3}(${fence.char}{${fence.length},})[ \\t]*$`));
@@ -68,7 +80,7 @@ function normalizeClipboardMarkdownSpacing(text: string): string {
     }
 
     if (/^[ \\t]*$/.test(line)) {
-      if (output.at(-1) !== "") output.push("");
+      if ((!compact || blankLineTouchesIndentedCode(lines, index)) && output.at(-1) !== "") output.push("");
       continue;
     }
 
@@ -76,6 +88,26 @@ function normalizeClipboardMarkdownSpacing(text: string): string {
   }
 
   return output.join("\n");
+}
+
+function clipboardFrontMatterEnd(lines: readonly string[]): number | null {
+  const delimiter = lines[0]?.trim();
+  if (delimiter !== "---" && delimiter !== "+++") return null;
+
+  for (let index = 1; index < lines.length; index += 1) {
+    if (lines[index].trim() === delimiter) return index;
+  }
+  return null;
+}
+
+function blankLineTouchesIndentedCode(lines: readonly string[], blankIndex: number): boolean {
+  const adjacentLine = (direction: -1 | 1): string | null => {
+    for (let index = blankIndex + direction; index >= 0 && index < lines.length; index += direction) {
+      if (lines[index].trim()) return lines[index];
+    }
+    return null;
+  };
+  return [adjacentLine(-1), adjacentLine(1)].some((line) => Boolean(line && /^(?: {4}|\t)/.test(line)));
 }
 
 export function clipboardPayloadForCopyMode(payload: ClipboardPayload, copyMode: CopyMode): ClipboardPayload {
@@ -90,6 +122,14 @@ export function clipboardPayloadForCopyMode(payload: ClipboardPayload, copyMode:
   if (copyMode === "plain") return { plainText: payload.plainText };
 
   const markdown = normalizedPayload.markdown ?? payload.plainText;
+  if (copyMode === "compact") {
+    const compactMarkdown = compactMarkdownForClipboard(markdown);
+    return {
+      plainText: compactMarkdown,
+      markdown
+    };
+  }
+
   return {
     plainText: markdown,
     markdown
@@ -140,7 +180,7 @@ export async function copyRichContent(payload: ClipboardPayload): Promise<Clipbo
   }
 
   if (!normalizedPayload.html && normalizedPayload.markdown && isTauriRuntime()) {
-    await writeClipboardText(normalizedPayload.markdown);
+    await writeClipboardText(normalizedPayload.plainText);
     return "plain";
   }
 
@@ -152,7 +192,7 @@ export async function copyRichContent(payload: ClipboardPayload): Promise<Clipbo
     if (htmlMode) return htmlMode;
   }
 
-  const copied = await copyText(normalizedPayload.markdown ?? normalizedPayload.plainText);
+  const copied = await copyText(normalizedPayload.plainText);
   return copied ? "plain" : null;
 }
 

@@ -4,21 +4,24 @@ import type { Translator } from "../lib/i18n";
 
 type LinkDialogProps = {
   open: boolean;
+  initialText: string;
   initialHref: string;
   canUnlink: boolean;
   t: Translator;
   onClose: () => void;
-  onApply: (href: string) => void;
+  onApply: (value: { text: string; href: string }) => void;
   onUnlink: () => void;
 };
 
-export function LinkDialog({ open, initialHref, canUnlink, t, onClose, onApply, onUnlink }: LinkDialogProps) {
+export function LinkDialog({ open, initialText, initialHref, canUnlink, t, onClose, onApply, onUnlink }: LinkDialogProps) {
+  const [text, setText] = useState(initialText);
   const [href, setHref] = useState(initialHref);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!open) return undefined;
 
+    setText(initialText);
     setHref(initialHref);
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -27,7 +30,7 @@ export function LinkDialog({ open, initialHref, canUnlink, t, onClose, onApply, 
     window.addEventListener("keydown", handleKeyDown);
     window.setTimeout(() => inputRef.current?.select(), 0);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [initialHref, onClose, open]);
+  }, [initialHref, initialText, onClose, open]);
 
   if (!open) return null;
 
@@ -47,9 +50,18 @@ export function LinkDialog({ open, initialHref, canUnlink, t, onClose, onApply, 
           className="table-size-body"
           onSubmit={(event) => {
             event.preventDefault();
-            onApply(href);
+            onApply({ text, href });
           }}
         >
+          <label className="link-dialog-field">
+            <span>{t("Link text")}</span>
+            <input
+              type="text"
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+              placeholder={t("Text shown in the document")}
+            />
+          </label>
           <label className="link-dialog-field">
             <span>{t("Destination")}</span>
             <input

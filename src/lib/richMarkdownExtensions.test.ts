@@ -659,6 +659,22 @@ describe("rich Markdown extensions", () => {
     const editedOutput = markdown.serialize(edited);
     expect(editedOutput).toContain("Alicia");
     expect(editedOutput).not.toContain(tableSource);
+    expect(editedOutput).not.toMatch(/\n{3,}/);
+  });
+
+  it("keeps table source after the parsed document passes through the ProseMirror schema", () => {
+    const tableSource = [
+      "| 名称 | 说明 |",
+      "| --- | --- |",
+      "| Alpha | 第一行<br>第二行 |",
+      "| Beta | 可复制内容 |"
+    ].join("\n");
+    const source = ["# 标题", "", tableSource, "", "末尾段落"].join("\n");
+    const parsed = markdown.parse(source);
+    const schemaDocument = getSchema(extensions).nodeFromJSON(parsed).toJSON();
+
+    replaceFirstText(schemaDocument, "标题", "X标题");
+    expect(markdown.serialize(schemaDocument)).toBe(source.replace("标题", "X标题"));
   });
 
   it("round-trips table cell line breaks through hard-break nodes", () => {

@@ -33,7 +33,7 @@ describe("preferences", () => {
       theme: "dark"
     });
     expect(defaultPreferences).toMatchObject({
-      copyMode: "markdown",
+      copyMode: "compact",
       editorContentWidth: 85
     });
   });
@@ -46,7 +46,13 @@ describe("preferences", () => {
       copyMode: "smart",
       editorContentWidth: 85
     });
-    expect(normalizePreferences({ smartCopy: false } as never).copyMode).toBe("markdown");
+    expect(normalizePreferences({ smartCopy: false } as never).copyMode).toBe("compact");
+  });
+
+  it("keeps compact Markdown as a valid persisted copy mode", () => {
+    expect(normalizePreferences({ copyMode: "compact" }).copyMode).toBe("compact");
+    expect(normalizePreferences({ copyMode: "source" }).copyMode).toBe("source");
+    expect(normalizePreferences({ copyMode: "markdown" } as never).copyMode).toBe("compact");
   });
 
   it("migrates old preference records with default backup settings", () => {

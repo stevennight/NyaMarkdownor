@@ -1,6 +1,7 @@
 import { getSchema } from "@tiptap/core";
 import { createRichMarkdownExtensions } from "./richMarkdownExtensions";
 import { describe, expect, it } from "vitest";
+import { clipboardRowsForTablePaste } from "./clipboardTableRows";
 import { richTableCellText, richTableClipboardFormats } from "./richTableClipboard";
 
 const schema = getSchema(createRichMarkdownExtensions(null));
@@ -36,6 +37,18 @@ describe("rich table clipboard formats", () => {
       ["A|B", "Line one\nLine two"],
       ["slash\\value", "ok"]
     ])?.markdown).toBe("| A\\|B | Line one<br>Line two |\n| --- | --- |\n| slash\\\\value | ok |");
+  });
+
+  it("restores exported Markdown cell breaks when pasted back into a table", () => {
+    const markdown = richTableClipboardFormats([
+      ["Note"],
+      ["Line one\nLine two"]
+    ])?.markdown;
+
+    expect(clipboardRowsForTablePaste({ text: markdown })?.rows).toEqual([
+      ["Note"],
+      ["Line one\nLine two"]
+    ]);
   });
 
   it("escapes table cells for rich HTML clipboard consumers", () => {

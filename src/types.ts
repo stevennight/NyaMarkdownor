@@ -10,7 +10,7 @@ export type MarkdownLineEnding = "lf" | "crlf";
 
 export type EditorDensity = "compact" | "comfortable" | "spacious";
 
-export type CopyMode = "markdown" | "smart" | "plain";
+export type CopyMode = "source" | "compact" | "smart" | "plain";
 
 export type TableHeightMode = "full" | "scroll";
 

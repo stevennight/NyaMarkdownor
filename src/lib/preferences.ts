@@ -39,7 +39,7 @@ export const defaultPreferences: AppPreferences = {
   sidebarVisible: true,
   sidebarPage: "outline",
   autoSave: true,
-  copyMode: "markdown",
+  copyMode: "compact",
   softSyntax: true,
   editorFontSize: 15,
   editorContentWidth: 85,
@@ -126,8 +126,9 @@ export function normalizePreferences(value: PreferencesInput): AppPreferences {
 }
 
 function normalizeCopyMode(value: unknown, legacySmartCopy: unknown): CopyMode {
+  if (value === "markdown") return "compact";
   if (isCopyMode(value)) return value;
-  if (typeof legacySmartCopy === "boolean") return legacySmartCopy ? "smart" : "markdown";
+  if (typeof legacySmartCopy === "boolean") return legacySmartCopy ? "smart" : "compact";
   return defaultPreferences.copyMode;
 }
 
@@ -203,7 +204,7 @@ function isEditorDensity(value: unknown): value is EditorDensity {
 }
 
 function isCopyMode(value: unknown): value is CopyMode {
-  return value === "markdown" || value === "smart" || value === "plain";
+  return value === "source" || value === "compact" || value === "smart" || value === "plain";
 }
 
 function isTableHeightMode(value: unknown): value is TableHeightMode {

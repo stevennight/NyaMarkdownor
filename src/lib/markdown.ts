@@ -134,6 +134,9 @@ markdownIt.renderer.rules.text = (tokens, index) => {
   return restoreTableCellLineBreaks(escaped, "<br>");
 };
 
+markdownIt.renderer.rules.table_open = () => '<div class="tableWrapper"><table>\n';
+markdownIt.renderer.rules.table_close = () => "</table></div>\n";
+
 markdownIt.renderer.rules.image = (tokens, index, options, env, self) => {
   const token = tokens[index];
   const src = token.attrGet("src") ?? "";

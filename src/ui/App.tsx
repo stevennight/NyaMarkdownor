@@ -56,6 +56,7 @@ import {
   List,
   ListChecks,
   ListOrdered,
+  Minimize2,
   Moon,
   Eye,
   ListFilter,
@@ -145,7 +146,7 @@ import {
   type OpenMarkdownFilesResult,
   type SavedExport
 } from "../lib/fileIo";
-import { copyRichContent, copyText, writeClipboardEventData } from "../lib/clipboard";
+import { compactMarkdownForClipboard, copyRichContent, copyText, writeClipboardEventData } from "../lib/clipboard";
 import { bundledBuildInfo, resolveBuildInfo, type BuildInfo } from "../lib/buildInfo";
 import {
   checkForApplicationUpdates,
@@ -556,7 +557,7 @@ export function App() {
   const [tableSizeDraft, setTableSizeDraft] = useState<TableSizeDraft>({ columns: 3, bodyRows: 2 });
   const [richTableActive, setRichTableActive] = useState(false);
   const [richTableSelection, setRichTableSelection] = useState<RichTableSelectionSummary | null>(null);
-  const [linkDialogState, setLinkDialogState] = useState<{ href: string; canUnlink: boolean } | null>(null);
+  const [linkDialogState, setLinkDialogState] = useState<{ text: string; href: string; canUnlink: boolean } | null>(null);
   const [findOpen, setFindOpen] = useState(false);
   const [replaceVisible, setReplaceVisible] = useState(false);
   const [findQuery, setFindQuery] = useState("");
@@ -3501,7 +3502,7 @@ export function App() {
           showToast("Link editor is unavailable");
           return;
         }
-        setLinkDialogState({ href: link.href, canUnlink: link.active });
+        setLinkDialogState({ text: link.text, href: link.href, canUnlink: link.active });
         return;
       }
 
@@ -3531,19 +3532,25 @@ export function App() {
   function openRichLinkEditor(href: string, canUnlink: boolean) {
     const current = richEditorRef.current?.getLinkState();
     setLinkDialogState({
+      text: current?.text ?? "",
       href: current?.active ? current.href : href,
       canUnlink: canUnlink || Boolean(current?.active)
     });
   }
 
-  function applyRichLink(href: string) {
-    const normalized = normalizeRichLinkHref(href);
+  function applyRichLink(value: { text: string; href: string }) {
+    if (!value.text.trim()) {
+      showToast("Enter link text");
+      return;
+    }
+
+    const normalized = normalizeRichLinkHref(value.href);
     if (!normalized) {
       showToast("Enter a safe link destination");
       return;
     }
 
-    const applied = richEditorRef.current?.setLink(normalized);
+    const applied = richEditorRef.current?.setLink(normalized, value.text);
     if (!applied) {
       showToast("Link could not be applied");
       return;
@@ -5049,6 +5056,26 @@ export function App() {
     const markdown = markdownFromSelectionRanges(source, ranges);
     const mode = await copyRichContent({ plainText: markdown, markdown });
     showToast(mode ? (copiedSelection ? "Copied Markdown selection" : "Copied Markdown document") : "Clipboard write failed");
+  }
+
+  async function copyCompactMarkdown() {
+    if (viewMode === "wysiwyg") {
+      const content = richEditorRef.current?.getSelectionClipboardContent();
+      if (!content) {
+        showToast("Clipboard source is unavailable");
+        return;
+      }
+      const plainText = compactMarkdownForClipboard(content.markdown);
+      const mode = await copyRichContent({ plainText, markdown: content.markdown });
+      showToast(mode ? (content.selected ? "Copied compact Markdown selection" : "Copied compact Markdown document") : "Clipboard write failed");
+      return;
+    }
+
+    const { source, ranges } = currentEditorSelection();
+    const copiedSelection = hasNonEmptySelection(ranges, source.length);
+    const markdown = markdownFromSelectionRanges(source, ranges);
+    const mode = await copyRichContent({ plainText: compactMarkdownForClipboard(markdown), markdown });
+    showToast(mode ? (copiedSelection ? "Copied compact Markdown selection" : "Copied compact Markdown document") : "Clipboard write failed");
   }
 
   async function copyPlainText() {
@@ -7115,7 +7142,8 @@ export function App() {
     { id: "find", title: "Find", group: "Edit", shortcut: "Ctrl+F", run: () => openFindPanel(false) },
     { id: "replace", title: "Find and Replace", group: "Edit", shortcut: "Ctrl+H", run: () => openFindPanel(true) },
     { id: "toggle-theme", title: theme === "light" ? "Dark Theme" : "Light Theme", group: "View", run: toggleTheme },
-    { id: "default-copy-markdown", title: "Use Markdown Copy by Default", group: "Clipboard", disabled: copyMode === "markdown", run: () => setCopyMode("markdown") },
+    { id: "default-copy-source", title: "Use Source Markdown Copy by Default", group: "Clipboard", disabled: copyMode === "source", run: () => setCopyMode("source") },
+    { id: "default-copy-compact", title: "Use Compact Markdown Copy by Default", group: "Clipboard", disabled: copyMode === "compact", run: () => setCopyMode("compact") },
     { id: "default-copy-smart", title: "Use Multi-format Copy by Default", group: "Clipboard", disabled: copyMode === "smart", run: () => setCopyMode("smart") },
     { id: "default-copy-plain", title: "Use Plain Text Copy by Default", group: "Clipboard", disabled: copyMode === "plain", run: () => setCopyMode("plain") },
     { id: "toggle-soft-syntax", title: softSyntax ? "Show Markdown Syntax" : "Soften Markdown Syntax", group: "Editor", run: () => setSoftSyntax(!softSyntax) },
@@ -7162,7 +7190,8 @@ export function App() {
     { id: "align-column-left", title: "Align Table Column Left", group: "Table", disabled: !tableInCurrentEditor, run: () => alignActiveColumn("left") },
     { id: "align-column-center", title: "Align Table Column Center", group: "Table", disabled: !tableInCurrentEditor, run: () => alignActiveColumn("center") },
     { id: "align-column-right", title: "Align Table Column Right", group: "Table", disabled: !tableInCurrentEditor, run: () => alignActiveColumn("right") },
-    { id: "copy-md", title: "Copy Markdown", group: "Clipboard", run: copyMarkdown },
+    { id: "copy-md", title: "Copy Source Markdown", group: "Clipboard", run: copyMarkdown },
+    { id: "copy-compact-md", title: "Copy Compact Markdown", group: "Clipboard", run: copyCompactMarkdown },
     { id: "copy-text", title: "Copy Clean Text", group: "Clipboard", run: copyPlainText },
     { id: "copy-file-path", title: "Copy File Path", group: "Clipboard", disabled: !documentState.filePath, run: copyDocumentPath },
     { id: "copy-selection-md-table", title: "Copy Selection as Markdown Table", group: "Clipboard", disabled: !structuredTableSelection, run: copySelectionAsMarkdownTable },
@@ -7397,7 +7426,8 @@ export function App() {
 
         <div className="toolbar clipboard-toolbar">
           <ToolbarActionMenu label={t("Copy")} icon={<ClipboardCopy />} align="right">
-            <TableMenuItem label={t("Copy Markdown")} icon={<Copy />} onClick={copyMarkdown} />
+            <TableMenuItem label={t("Copy Compact Markdown")} icon={<Minimize2 />} onClick={copyCompactMarkdown} />
+            <TableMenuItem label={t("Copy Source Markdown")} icon={<Copy />} onClick={copyMarkdown} />
             <TableMenuItem label={t("Copy Text")} icon={<TextCursorInput />} onClick={copyPlainText} />
             <TableMenuItem label={t("Copy Rich Text")} icon={<ClipboardCopy />} onClick={() => void copyRichText()} />
             {(selectedTableCells || (viewMode === "wysiwyg" && richTableActive)) && (
@@ -7420,7 +7450,8 @@ export function App() {
               </>
             )}
             <MenuSectionLabel>{t("Default copy")}</MenuSectionLabel>
-            <ToolbarMenuChoice label={t("Markdown")} icon={<FileCode2 />} checked={copyMode === "markdown"} onSelect={() => setCopyMode("markdown")} />
+            <ToolbarMenuChoice label={t("Compact Markdown")} icon={<Minimize2 />} checked={copyMode === "compact"} onSelect={() => setCopyMode("compact")} />
+            <ToolbarMenuChoice label={t("Source Markdown")} icon={<FileCode2 />} checked={copyMode === "source"} onSelect={() => setCopyMode("source")} />
             <ToolbarMenuChoice label={t("Multi-format")} icon={<ClipboardCopy />} checked={copyMode === "smart"} onSelect={() => setCopyMode("smart")} />
             <ToolbarMenuChoice label={t("Plain text")} icon={<TextCursorInput />} checked={copyMode === "plain"} onSelect={() => setCopyMode("plain")} />
           </ToolbarActionMenu>
@@ -8473,6 +8504,7 @@ export function App() {
         <Suspense fallback={null}>
           <LinkDialog
             open
+            initialText={linkDialogState.text}
             initialHref={linkDialogState.href}
             canUnlink={linkDialogState.canUnlink}
             t={t}

@@ -2,6 +2,8 @@ import { Fragment } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { CellSelection, TableMap, cellAround } from "@tiptap/pm/tables";
 
+const TABLE_CELL_LINE_SEPARATOR = "<br>";
+
 export type RichTablePasteCapacity = {
   startRow: number;
   startColumn: number;
@@ -98,7 +100,7 @@ function tableCellContent(state: EditorState, value: string, paragraphName: stri
   const lines = value.replace(/\r\n?/g, "\n").split("\n");
   const content = [];
   for (let index = 0; index < lines.length; index += 1) {
-    if (index > 0 && hardBreak) content.push(hardBreak.create());
+    if (index > 0 && hardBreak) content.push(hardBreak.create({ markdownMarker: TABLE_CELL_LINE_SEPARATOR }));
     if (lines[index]) content.push(state.schema.text(lines[index]));
   }
 

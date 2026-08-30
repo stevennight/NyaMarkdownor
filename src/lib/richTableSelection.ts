@@ -1,5 +1,6 @@
-import type { EditorState } from "@tiptap/pm/state";
+import { TextSelection, type EditorState, type Selection } from "@tiptap/pm/state";
 import { CellSelection, TableMap, cellAround } from "@tiptap/pm/tables";
+import { positionInsideNonEmptySelection } from "./selectionRanges";
 
 export type RichTableSelectionCommand = "select-cell" | "select-row" | "select-column" | "select-table";
 
@@ -59,4 +60,41 @@ export function richTableSelectionSummary(state: EditorState): RichTableSelectio
           ? "column"
           : "range";
   return { kind, rowCount, columnCount, cellCount };
+}
+
+export function nextRichTableSelectAllSelection(state: EditorState): Selection | null {
+  const selection = state.selection;
+  const $cell = selection instanceof CellSelection ? selection.$anchorCell : cellAround(selection.$from);
+  if (!$cell) return null;
+
+  const tableSelection = richTableSelectionFor(state, "select-table");
+  if (!tableSelection) return null;
+
+  if (selection instanceof CellSelection) {
+    return selection.eq(tableSelection) ? null : tableSelection;
+  }
+
+  const cell = state.doc.nodeAt($cell.pos);
+  if (!cell) return null;
+
+  const contentSelection = TextSelection.between(
+    state.doc.resolve($cell.pos + 1),
+    state.doc.resolve($cell.pos + cell.nodeSize - 1)
+  );
+  if (!contentSelection.empty && !selection.eq(contentSelection)) return contentSelection;
+
+  return new CellSelection($cell);
+}
+
+export function shouldPreserveRichTableContextSelection(state: EditorState, position: number): boolean {
+  const selection = state.selection;
+  if (!(selection instanceof CellSelection)) {
+    return positionInsideNonEmptySelection(position, [selection]);
+  }
+
+  let insideSelectedCell = false;
+  selection.forEachCell((cell, cellPosition) => {
+    if (position >= cellPosition && position < cellPosition + cell.nodeSize) insideSelectedCell = true;
+  });
+  return insideSelectedCell;
 }

@@ -21,6 +21,9 @@ const buildInfo = {
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    dedupe: ["react", "react-dom"]
+  },
   define: {
     __APP_INFO__: JSON.stringify(buildInfo)
   },

@@ -93,6 +93,27 @@ describe("clipboard table row detection", () => {
     });
   });
 
+  it("restores semantic Markdown table cell breaks without changing literals", () => {
+    const markdown = [
+      "| Note | Escaped | Code | Entity |",
+      "| --- | --- | --- | --- |",
+      "| line<br>break | line\\<br>literal | `code<br>literal` | &lt;br&gt; |"
+    ].join("\n");
+
+    expect(clipboardTableRowsFromData({ markdown })).toEqual({
+      source: "markdown",
+      rows: [
+        ["Note", "Escaped", "Code", "Entity"],
+        ["line\nbreak", String.raw`line\<br>literal`, "`code<br>literal`", "&lt;br&gt;"]
+      ],
+      markdownTable: [
+        "| Note          | Escaped          | Code              | Entity     |",
+        "| ------------- | ---------------- | ----------------- | ---------- |",
+        "| line<br>break | line\\<br>literal | `code<br>literal` | &lt;br&gt; |"
+      ].join("\n")
+    });
+  });
+
   it("detects TSV grids and builds an insertable Markdown table", () => {
     expect(clipboardTableRowsFromData({ text: "Name\tScore\nBeta\t10" })).toEqual({
       source: "tsv",

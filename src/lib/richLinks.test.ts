@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeRichLinkHref, shouldOpenRichLinkOnClick } from "./richLinks";
+import { normalizeRichLinkHref, richLinkClickSelectionRange, shouldOpenRichLinkOnClick } from "./richLinks";
 
 describe("rich links", () => {
   it("keeps safe external, anchor, and local Markdown targets", () => {
@@ -25,5 +25,13 @@ describe("rich links", () => {
     expect(shouldOpenRichLinkOnClick({ button: 0 })).toBe(false);
     expect(shouldOpenRichLinkOnClick({ button: 1, ctrlKey: true })).toBe(false);
     expect(shouldOpenRichLinkOnClick({ button: 0, ctrlKey: true, defaultPrevented: true })).toBe(false);
+  });
+
+  it("places ordinary clicks inside a link mark, including edge clicks", () => {
+    expect(richLinkClickSelectionRange(10, 15, 10)).toEqual({ from: 11, to: 11 });
+    expect(richLinkClickSelectionRange(10, 15, 15)).toEqual({ from: 14, to: 14 });
+    expect(richLinkClickSelectionRange(15, 10, 12)).toEqual({ from: 12, to: 12 });
+    expect(richLinkClickSelectionRange(10, 11, 10)).toEqual({ from: 10, to: 11 });
+    expect(richLinkClickSelectionRange(10, 10, 10)).toBeNull();
   });
 });

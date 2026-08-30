@@ -211,6 +211,8 @@ describe("Markdown rendering and clean copy", () => {
       "`code<br>sample`"
     ].join("\n"));
 
+    expect(rendered.html).toContain('<div class="tableWrapper"><table>');
+    expect(rendered.html).toContain("</table></div>");
     expect(rendered.html).toContain("line<br>break");
     expect(rendered.html).toContain("upper<br>break");
     expect(rendered.html).toContain("code&lt;br&gt;sample");

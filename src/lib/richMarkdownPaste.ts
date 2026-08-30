@@ -1,4 +1,6 @@
 import type { JSONContent } from "@tiptap/core";
+import { Fragment, Slice } from "@tiptap/pm/model";
+import type { EditorState, Transaction } from "@tiptap/pm/state";
 import { explicitMarkdownFromClipboard } from "./clipboard";
 import { normalizeMarkdownLineEndings } from "./lineEndings";
 
@@ -24,7 +26,7 @@ export function richMarkdownSourceFromClipboard(
   parseMarkdown: (source: string) => JSONContent | null
 ): string | null {
   const explicitMarkdown = explicitMarkdownFromClipboard(data);
-  if (explicitMarkdown?.trim()) return explicitMarkdown;
+  if (explicitMarkdown?.trim()) return trimRichMarkdownPasteBoundaries(explicitMarkdown);
 
   const text = data.text ?? "";
   if (!text.trim() || text.length > MAX_PLAIN_MARKDOWN_PASTE_LENGTH) return null;
@@ -33,6 +35,32 @@ export function richMarkdownSourceFromClipboard(
   return parsed && containsExplicitMarkdownStructure(parsed)
     ? normalizeMarkdownLineEndings(text)
     : null;
+}
+
+export function richMarkdownPasteTransaction(state: EditorState, document: JSONContent): Transaction | null {
+  if (document.type !== "doc" || !Array.isArray(document.content) || document.content.length === 0) return null;
+
+  let content: Fragment;
+  try {
+    content = Fragment.fromArray(document.content.map((node) => state.schema.nodeFromJSON(node)));
+  } catch {
+    return null;
+  }
+
+  const { selection } = state;
+  const atEmptyTopLevelParagraph = selection.empty
+    && selection.$from.depth === 1
+    && selection.$from.parent.type.name === "paragraph"
+    && selection.$from.parent.content.size === 0;
+  if (!atEmptyTopLevelParagraph) return null;
+
+  const paragraphStart = selection.$from.before(1);
+  const paragraphEnd = paragraphStart + selection.$from.parent.nodeSize;
+  return state.tr.replace(paragraphStart, paragraphEnd, new Slice(content, 0, 0)).scrollIntoView();
+}
+
+function trimRichMarkdownPasteBoundaries(source: string): string {
+  return source.replace(/^\n+|\n+$/g, "");
 }
 
 function parseMarkdownSafely(

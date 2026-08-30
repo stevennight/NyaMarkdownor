@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { intersectsNonEmptySelection } from "./selectionRanges";
+import { intersectsNonEmptySelection, positionInsideNonEmptySelection } from "./selectionRanges";
 
 describe("selection ranges", () => {
   it("detects overlap with a non-empty selection", () => {
@@ -14,5 +14,18 @@ describe("selection ranges", () => {
 
   it("supports reversed and multiple selections", () => {
     expect(intersectsNonEmptySelection(10, 12, [{ from: 30, to: 20 }, { from: 13, to: 9 }])).toBe(true);
+  });
+
+  it("detects a context-menu position inside a non-empty selection", () => {
+    const selections = [{ from: 8, to: 12 }, { from: 30, to: 20 }];
+
+    expect(positionInsideNonEmptySelection(8, selections)).toBe(true);
+    expect(positionInsideNonEmptySelection(12, selections)).toBe(true);
+    expect(positionInsideNonEmptySelection(24, selections)).toBe(true);
+    expect(positionInsideNonEmptySelection(13, selections)).toBe(false);
+  });
+
+  it("does not preserve an empty selection", () => {
+    expect(positionInsideNonEmptySelection(10, [{ from: 10, to: 10 }])).toBe(false);
   });
 });

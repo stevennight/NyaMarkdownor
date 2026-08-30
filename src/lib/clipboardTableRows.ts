@@ -8,7 +8,7 @@ import {
   rowsToMarkdownTable,
   markdownTextContainsOnlyTable
 } from "./tables";
-import { stripInlineMarkdown } from "./text";
+import { protectTableCellLineBreaks, restoreTableCellLineBreaks, stripInlineMarkdown } from "./text";
 
 export type ClipboardTableSource = "html" | "markdown" | "tsv" | "csv" | "space" | "lines";
 
@@ -38,7 +38,7 @@ export function clipboardTableRowsFromData(data: { text?: string | null; html?: 
     if (!markdownTextContainsOnlyTable(markdown)) return null;
     return {
       source: "markdown",
-      rows: markdownRows,
+      rows: restoreMarkdownTableCellBreaks(markdownRows),
       markdownTable: markdownTableTextToMarkdownTable(markdown)
     };
   }
@@ -48,7 +48,7 @@ export function clipboardTableRowsFromData(data: { text?: string | null; html?: 
     if (!markdownTextContainsOnlyTable(text)) return null;
     return {
       source: "markdown",
-      rows: textMarkdownRows,
+      rows: restoreMarkdownTableCellBreaks(textMarkdownRows),
       markdownTable: markdownTableTextToMarkdownTable(text)
     };
   }
@@ -118,6 +118,12 @@ function clipboardContainsEmbeddedTable(data: { text?: string | null; html?: str
 function isRectangularGrid(rows: readonly (readonly string[])[]): boolean {
   const width = rows[0]?.length ?? 0;
   return width > 1 && rows.length > 0 && rows.every((row) => row.length === width);
+}
+
+function restoreMarkdownTableCellBreaks(rows: readonly (readonly string[])[]): string[][] {
+  return rows.map((row) => row.map((cell) => (
+    restoreTableCellLineBreaks(protectTableCellLineBreaks(cell), "\n")
+  )));
 }
 
 export function clipboardPlainLineRowsFromText(text: string): string[][] | null {

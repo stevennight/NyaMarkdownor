@@ -13,3 +13,12 @@ export function intersectsNonEmptySelection(from: number, to: number, selections
     return selectionTo > selectionFrom && from < selectionTo && to > selectionFrom;
   });
 }
+
+export function positionInsideNonEmptySelection(position: number, selections: readonly TextSelectionRange[]): boolean {
+  return selections.some((selection) => {
+    const selectionFrom = Math.min(selection.from, selection.to);
+    const selectionTo = Math.max(selection.from, selection.to);
+
+    return selectionTo > selectionFrom && position >= selectionFrom && position <= selectionTo;
+  });
+}
