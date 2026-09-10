@@ -10,6 +10,7 @@ import { renderTableToMarkdown, Table, TableKit } from "@tiptap/extension-table"
 import Image from "@tiptap/extension-image";
 import Italic from "@tiptap/extension-italic";
 import Link from "@tiptap/extension-link";
+import Paragraph from "@tiptap/extension-paragraph";
 import { BulletList, ListItem, OrderedList, getListMarker } from "@tiptap/extension-list";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
@@ -915,6 +916,21 @@ const RichTable = Table.extend({
   }
 });
 
+const RichParagraph = Paragraph.extend({
+  // Tiptap's Paragraph unwraps a paragraph whose only child is an image into a
+  // bare block-level image. That assumes the default block Image node; here Image
+  // is configured `inline: true`, so a bare image at block level produces an
+  // invalid document ("Called contentMatchAt on a node with invalid content")
+  // and the editor fails to start. Keep the paragraph wrapper in that case.
+  parseMarkdown: (token, helpers) => {
+    const parsed = Paragraph.config.parseMarkdown?.(token, helpers);
+    if (Array.isArray(parsed)) {
+      return helpers.createNode("paragraph", undefined, parsed);
+    }
+    return parsed ?? helpers.createNode("paragraph", undefined, helpers.parseInline(token.tokens ?? []));
+  }
+});
+
 const RichHeading = Heading.extend({
   addAttributes() {
     return {
@@ -1406,8 +1422,10 @@ export function createRichMarkdownExtensions(
       italic: false,
       listItem: false,
       link: false,
-      orderedList: false
+      orderedList: false,
+      paragraph: false
     }),
+    RichParagraph,
     RichBold,
     RichItalic,
     RichInlineCode,

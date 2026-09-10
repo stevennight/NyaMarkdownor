@@ -363,6 +363,28 @@ describe("rich Markdown extensions", () => {
     expect(markdown.serialize(parsed)).toContain(imageSource);
   });
 
+  it("wraps a standalone image line in a schema-valid paragraph", () => {
+    const source = ["Before.", "", "![Diagram](./diagram.png)", "", "After."].join("\n");
+    const parsed = markdown.parse(source);
+
+    expect(parsed.content?.map((node) => node.type)).toEqual(["paragraph", "paragraph", "paragraph"]);
+    const imageParagraph = parsed.content?.[1];
+    expect(imageParagraph?.type).toBe("paragraph");
+    expect(imageParagraph?.content?.[0]?.type).toBe("image");
+
+    // Tiptap's default Paragraph would unwrap this into a bare block image, which
+    // is invalid because Image is configured as an inline node here.
+    expect(() => getSchema(extensions).nodeFromJSON(parsed).check()).not.toThrow();
+    expect(markdown.serialize(parsed)).toContain("![Diagram](./diagram.png)");
+  });
+
+  it("keeps a lone image after a paragraph inside its own paragraph", () => {
+    const parsed = markdown.parse(["Intro", "", "![Chart](./chart.png)"].join("\n"));
+
+    expect(parsed.content?.map((node) => node.type)).toEqual(["paragraph", "paragraph"]);
+    expect(() => getSchema(extensions).nodeFromJSON(parsed).check()).not.toThrow();
+  });
+
   it("preserves backslash, spaced hard breaks, and ordinary soft line breaks", () => {
     const source = [
       "Backslash\\",
