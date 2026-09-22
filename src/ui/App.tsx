@@ -1940,7 +1940,7 @@ export function App() {
   async function promptApplicationUpdate(update: Extract<UpdateCheckResult, { status: "available" }>) {
     const confirmed = await requestConfirmation({
       title: t("NyaMarkdownor {version} is available", { version: update.version }),
-      message: t("The installer will be downloaded from GitHub Releases and verified. NyaMarkdownor will save the current workspace, start the installer, and close."),
+      message: t("The update will be downloaded from GitHub Releases and verified. NyaMarkdownor will save the current workspace, install the update in place, and close."),
       confirmLabel: t("Download and install"),
       cancelLabel: t("Later"),
       tone: "default"

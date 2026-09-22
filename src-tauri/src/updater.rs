@@ -687,6 +687,7 @@ fn launch_installer(path: &Path) -> Result<(), String> {
         .extension()
         .and_then(|value| value.to_str())
         .unwrap_or_default();
+    let update_flags = windows_in_place_update_flags(extension)?;
     let mut command = if extension.eq_ignore_ascii_case("msi") {
         let mut command = Command::new("msiexec.exe");
         command.arg("/i").arg(path);
@@ -697,10 +698,29 @@ fn launch_installer(path: &Path) -> Result<(), String> {
         return Err("The downloaded update is not a supported Windows installer.".to_string());
     };
 
+    command.args(update_flags);
     command
         .spawn()
         .map_err(|error| format!("Could not start the update installer: {error}"))?;
     Ok(())
+}
+
+/// Tauri's NSIS installer normally presents a maintenance page that defaults to
+/// uninstalling an older version. `/UPDATE` selects its documented update path,
+/// which writes the new files over the existing installation without invoking the
+/// uninstaller. `/P` hides the maintenance choices while leaving installation
+/// progress and errors visible.
+#[cfg(windows)]
+fn windows_in_place_update_flags(extension: &str) -> Result<&'static [&'static str], String> {
+    if extension.eq_ignore_ascii_case("msi") {
+        // WiX/MSI uses the stable upgrade code in tauri.conf.json, so `/i` above
+        // performs a Windows Installer upgrade in place.
+        Ok(&[])
+    } else if extension.eq_ignore_ascii_case("exe") {
+        Ok(&["/UPDATE", "/P"])
+    } else {
+        Err("The downloaded update is not a supported Windows installer.".to_string())
+    }
 }
 
 #[cfg(not(windows))]
@@ -1014,6 +1034,19 @@ mod tests {
             .unwrap()
             .name
             .ends_with(".msi"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nsis_updates_use_the_non_uninstalling_update_mode() {
+        use super::windows_in_place_update_flags;
+
+        assert_eq!(
+            windows_in_place_update_flags("exe").unwrap(),
+            ["/UPDATE", "/P"]
+        );
+        assert!(windows_in_place_update_flags("msi").unwrap().is_empty());
+        assert!(windows_in_place_update_flags("zip").is_err());
     }
 
     #[test]

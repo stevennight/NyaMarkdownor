@@ -1,6 +1,6 @@
 [package]
 name = "nya-markdownor"
-version = "1.0.24"
+version = "1.0.25"
 description = "A local-first Markdown editor."
 authors = ["NyaMarkdownor Contributors"]
 edition = "2021"

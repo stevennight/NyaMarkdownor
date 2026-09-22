@@ -85,7 +85,7 @@ const zhCN: Record<string, string> = {
   "Automatic updates are unavailable in development builds": "开发构建不提供自动更新",
   "Automatic updates are unavailable for portable copies": "绿色版暂不提供自动更新",
   "Automatic updates are unavailable on this platform": "当前平台暂不提供自动更新",
-  "The installer will be downloaded from GitHub Releases and verified. NyaMarkdownor will save the current workspace, start the installer, and close.": "安装包将从 GitHub Releases 下载并完成校验。NyaMarkdownor 会保存当前工作区，启动安装程序，然后退出。",
+  "The update will be downloaded from GitHub Releases and verified. NyaMarkdownor will save the current workspace, install the update in place, and close.": "更新包将从 GitHub Releases 下载并完成校验。NyaMarkdownor 会保存当前工作区，直接覆盖更新，然后退出。",
   "Storage": "存储",
   "Version history": "版本历史",
   "Manage file history": "管理文件历史",
