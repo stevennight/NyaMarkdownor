@@ -9,7 +9,8 @@ import {
   applyMarkdownTextCommand,
   applyTaskCheckboxToggle,
   applyTextChange,
-  normalizeMarkdownOrderedListNumbers
+  normalizeMarkdownOrderedListNumbers,
+  shouldRepairOrderedListNumbers
 } from "./editorCommands";
 
 describe("Markdown text commands", () => {
@@ -23,6 +24,46 @@ describe("Markdown text commands", () => {
   it("does not renumber ordered-looking lines inside fenced code", () => {
     const source = ["1. item", "2. next", "", "```text", "1. literal", "3. literal", "```"].join("\n");
     expect(normalizeMarkdownOrderedListNumbers(source)).toBe(source);
+  });
+
+  it("skips repair scans for ordinary text edits outside ordered markers", () => {
+    expect(shouldRepairOrderedListNumbers([
+      {
+        fromA: 4,
+        toA: 4,
+        fromB: 4,
+        toB: 5,
+        removed: "",
+        inserted: "x",
+        oldLines: [{ from: 0, text: "- ordinary item" }],
+        newLines: [{ from: 0, text: "- orxdinary item" }]
+      }
+    ])).toBe(false);
+  });
+
+  it("keeps repair scans for edits that touch ordered markers or list breaks", () => {
+    expect(shouldRepairOrderedListNumbers([
+      {
+        fromA: 0,
+        toA: 1,
+        fromB: 0,
+        toB: 1,
+        removed: "1",
+        inserted: "2",
+        oldLines: [{ from: 0, text: "1. first" }],
+        newLines: [{ from: 0, text: "2. first" }]
+      },
+      {
+        fromA: 8,
+        toA: 8,
+        fromB: 8,
+        toB: 9,
+        removed: "",
+        inserted: "\n",
+        oldLines: [{ from: 0, text: "1. first" }],
+        newLines: [{ from: 0, text: "1. first" }, { from: 9, text: "" }]
+      }
+    ])).toBe(true);
   });
 
   it("wraps selected text in bold markers", () => {

@@ -337,6 +337,64 @@ export function orderedListNumberChanges(markdown: string): TextChange[] {
   return changes;
 }
 
+export type OrderedListNumberChangeProbe = {
+  fromA: number;
+  toA: number;
+  fromB: number;
+  toB: number;
+  removed: string;
+  inserted: string;
+  oldLines: readonly { from: number; text: string }[];
+  newLines: readonly { from: number; text: string }[];
+};
+
+/**
+ * Ordered-list repair is a document-wide pass. Most source edits cannot
+ * change list numbering, so avoid paying for that pass unless an edit touches
+ * a list marker or a line break adjacent to an ordered-list item.
+ */
+export function shouldRepairOrderedListNumbers(
+  changes: readonly OrderedListNumberChangeProbe[]
+): boolean {
+  return changes.some((change) => {
+    if (change.removed.includes("\n") || change.inserted.includes("\n")) {
+      // A line break can join or split list blocks in ways that are not
+      // visible from the two endpoint lines alone, so keep the conservative
+      // full repair for structural edits.
+      return true;
+    }
+
+    const oldMarker = change.oldLines
+      .map((line) => ({ line, marker: orderedListMarkerInLine(line.text) }))
+      .find(({ line, marker }) => marker && markerIntersectsChange(
+        change.fromA,
+        change.toA,
+        line.from + marker.from,
+        line.from + marker.to
+      ));
+    if (oldMarker) return true;
+
+    return change.newLines.some((line) => {
+      const marker = orderedListMarkerInLine(line.text);
+      return Boolean(marker && markerIntersectsChange(
+        change.fromB,
+        change.toB,
+        line.from + marker.from,
+        line.from + marker.to
+      ));
+    });
+  });
+}
+
+function markerIntersectsChange(from: number, to: number, markerFrom: number, markerTo: number): boolean {
+  return from < markerTo && to > markerFrom || from === to && from < markerTo && from >= markerFrom;
+}
+
+function orderedListMarkerInLine(line: string): { from: number; to: number } | null {
+  const match = line.match(/^[ \t]*(?:>[ \t]*)*\d+[.)](?=[ \t]+)/);
+  return match ? { from: 0, to: match[0].length } : null;
+}
+
 export function applyMarkdownListBackspace(markdown: string, selection: TextRange): TextEdit | null {
   if (selection.from !== selection.to) return null;
 

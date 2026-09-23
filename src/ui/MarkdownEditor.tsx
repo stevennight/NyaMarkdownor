@@ -1,5 +1,5 @@
 import { forwardRef, useEffect, useRef, type ForwardedRef, type MutableRefObject } from "react";
-import { ChangeSet, Compartment, EditorState, Transaction, type Extension } from "@codemirror/state";
+import { ChangeSet, Compartment, EditorState, Transaction, type Extension, type Text } from "@codemirror/state";
 import {
   crosshairCursor,
   drawSelection,
@@ -15,7 +15,7 @@ import {
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
-import { applyMarkdownBlockquoteBackspace, applyMarkdownLineContinuation, applyMarkdownListBackspace, applyMarkdownListIndentation, applyMarkdownListItemLineBreak, applyMarkdownTextCommand, applyTextChange, orderedListNumberChanges, type MarkdownTextCommand, type TextEdit } from "../lib/editorCommands";
+import { applyMarkdownBlockquoteBackspace, applyMarkdownLineContinuation, applyMarkdownListBackspace, applyMarkdownListIndentation, applyMarkdownListItemLineBreak, applyMarkdownTextCommand, applyTextChange, orderedListNumberChanges, shouldRepairOrderedListNumbers, type MarkdownTextCommand, type TextEdit } from "../lib/editorCommands";
 import { findTableAtOffset } from "../lib/tables";
 import { sourceLinkAtPosition } from "../lib/sourceLinks";
 import { positionInsideNonEmptySelection } from "../lib/selectionRanges";
@@ -239,6 +239,16 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
   return <div className="codemirror-host" ref={hostRef} />;
 });
 
+function changedLines(doc: Text, from: number, to: number): Array<{ from: number; text: string }> {
+  const positions = [...new Set([from, Math.max(from, to - 1)])];
+  const lines = new Map<number, { from: number; text: string }>();
+  for (const position of positions) {
+    const line = doc.lineAt(Math.max(0, Math.min(position, doc.length)));
+    lines.set(line.number, { from: line.from, text: line.text });
+  }
+  return [...lines.values()];
+}
+
 type EditorExtensionRefs = {
   copyModeRef: MutableRefObject<CopyMode>;
   onInsertTableRequestRef: MutableRefObject<(() => void) | undefined>;
@@ -265,6 +275,31 @@ function createEditorExtensions({
     EditorState.allowMultipleSelections.of(true),
     EditorState.transactionFilter.of((transaction) => {
       if (!transaction.docChanged || transaction.annotation(Transaction.addToHistory) === false) return transaction;
+
+      const probes: Array<{
+        fromA: number;
+        toA: number;
+        fromB: number;
+        toB: number;
+        removed: string;
+        inserted: string;
+        oldLines: Array<{ from: number; text: string }>;
+        newLines: Array<{ from: number; text: string }>;
+      }> = [];
+      transaction.changes.iterChangedRanges((fromA, toA, fromB, toB) => {
+        probes.push({
+          fromA,
+          toA,
+          fromB,
+          toB,
+          removed: transaction.startState.doc.sliceString(fromA, toA),
+          inserted: transaction.newDoc.sliceString(fromB, toB),
+          oldLines: changedLines(transaction.startState.doc, fromA, toA),
+          newLines: changedLines(transaction.newDoc, fromB, toB)
+        });
+      });
+
+      if (!shouldRepairOrderedListNumbers(probes)) return transaction;
 
       const changes = orderedListNumberChanges(transaction.newDoc.toString());
       if (!changes.length) return transaction;
