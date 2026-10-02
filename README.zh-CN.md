@@ -38,7 +38,7 @@ Windows、macOS 和 Linux 安装包发布在 [GitHub Releases](https://github.co
 - 提供上下文表格工具栏和可滚动的 Table Inspector。
 - 支持单元格、矩形范围、整行、整列、表头、正文和整表结构化选择。
 - 可从 TSV、CSV、HTML 表格、Markdown 表格或换行文本粘贴并自动扩展表格。
-- 智能复制同时写入干净文本、经过清理的 HTML 和 `text/markdown`；表格选择会生成 TSV/CSV/HTML/Markdown 结构化内容，而不是复制原始竖线语法。
+- 所见即所得模式下 `Ctrl+C` 同时写入干净文本、经过清理的 HTML 和 `text/markdown`，源码模式下复制原样 Markdown；`Ctrl+Shift+C` 复制为 Markdown，`Ctrl+Shift+V` 粘贴为纯文本；表格选择会生成 TSV/CSV/HTML/Markdown 结构化内容，而不是复制原始竖线语法。
 - 表格单元格换行在 Markdown 中序列化为 `<br>`，CSV 中保留带引号的真实换行，纯文本保持网格形状。
 
 ### 文件安全、工作恢复与版本历史

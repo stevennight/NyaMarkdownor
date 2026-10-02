@@ -38,6 +38,7 @@ import type { Translator } from "../lib/i18n";
 import { markdownRangeToClipboardPayload } from "../lib/markdown";
 import { beginEditorInput, commitEditorInput, markStartupMilestone } from "../lib/performanceDiagnostics";
 import { isPlainPasteShortcut } from "../lib/appShortcuts";
+import { sameFormatState, type BlockStyle, type FormatState } from "../lib/formatState";
 import { convertWordListParagraphs, richPasteSliceKeepingBlockType } from "../lib/richPastedHtml";
 
 const EMPTY_SEARCH_MATCHES: readonly TextRange[] = [];
@@ -100,6 +101,7 @@ type RichMarkdownEditorProps = {
   onOpenLink: (href: string) => void;
   onEditLink: (href: string, canUnlink: boolean) => void;
   onTableContextMenu?: (position: { left: number; top: number }) => void;
+  onFormatStateChange?: (state: FormatState) => void;
   onToast: (message: string) => void;
   scrollProgress?: number;
   onScrollProgress?: (progress: number) => void;
@@ -110,7 +112,7 @@ type RichMarkdownEditorProps = {
 };
 
 export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, RichMarkdownEditorProps>(function RichMarkdownEditor(
-  { documentFilePath, markdown, t, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onReady, onActiveHeadingIndexChange, onOpenLink, onEditLink, onTableContextMenu, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
+  { documentFilePath, markdown, t, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onReady, onActiveHeadingIndexChange, onOpenLink, onEditLink, onTableContextMenu, onFormatStateChange, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
   forwardedRef
 ) {
   const tRef = useRef(t);
@@ -125,6 +127,8 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   const onEditLinkRef = useRef(onEditLink);
   const onTableContextMenuRef = useRef(onTableContextMenu);
   const onToastRef = useRef(onToast);
+  const onFormatStateChangeRef = useRef(onFormatStateChange);
+  const formatStateRef = useRef<FormatState | null>(null);
   const onScrollProgressRef = useRef(onScrollProgress);
   // Set by Ctrl+Shift+V so the following paste is inserted as plain text.
   const plainPasteRequestedRef = useRef(false);
@@ -157,6 +161,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   onEditLinkRef.current = onEditLink;
   onTableContextMenuRef.current = onTableContextMenu;
   onToastRef.current = onToast;
+  onFormatStateChangeRef.current = onFormatStateChange;
   onScrollProgressRef.current = onScrollProgress;
   if (!markdownSyncRef.current) {
     markdownSyncRef.current = createRichMarkdownSyncScheduler((nextMarkdown, source) => {
@@ -427,6 +432,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
       reportTableSelection(currentEditor, tableSelectionRef, onTableSelectionChangeRef);
       headingPositionsRef.current = richHeadingPositions(currentEditor);
       reportActiveRichHeading(currentEditor, headingPositionsRef, activeHeadingIndexRef, onActiveHeadingIndexChangeRef);
+      reportFormatState(currentEditor, formatStateRef, onFormatStateChangeRef);
     },
     onCreate: ({ editor: currentEditor }) => {
       editorRef.current = currentEditor;
@@ -437,12 +443,14 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
       reportSelection(currentEditor, onSelectionChangeRef);
       headingPositionsRef.current = richHeadingPositions(currentEditor);
       reportActiveRichHeading(currentEditor, headingPositionsRef, activeHeadingIndexRef, onActiveHeadingIndexChangeRef);
+      reportFormatState(currentEditor, formatStateRef, onFormatStateChangeRef);
     },
     onSelectionUpdate: ({ editor: currentEditor }) => {
       reportTableContext(currentEditor, tableActiveRef, onTableContextChangeRef);
       reportTableSelection(currentEditor, tableSelectionRef, onTableSelectionChangeRef);
       reportSelection(currentEditor, onSelectionChangeRef);
       reportActiveRichHeading(currentEditor, headingPositionsRef, activeHeadingIndexRef, onActiveHeadingIndexChangeRef);
+      reportFormatState(currentEditor, formatStateRef, onFormatStateChangeRef);
     }
   });
 
@@ -795,6 +803,48 @@ function sameRichTableSelectionSummary(
     && left.rowCount === right.rowCount
     && left.columnCount === right.columnCount
     && left.cellCount === right.cellCount);
+}
+
+function reportFormatState(
+  editor: Editor,
+  previous: MutableRefObject<FormatState | null>,
+  onChange: MutableRefObject<((state: FormatState) => void) | undefined>
+) {
+  const next = richFormatState(editor);
+  if (previous.current && sameFormatState(previous.current, next)) return;
+  previous.current = next;
+  onChange.current?.(next);
+}
+
+function richFormatState(editor: Editor): FormatState {
+  const { $from } = editor.state.selection;
+  let list: string | null = null;
+  let blockquote = false;
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    const name = $from.node(depth).type.name;
+    if (!list && (name === "bulletList" || name === "orderedList" || name === "taskList")) list = name;
+    if (name === "blockquote") blockquote = true;
+  }
+
+  const parent = $from.parent;
+  const block: BlockStyle = parent.type.spec.code
+    ? "code-block"
+    : parent.type.name === "heading"
+      ? `heading-${Math.min(6, Math.max(1, Number(parent.attrs.level) || 1))}` as BlockStyle
+      : "paragraph";
+
+  return {
+    block,
+    bold: editor.isActive("bold"),
+    italic: editor.isActive("italic"),
+    strike: editor.isActive("strike"),
+    code: editor.isActive("code"),
+    link: richLinkState(editor)?.active ?? false,
+    bulletList: list === "bulletList",
+    orderedList: list === "orderedList",
+    taskList: list === "taskList",
+    blockquote
+  };
 }
 
 function reportSelection(editor: Editor, onChange: MutableRefObject<(selection: TextRange) => void>) {
@@ -1217,6 +1267,8 @@ function runRichTextCommand(editor: Editor | null, command: MarkdownTextCommand)
       return editor.chain().focus().toggleBold().run();
     case "italic":
       return editor.chain().focus().toggleItalic().run();
+    case "strike":
+      return editor.chain().focus().toggleStrike().run();
     case "code":
       return editor.chain().focus().toggleCode().run();
     case "link":
@@ -1228,12 +1280,22 @@ function runRichBlockCommand(editor: Editor | null, command: MarkdownBlockComman
   if (!editor) return false;
 
   switch (command) {
+    case "paragraph":
+      return editor.chain().focus().setParagraph().run();
     case "heading-1":
       return editor.chain().focus().toggleHeading({ level: 1 }).run();
     case "heading-2":
       return editor.chain().focus().toggleHeading({ level: 2 }).run();
     case "heading-3":
       return editor.chain().focus().toggleHeading({ level: 3 }).run();
+    case "heading-4":
+      return editor.chain().focus().toggleHeading({ level: 4 }).run();
+    case "heading-5":
+      return editor.chain().focus().toggleHeading({ level: 5 }).run();
+    case "heading-6":
+      return editor.chain().focus().toggleHeading({ level: 6 }).run();
+    case "horizontal-rule":
+      return editor.chain().focus().setHorizontalRule().run();
     case "bullet-list":
       return editor.chain().focus().toggleBulletList().run();
     case "ordered-list":

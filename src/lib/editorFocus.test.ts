@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   shouldFocusEditorView,
-  shouldFocusPendingMountedEditor,
-  shouldPreserveEditorSelectionOnToolbarMouseDown
+  shouldFocusPendingMountedEditor
 } from "./editorFocus";
 
 describe("editor focus ownership", () => {
@@ -21,12 +20,5 @@ describe("editor focus ownership", () => {
     expect(shouldFocusPendingMountedEditor("tab-a", "tab-b", "tab-b", "focus")).toBe(false);
     expect(shouldFocusPendingMountedEditor("tab-a", "tab-a", "tab-b", "focus")).toBe(false);
     expect(shouldFocusPendingMountedEditor(null, "tab-a", "tab-a", "focus")).toBe(false);
-  });
-
-  it("keeps a rich editor selection visible while clicking toolbar controls", () => {
-    expect(shouldPreserveEditorSelectionOnToolbarMouseDown("wysiwyg", 0, true)).toBe(true);
-    expect(shouldPreserveEditorSelectionOnToolbarMouseDown("focus", 0, true)).toBe(false);
-    expect(shouldPreserveEditorSelectionOnToolbarMouseDown("wysiwyg", 2, true)).toBe(false);
-    expect(shouldPreserveEditorSelectionOnToolbarMouseDown("wysiwyg", 0, false)).toBe(false);
   });
 });

@@ -10,10 +10,11 @@ import {
   keymap,
   lineNumbers,
   placeholder,
-  rectangularSelection
+  rectangularSelection,
+  ViewPlugin
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { bracketMatching, defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { bracketMatching, defaultHighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { applyMarkdownBlockquoteBackspace, applyMarkdownLineContinuation, applyMarkdownListBackspace, applyMarkdownListIndentation, applyMarkdownListItemLineBreak, applyMarkdownTextCommand, applyTextChange, orderedListNumberChanges, shouldRepairOrderedListNumbers, type MarkdownTextCommand, type TextEdit } from "../lib/editorCommands";
 import { findTableAtOffset } from "../lib/tables";
@@ -40,6 +41,8 @@ import {
 } from "../lib/sourceEditorSync";
 import { beginEditorInput, commitEditorInput, markStartupMilestone } from "../lib/performanceDiagnostics";
 import { isPlainPasteShortcut } from "../lib/appShortcuts";
+import { sameFormatState, type FormatState } from "../lib/formatState";
+import { sourceFormatStateAt } from "../lib/sourceFormatState";
 
 // The source editor copies Markdown as written; other formats are explicit commands.
 const SOURCE_COPY_MODE = "source" as const;
@@ -67,6 +70,7 @@ type MarkdownEditorProps = {
   onInsertTableRequest?: () => void;
   onTableContextMenu?: (position: { left: number; top: number }) => void;
   onOpenLink?: (href: string) => void;
+  onFormatStateChange?: (state: FormatState) => void;
   onToast: (message: string) => void;
 };
 
@@ -89,6 +93,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
     onInsertTableRequest,
     onTableContextMenu,
     onOpenLink,
+    onFormatStateChange,
     onToast
   },
   forwardedRef
@@ -108,6 +113,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
   const onTableContextMenuRef = useRef(onTableContextMenu);
   const onOpenLinkRef = useRef(onOpenLink);
   const onToastRef = useRef(onToast);
+  const onFormatStateChangeRef = useRef(onFormatStateChange);
   const placeholderCompartmentRef = useRef(new Compartment());
   const sourceEditorSyncRef = useRef<SourceEditorSyncScheduler<EditorState> | null>(null);
 
@@ -123,6 +129,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
   onTableContextMenuRef.current = onTableContextMenu;
   onOpenLinkRef.current = onOpenLink;
   onToastRef.current = onToast;
+  onFormatStateChangeRef.current = onFormatStateChange;
   if (!sourceEditorSyncRef.current) {
     sourceEditorSyncRef.current = createSourceEditorSyncScheduler(
       (state) => state.doc.toString(),
@@ -143,6 +150,7 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
       onTableContextMenuRef,
       onOpenLinkRef,
       onToastRef,
+      onFormatStateChangeRef,
       placeholderCompartment: placeholderCompartmentRef.current,
       placeholderText,
       sourceEditorSync: sourceEditorSyncRef.current!
@@ -252,6 +260,7 @@ type EditorExtensionRefs = {
   onTableContextMenuRef: MutableRefObject<((position: { left: number; top: number }) => void) | undefined>;
   onOpenLinkRef: MutableRefObject<((href: string) => void) | undefined>;
   onToastRef: MutableRefObject<(message: string) => void>;
+  onFormatStateChangeRef: MutableRefObject<((state: FormatState) => void) | undefined>;
   sourceEditorSync: SourceEditorSyncScheduler<EditorState>;
   placeholderCompartment: Compartment;
   placeholderText: string;
@@ -262,12 +271,20 @@ function createEditorExtensions({
   onTableContextMenuRef,
   onOpenLinkRef,
   onToastRef,
+  onFormatStateChangeRef,
   placeholderCompartment,
   placeholderText,
   sourceEditorSync
 }: EditorExtensionRefs): Extension {
   // Set by Ctrl+Shift+V so the following paste skips table and Markdown handling.
   let plainPasteRequested = false;
+  let reportedFormatState: FormatState | null = null;
+  const reportFormatState = (state: EditorState) => {
+    const next = sourceFormatStateAt(state, state.selection.main.head);
+    if (reportedFormatState && sameFormatState(reportedFormatState, next)) return;
+    reportedFormatState = next;
+    onFormatStateChangeRef.current?.(next);
+  };
   return [
     lineNumbers(),
     EditorState.allowMultipleSelections.of(true),
@@ -343,7 +360,15 @@ function createEditorExtensions({
     searchHighlightField,
     placeholderCompartment.of(placeholder(placeholderText)),
     EditorView.lineWrapping,
+    ViewPlugin.define((view) => {
+      // Report the initial state after mount; updates are reported below.
+      queueMicrotask(() => reportFormatState(view.state));
+      return {};
+    }),
     EditorView.updateListener.of((update) => {
+      if (update.selectionSet || update.docChanged || syntaxTree(update.state) !== syntaxTree(update.startState)) {
+        reportFormatState(update.state);
+      }
       if (update.selectionSet || update.docChanged) {
         sourceEditorSync.schedule(
           update.state,
@@ -736,6 +761,8 @@ function toastForCommand(command: MarkdownTextCommand): string {
       return "Bold";
     case "italic":
       return "Italic";
+    case "strike":
+      return "Strikethrough";
     case "code":
       return "Inline code";
     case "link":

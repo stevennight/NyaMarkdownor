@@ -20,6 +20,7 @@ import type { FileAssociationScope } from "../lib/fileIo";
 import type { Translator } from "../lib/i18n";
 
 type SettingsDialogProps = {
+  initialCategory?: SettingsCategoryId;
   open: boolean;
   viewMode: ViewMode;
   theme: ThemeMode;
@@ -60,7 +61,7 @@ type SettingsDialogProps = {
   onOpenReleasePage: () => void;
 };
 
-type SettingsCategoryId = "general" | "editor" | "files" | "backups" | "about";
+export type SettingsCategoryId = "general" | "editor" | "files" | "backups" | "about";
 
 type SettingsCategory = {
   id: SettingsCategoryId;
@@ -106,9 +107,10 @@ export function SettingsDialog({
   onBackupPreferencesChange,
   onCheckForUpdates,
   onInstallUpdate,
-  onOpenReleasePage
+  onOpenReleasePage,
+  initialCategory = "general"
 }: SettingsDialogProps) {
-  const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>("general");
+  const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>(initialCategory);
   const settingsContentRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const onCloseRef = useRef(onClose);

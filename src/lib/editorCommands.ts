@@ -17,11 +17,16 @@ export type TextEdit = {
   change?: TextChange;
 };
 
-export type MarkdownTextCommand = "bold" | "italic" | "code" | "link";
+export type MarkdownTextCommand = "bold" | "italic" | "strike" | "code" | "link";
 export type MarkdownBlockCommand =
+  | "paragraph"
   | "heading-1"
   | "heading-2"
   | "heading-3"
+  | "heading-4"
+  | "heading-5"
+  | "heading-6"
+  | "horizontal-rule"
   | "bullet-list"
   | "ordered-list"
   | "task-list"
@@ -67,6 +72,8 @@ export function applyMarkdownTextCommand(markdown: string, selection: TextRange,
       return toggleWrap(markdown, selection, "**", "**", "bold");
     case "italic":
       return toggleWrap(markdown, selection, "*", "*", "italic");
+    case "strike":
+      return toggleWrap(markdown, selection, "~~", "~~", "strikethrough");
     case "code":
       return toggleWrap(markdown, selection, "`", "`", "code");
     case "link":
@@ -110,6 +117,7 @@ export function applyTaskCheckboxToggle(markdown: string, lineNumber: number, ch
 
 export function applyMarkdownBlockCommand(markdown: string, selection: TextRange, command: MarkdownBlockCommand): TextEdit {
   if (command === "code-block") return toggleCodeBlock(markdown, selection);
+  if (command === "horizontal-rule") return insertHorizontalRule(markdown, selection);
 
   const range = lineRangeForSelection(markdown, selection);
   const original = markdown.slice(range.from, range.to);
@@ -453,7 +461,11 @@ export function applyMarkdownBlockquoteBackspace(markdown: string, selection: Te
   };
 }
 
-function transformBlockLines(lines: string[], command: Exclude<MarkdownBlockCommand, "code-block">) {
+function transformBlockLines(lines: string[], command: Exclude<MarkdownBlockCommand, "code-block" | "horizontal-rule">) {
+  if (command === "paragraph") {
+    return transformLines(lines, (line) => setHeadingLine(line, 0));
+  }
+
   if (command.startsWith("heading-")) {
     const level = Number(command.at(-1));
     const allTargetHeadings = lines.some((line) => line.trim()) && lines.every((line) => !line.trim() || headingLevel(line) === level);
@@ -599,6 +611,23 @@ function enclosingCodeFenceRange(markdown: string, range: TextRange): (TextRange
     to: closeEnd,
     contentFrom: range.from,
     contentTo: range.to
+  };
+}
+
+/** Inserts a thematic break as its own block after the line at the cursor. */
+function insertHorizontalRule(markdown: string, selection: TextRange): TextEdit {
+  const lineEnd = lineEndAt(markdown, Math.max(selection.from, selection.to));
+  const lineText = markdown.slice(lineStartAt(markdown, lineEnd), lineEnd);
+  const before = lineText.trim() ? "\n\n" : "";
+  const after = markdown.slice(lineEnd).startsWith("\n\n") ? "" : "\n";
+  const insert = `${before}---${after}`;
+  const change = { from: lineEnd, to: lineEnd, insert };
+  const cursor = lineEnd + insert.length;
+
+  return {
+    markdown: applyTextChange(markdown, change),
+    change,
+    selection: { from: cursor, to: cursor }
   };
 }
 

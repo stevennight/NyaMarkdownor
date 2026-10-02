@@ -35,34 +35,22 @@ import {
   ChevronRight,
   Check,
   Command,
-  Columns2,
   Columns3,
-  Code2,
   Copy,
   CopyPlus,
   FileCode2,
-  FileDown,
   FileText,
   FilePlus2,
   FolderOpen,
   GitCompareArrows,
-  Heading1,
-  Heading2,
-  Heading3,
   History,
   ImagePlus,
   Italic,
   Link2,
   List,
-  ListChecks,
-  ListOrdered,
   Minimize2,
-  Moon,
-  Eye,
   ListFilter,
   PanelLeft,
-  PanelTop,
-  PenLine,
   Plus,
   RotateCcw,
   Rows3,
@@ -71,13 +59,10 @@ import {
   Search,
   ScissorsLineDashed,
   Settings2,
-  ShieldCheck,
   SquareMousePointer,
-  Sun,
   Table2,
   TextSelect,
   TextCursorInput,
-  TextQuote,
   Trash2,
   Redo2,
   Undo2,
@@ -86,6 +71,10 @@ import {
 import { redo as redoCodeMirror, undo as undoCodeMirror } from "@codemirror/commands";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { AppMenuBar, type AppMenu, type AppMenuItem } from "./AppMenuBar";
+import { FormatToolbar } from "./FormatToolbar";
+import type { SettingsCategoryId } from "./SettingsDialog";
+import { EMPTY_FORMAT_STATE, type FormatState } from "../lib/formatState";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
@@ -215,7 +204,7 @@ import { createDroppedImageTextEdit, droppedImageMarkdown, droppedImageToast, is
 import { filterWorkspaceFiles, limitWorkspaceFilesForSidebar, sortWorkspaceFiles, sortWorkspaceFilesByModified } from "../lib/workspaceFiles";
 import { recentFileCommands } from "../lib/recentFileCommands";
 import { dirtyDocuments, isDocumentDirty } from "../lib/documentDirtyState";
-import { applySavedFileToDocument, diskStatusLabel, documentEditStatusLabel, saveAllStoppedLabel, saveSafetyStatusLabel, savedTabsLabel, tabSessionEditStatusLabel } from "../lib/documentSaveState";
+import { applySavedFileToDocument, diskStatusLabel, saveAllStoppedLabel, saveSafetyStatusLabel, savedTabsLabel, tabSessionEditStatusLabel } from "../lib/documentSaveState";
 import { displayMarkdownDocumentName, suggestedMarkdownCopyName, suggestedMarkdownCopyTarget, suggestedMarkdownDiskVersionName, suggestedMarkdownSaveAsTarget, suggestedUntitledMarkdownName } from "../lib/fileNames";
 import { removeMarkdownFileExtension } from "../lib/markdownFileTypes";
 import { getSelectionSummary, hasNonEmptySelection, hasStructuredTableSelection, markdownFromSelectionRanges, selectionRangesOrWholeDocument, type SelectionSummary } from "../lib/selectionCopy";
@@ -225,8 +214,7 @@ import { clipboardRowsForTablePaste, type ClipboardTableSource } from "../lib/cl
 import { activeOwnedEditorView } from "../lib/editorViewOwnership";
 import {
   shouldFocusEditorView,
-  shouldFocusPendingMountedEditor,
-  shouldPreserveEditorSelectionOnToolbarMouseDown
+  shouldFocusPendingMountedEditor
 } from "../lib/editorFocus";
 import {
   EMPTY_RICH_DOCUMENT_HISTORY,
@@ -293,7 +281,6 @@ import type { TableSizeDraft } from "./InsertTableDialog";
 import { type CommandItem } from "../lib/commands";
 import { loadDesktopPreferencesRecord, loadPreferences, loadPreferencesRecord, normalizeBackupPreferences, savePreferences } from "../lib/preferences";
 import { normalizeRichLinkHref } from "../lib/richLinks";
-import { viewMenuFocusIndex, type ViewMenuFocusDirection } from "../lib/viewMenuNavigation";
 import { closeWindowAfterRecovery, shouldBlockBrowserUnload } from "../lib/windowClose";
 import { markStartupMilestone, measurePerformance, measurePerformanceAsync } from "../lib/performanceDiagnostics";
 import { browserLanguages, createTranslator, resolveAppLocale, translateUiText, type Translator } from "../lib/i18n";
@@ -510,7 +497,6 @@ export function App() {
   const [activeTabId, setActiveTabId] = useState(initialTabSession.activeTabId);
   const [closedTabs, setClosedTabs] = useState<DocumentTab[]>([]);
   const [viewMode, setViewModeState] = useState<ViewMode>(initialPreferences.viewMode);
-  const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const [theme, setThemeState] = useState<ThemeMode>(initialPreferences.theme);
   const [language, setLanguageState] = useState<LanguagePreference>(initialPreferences.language);
   const [sidebarVisible, setSidebarVisibleState] = useState(initialPreferences.sidebarVisible);
@@ -550,11 +536,13 @@ export function App() {
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsCategory, setSettingsCategory] = useState<SettingsCategoryId>("general");
   const [buildInfo, setBuildInfo] = useState<BuildInfo>(bundledBuildInfo);
   const [applicationUpdate, setApplicationUpdate] = useState<ApplicationUpdateState>({ status: "idle" });
   const [tableSizeDialogOpen, setTableSizeDialogOpen] = useState(false);
   const [tableSizeDraft, setTableSizeDraft] = useState<TableSizeDraft>({ columns: 3, bodyRows: 2 });
   const [richTableActive, setRichTableActive] = useState(false);
+  const [formatState, setFormatState] = useState<FormatState>(EMPTY_FORMAT_STATE);
   const [richTableSelection, setRichTableSelection] = useState<RichTableSelectionSummary | null>(null);
   const [linkDialogState, setLinkDialogState] = useState<{ text: string; href: string; canUnlink: boolean } | null>(null);
   const [findOpen, setFindOpen] = useState(false);
@@ -575,8 +563,6 @@ export function App() {
   const [tabContextMenu, setTabContextMenu] = useState<TabContextMenuState | null>(null);
   const [tableContextMenu, setTableContextMenu] = useState<TableContextMenuState | null>(null);
   const appShellRef = useRef<HTMLDivElement | null>(null);
-  const viewMenuRef = useRef<HTMLDivElement | null>(null);
-  const viewMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const tabListRef = useRef<HTMLDivElement | null>(null);
   const tabListMenuRef = useRef<HTMLDivElement | null>(null);
   const tabContextMenuRef = useRef<HTMLDivElement | null>(null);
@@ -879,15 +865,6 @@ export function App() {
   );
   const selectedTableCells = hasStructuredTableSelection(selectionSummary);
   const previewPending = shouldRenderPreview && ((autoPreviewEnabled && debouncedPreviewMarkdown !== documentState.markdown) || markdownRender.previewPending);
-  const previewStatus = markdownRender.error
-    ? "Preview error"
-    : previewPaused
-      ? "Preview paused"
-      : manualPreviewStale
-        ? "Preview stale"
-        : previewPending
-          ? "Updating..."
-          : `${headings.length} headings`;
   const rawPreviewHtml = markdownRender.error ? `<p>${t("Preview render failed.")}</p>` : markdownRender.previewHtml || "<p></p>";
   const previewHtml = useMemo(
     () => rewritePreviewImageSources(rawPreviewHtml, documentState.filePath),
@@ -1016,18 +993,6 @@ export function App() {
     viewModeRef.current = viewMode;
     if (viewMode !== "split") scrollSyncSourceRef.current = null;
   }, [viewMode]);
-
-  useEffect(() => {
-    if (!viewMenuOpen) return undefined;
-
-    function closeViewMenuOnOutsidePointer(event: PointerEvent) {
-      if (viewMenuRef.current?.contains(event.target as Node)) return;
-      setViewMenuOpen(false);
-    }
-
-    document.addEventListener("pointerdown", closeViewMenuOnOutsidePointer);
-    return () => document.removeEventListener("pointerdown", closeViewMenuOnOutsidePointer);
-  }, [viewMenuOpen]);
 
   useEffect(() => {
     if (!tabListOpen) return undefined;
@@ -3184,12 +3149,9 @@ export function App() {
 
   function setViewMode(viewMode: ViewMode) {
     const currentViewMode = viewModeRef.current;
-    const returnFocusToViewMenu = viewMenuOpen;
     const preserveOverlayFocus = settingsOpen || findOpen;
     if (viewMode === currentViewMode) {
-      setViewMenuOpen(false);
-      if (returnFocusToViewMenu) window.requestAnimationFrame(() => viewMenuTriggerRef.current?.focus());
-      else if (!preserveOverlayFocus) focusEditorSoon();
+      if (!preserveOverlayFocus) focusEditorSoon();
       return;
     }
 
@@ -3216,51 +3178,9 @@ export function App() {
       richEditorRef.current?.flushMarkdownSync();
     }
 
-    setViewMenuOpen(false);
     viewModeRef.current = viewMode;
     setViewModeState(viewMode);
-    if (returnFocusToViewMenu) {
-      window.requestAnimationFrame(() => viewMenuTriggerRef.current?.focus());
-    } else if (!preserveOverlayFocus) {
-      focusEditorSoon();
-    }
-  }
-
-  function focusViewMenuItem(direction: ViewMenuFocusDirection) {
-    const items = Array.from(viewMenuRef.current?.querySelectorAll<HTMLButtonElement>("[role=menuitemradio]") ?? []);
-    if (!items.length) return;
-
-    const activeIndex = items.findIndex((item) => item.getAttribute("aria-checked") === "true");
-    const focusedIndex = items.findIndex((item) => item === document.activeElement);
-    const targetIndex = viewMenuFocusIndex(items.length, activeIndex, focusedIndex, direction);
-
-    if (targetIndex !== null) items[targetIndex]?.focus();
-  }
-
-  function handleViewMenuTriggerKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
-
-    event.preventDefault();
-    setViewMenuOpen(true);
-    window.requestAnimationFrame(() => {
-      focusViewMenuItem(event.key === "ArrowUp" || event.key === "End" ? "last" : "first");
-    });
-  }
-
-  function handleViewMenuKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
-    const direction = event.key === "ArrowDown"
-      ? "next"
-      : event.key === "ArrowUp"
-        ? "previous"
-        : event.key === "Home"
-          ? "first"
-          : event.key === "End"
-            ? "last"
-            : null;
-    if (!direction) return;
-
-    event.preventDefault();
-    focusViewMenuItem(direction);
+    if (!preserveOverlayFocus) focusEditorSoon();
   }
 
   function commitManualPreviewSnapshots(next: ManualPreviewSnapshots) {
@@ -3295,6 +3215,16 @@ export function App() {
 
   function setSidebarVisible(value: boolean) {
     setSidebarVisibleState(value);
+  }
+
+  function showSidebarPage(page: SidebarPage) {
+    setSidebarPage(page);
+    setSidebarVisibleState(true);
+  }
+
+  function openSettings(category: SettingsCategoryId = "general") {
+    setSettingsCategory(category);
+    setSettingsOpen(true);
   }
 
   function setAutoSave(value: boolean) {
@@ -3449,36 +3379,7 @@ export function App() {
     setPaneLayoutState(nextLayout);
   }
 
-  function preserveRichEditorSelectionOnToolbarMouseDown(event: ReactMouseEvent<HTMLDivElement>) {
-    const target = event.target;
-    const targetIsControl = target instanceof Element && Boolean(target.closest("button, summary"));
-    if (shouldPreserveEditorSelectionOnToolbarMouseDown(viewMode, event.button, targetIsControl)) {
-      event.preventDefault();
-    }
-  }
-
-  // Toolbar summaries stay unfocused to keep the editor selection painted, so
-  // close an open menu explicitly when the pointer starts outside that menu.
-  function closeOpenToolbarMenus(except?: Element): boolean {
-    let closed = false;
-    appShellRef.current
-      ?.querySelectorAll<HTMLElement>(".toolbar-action-menu-wrap[open], .table-action-menu-wrap[open]")
-      .forEach((menu) => {
-        if (except && menu.contains(except)) return;
-        menu.removeAttribute("open");
-        closed = true;
-      });
-    return closed;
-  }
-
-  function closeToolbarMenusOnOutsideMouseDown(event: ReactMouseEvent<HTMLDivElement>) {
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    closeOpenToolbarMenus(target);
-  }
-
   function openTableContextMenu(surface: TableContextMenuState["surface"], position: { left: number; top: number }) {
-    closeOpenToolbarMenus();
     const menuWidth = Math.min(286, Math.max(0, window.innerWidth - 16));
     const menuHeight = Math.min(560, Math.max(0, window.innerHeight - 16));
     setTableContextMenu({
@@ -6939,24 +6840,6 @@ export function App() {
         externalDiskReviewOpen: Boolean(externalDiskReview)
       })) return;
 
-      if (viewMenuOpen && event.key === "Escape") {
-        event.preventDefault();
-        setViewMenuOpen(false);
-        window.requestAnimationFrame(() => viewMenuTriggerRef.current?.focus());
-        return;
-      }
-
-      if (event.key === "Escape") {
-        const focusedToolbarMenu = document.activeElement instanceof Element
-          ? document.activeElement.closest<HTMLDetailsElement>(".toolbar-action-menu-wrap, .table-action-menu-wrap")
-          : null;
-        if (closeOpenToolbarMenus()) {
-          event.preventDefault();
-          focusedToolbarMenu?.querySelector<HTMLElement>("summary")?.focus();
-          return;
-        }
-      }
-
       if (event.key === "F3") {
         event.preventDefault();
         goToFindMatch(event.shiftKey ? "previous" : "next");
@@ -7012,7 +6895,7 @@ export function App() {
 
       if (event.key === ",") {
         event.preventDefault();
-        setSettingsOpen(true);
+        openSettings();
         return;
       }
 
@@ -7136,7 +7019,7 @@ export function App() {
     { id: "update-preview", title: "Update Preview", group: "View", disabled: autoPreviewEnabled, run: updateManualPreview },
     { id: "toggle-sidebar", title: sidebarVisible ? "Hide Sidebar" : "Show Sidebar", group: "View", shortcut: "Ctrl+Shift+\\", run: toggleSidebar },
     { id: "reset-pane-layout", title: "Reset Pane Layout", group: "View", run: resetPaneLayout },
-    { id: "settings", title: "Settings", group: "View", shortcut: "Ctrl+,", run: () => setSettingsOpen(true) },
+    { id: "settings", title: "Settings", group: "View", shortcut: "Ctrl+,", run: () => openSettings() },
     { id: "undo", title: "Undo", group: "Edit", shortcut: "Ctrl+Z", run: () => runEditorHistoryAction("undo") },
     { id: "redo", title: "Redo", group: "Edit", shortcut: "Ctrl+Shift+Z / Ctrl+Y", run: () => runEditorHistoryAction("redo") },
     { id: "find", title: "Find", group: "Edit", shortcut: "Ctrl+F", run: () => openFindPanel(false) },
@@ -7186,7 +7069,7 @@ export function App() {
     { id: "align-column-left", title: "Align Table Column Left", group: "Table", disabled: !tableInCurrentEditor, run: () => alignActiveColumn("left") },
     { id: "align-column-center", title: "Align Table Column Center", group: "Table", disabled: !tableInCurrentEditor, run: () => alignActiveColumn("center") },
     { id: "align-column-right", title: "Align Table Column Right", group: "Table", disabled: !tableInCurrentEditor, run: () => alignActiveColumn("right") },
-    { id: "copy-md", title: "Copy Source Markdown", group: "Clipboard", run: copyMarkdown },
+    { id: "copy-md", title: "Copy as Markdown", group: "Clipboard", shortcut: "Ctrl+Shift+C", run: copyMarkdown },
     { id: "copy-compact-md", title: "Copy Compact Markdown", group: "Clipboard", run: copyCompactMarkdown },
     { id: "copy-text", title: "Copy Clean Text", group: "Clipboard", run: copyPlainText },
     { id: "copy-file-path", title: "Copy File Path", group: "Clipboard", disabled: !documentState.filePath, run: copyDocumentPath },
@@ -7260,18 +7143,186 @@ export function App() {
   } as CSSProperties;
   const headerSaveSafetyLabel = saveSafetyStatusLabel(documentState);
   const headerSaveSafetyClassName = documentState.filePath
-    ? documentState.lastBackupPath ? "safety-pill protected" : "safety-pill"
-    : "safety-pill draft";
+    ? documentState.lastBackupPath ? "statusbar-safety protected" : "statusbar-safety"
+    : "statusbar-safety draft";
   const headerSaveSafetyTitle = !documentState.filePath
     ? t("This draft has no disk file yet")
     : documentState.lastBackupPath ?? t("Backups are created before overwriting a saved file");
-  const headerEditStatusLabel = documentEditStatusLabel(documentState);
-  const headerEditStatusClassName = [
-    "dirty-pill",
-    dirty ? "dirty" : "",
-    documentState.filePath ? "" : "draft"
-  ].filter(Boolean).join(" ");
   const sessionEditStatusLabel = tabSessionEditStatusLabel(documentState, dirtyTabsCount);
+  const formattingAvailable = viewMode !== "preview";
+  const tableInEditor = viewMode === "wysiwyg" ? richTableActive : Boolean(activeTable);
+  const sourceTable = viewMode !== "wysiwyg" ? activeTable : null;
+
+  const appMenus: AppMenu[] = [
+    { id: "file", label: t("File") },
+    { id: "edit", label: t("Edit") },
+    { id: "paragraph", label: t("Paragraph") },
+    { id: "format", label: t("Format") },
+    { id: "table", label: t("Table") },
+    { id: "view", label: t("View") },
+    { id: "help", label: t("Help") }
+  ];
+
+  function menuItem(
+    id: string,
+    label: string,
+    run: () => void | Promise<void>,
+    options: { shortcut?: string; disabled?: boolean; checked?: boolean; danger?: boolean; icon?: ReactNode } = {}
+  ): AppMenuItem {
+    return { type: "item", id, label: t(label), run, ...options };
+  }
+
+  function menuSeparator(id: string): AppMenuItem {
+    return { type: "separator", id };
+  }
+
+  function menuLabel(id: string, label: string): AppMenuItem {
+    return { type: "label", id, label: t(label) };
+  }
+
+  function blockMenuItem(command: MarkdownBlockCommand, label: string, checked?: boolean, shortcut?: string): AppMenuItem {
+    return menuItem(command, label, () => runBlockCommand(command), { disabled: !formattingAvailable, checked, shortcut });
+  }
+
+  function appMenuItems(menuId: string): AppMenuItem[] {
+    switch (menuId) {
+      case "file":
+        return [
+          menuItem("new", desktopLocalFilesAvailable ? "New File" : "New Draft", newPrimaryDocument, { shortcut: "Ctrl+N", icon: <FilePlus2 /> }),
+          desktopLocalFilesAvailable
+            ? menuItem("open", "Open...", openPrimaryDocument, { shortcut: "Ctrl+O", icon: <FolderOpen /> })
+            : menuItem("import-draft", "Import Draft", importDraftDocument, { shortcut: "Ctrl+O", icon: <FileText /> }),
+          menuItem("open-folder", "Open Folder...", openWorkspace, { shortcut: "Ctrl+Shift+O", disabled: !desktopRuntime }),
+          menuSeparator("file-save"),
+          menuItem("save", "Save", saveDocument, { shortcut: "Ctrl+S", icon: <Save /> }),
+          menuItem("save-as", "Save As...", saveAsDocument),
+          menuItem("save-copy", "Save Copy As...", saveCopyAsDocument),
+          menuItem("save-all", "Save All", saveAllDocuments, { shortcut: "Ctrl+Alt+S", disabled: !hasDirtyTabs, icon: <SaveAll /> }),
+          menuSeparator("file-export"),
+          menuItem("export-html", "Export HTML...", exportHtmlDocument, { icon: <FileCode2 /> }),
+          menuItem("version-history", "Version History...", openVersionHistoryManagement, { icon: <History /> }),
+          menuItem("compare-disk", "Compare with Disk Version", compareDiskVersionWithEditor, { disabled: !externalChange }),
+          menuItem("reload-from-disk", "Reload From Disk", reloadDocumentFromDisk, { disabled: !documentState.filePath }),
+          menuSeparator("file-path"),
+          menuItem("copy-path", "Copy File Path", copyDocumentPath, { disabled: !documentState.filePath }),
+          menuItem("reveal", "Reveal in Folder", () => revealDocumentInFolder(), { disabled: !documentState.filePath || !desktopRuntime }),
+          menuSeparator("file-tabs"),
+          menuItem("close-tab", "Close Tab", () => closeDocumentTab(activeTab.id), { shortcut: "Ctrl+W" }),
+          menuItem("reopen-tab", "Reopen Closed Tab", reopenClosedDocumentTab, { shortcut: "Ctrl+Shift+T", disabled: closedTabs.length === 0 }),
+          menuSeparator("file-settings"),
+          menuItem("settings", "Settings...", () => openSettings(), { shortcut: "Ctrl+,", icon: <Settings2 /> })
+        ];
+      case "edit":
+        return [
+          menuItem("undo", "Undo", () => { runEditorHistoryAction("undo"); }, { shortcut: "Ctrl+Z", disabled: !formattingAvailable, icon: <Undo2 /> }),
+          menuItem("redo", "Redo", () => { runEditorHistoryAction("redo"); }, { shortcut: "Ctrl+Y", disabled: !formattingAvailable, icon: <Redo2 /> }),
+          menuSeparator("edit-copy"),
+          menuItem("copy-markdown", "Copy as Markdown", copyMarkdown, { shortcut: "Ctrl+Shift+C", icon: <Copy /> }),
+          menuItem("copy-rich", "Copy as Rich Text", () => copyRichText(), { icon: <ClipboardCopy /> }),
+          menuItem("copy-text", "Copy as Plain Text", copyPlainText, { icon: <TextCursorInput /> }),
+          menuItem("copy-compact", "Copy as Compact Markdown", copyCompactMarkdown, { icon: <Minimize2 /> }),
+          menuSeparator("edit-find"),
+          menuItem("find", "Find", () => openFindPanel(false), { shortcut: "Ctrl+F" }),
+          menuItem("replace", "Find and Replace", () => openFindPanel(true), { shortcut: "Ctrl+H" }),
+          menuSeparator("edit-palette"),
+          menuItem("command-palette", "Command Palette", () => setCommandPaletteOpen(true), { shortcut: "Ctrl+Shift+P", icon: <Command /> })
+        ];
+      case "paragraph":
+        return [
+          blockMenuItem("paragraph", "Paragraph", formatState.block === "paragraph"),
+          blockMenuItem("heading-1", "Heading 1", formatState.block === "heading-1"),
+          blockMenuItem("heading-2", "Heading 2", formatState.block === "heading-2"),
+          blockMenuItem("heading-3", "Heading 3", formatState.block === "heading-3"),
+          blockMenuItem("heading-4", "Heading 4", formatState.block === "heading-4"),
+          blockMenuItem("heading-5", "Heading 5", formatState.block === "heading-5"),
+          blockMenuItem("heading-6", "Heading 6", formatState.block === "heading-6"),
+          menuSeparator("paragraph-lists"),
+          blockMenuItem("bullet-list", "Bullet list", formatState.bulletList),
+          blockMenuItem("ordered-list", "Ordered list", formatState.orderedList),
+          blockMenuItem("task-list", "Task list", formatState.taskList),
+          menuItem("indent", "Indent List Item", () => runListIndentation("indent"), { shortcut: "Tab", disabled: !formattingAvailable }),
+          menuItem("outdent", "Outdent List Item", () => runListIndentation("outdent"), { shortcut: "Shift+Tab", disabled: !formattingAvailable }),
+          menuSeparator("paragraph-blocks"),
+          blockMenuItem("blockquote", "Blockquote", formatState.blockquote),
+          blockMenuItem("code-block", "Code block", formatState.block === "code-block"),
+          blockMenuItem("horizontal-rule", "Horizontal rule")
+        ];
+      case "format":
+        return [
+          menuItem("bold", "Bold", () => runTextCommand("bold"), { shortcut: "Ctrl+B", disabled: !formattingAvailable, checked: formatState.bold }),
+          menuItem("italic", "Italic", () => runTextCommand("italic"), { shortcut: "Ctrl+I", disabled: !formattingAvailable, checked: formatState.italic }),
+          menuItem("strike", "Strikethrough", () => runTextCommand("strike"), { disabled: !formattingAvailable, checked: formatState.strike }),
+          menuItem("code", "Inline code", () => runTextCommand("code"), { shortcut: "Ctrl+`", disabled: !formattingAvailable, checked: formatState.code }),
+          menuSeparator("format-insert"),
+          menuItem("link", "Link...", () => runTextCommand("link"), { shortcut: "Ctrl+K", disabled: !formattingAvailable, icon: <Link2 /> }),
+          menuItem("image", "Insert Local Image...", insertLocalImageReferences, { shortcut: "Ctrl+Alt+I", disabled: !formattingAvailable, icon: <ImagePlus /> }),
+          menuSeparator("format-syntax"),
+          menuItem("soft-syntax", "Soften Markdown Syntax", () => setSoftSyntax(!softSyntax), { checked: softSyntax })
+        ];
+      case "table":
+        return [
+          menuItem("insert-table", "Insert Table...", openInsertTableDialog, { shortcut: "Ctrl+Alt+T", disabled: !formattingAvailable, icon: <Table2 /> }),
+          menuItem("align-table", "Align Table", normalizeTable, { shortcut: "Ctrl+Alt+L", disabled: !sourceTable }),
+          menuLabel("table-rows", "Rows"),
+          menuItem("add-row-before", "Add row above", addRowBefore, { shortcut: "Ctrl+Alt+Shift+Enter", disabled: !tableInEditor }),
+          menuItem("add-row", "Add row below", addRow, { shortcut: "Ctrl+Alt+Enter", disabled: !tableInEditor }),
+          menuItem("duplicate-row", "Duplicate row", duplicateRow, { disabled: !tableInEditor || Boolean(sourceTable && sourceTable.position.row < 2) }),
+          menuItem("move-row-up", "Move row up", moveRowUp, { shortcut: "Ctrl+Alt+Up", disabled: !tableInEditor || Boolean(sourceTable && sourceTable.position.row <= 2) }),
+          menuItem("move-row-down", "Move row down", moveRowDown, { shortcut: "Ctrl+Alt+Down", disabled: !tableInEditor || Boolean(sourceTable && (sourceTable.position.row < 2 || sourceTable.position.row >= sourceTable.table.rows.length + 1)) }),
+          menuLabel("table-columns", "Columns"),
+          menuItem("add-column-before", "Add column left", addColumnBefore, { shortcut: "Ctrl+Alt+[", disabled: !tableInEditor }),
+          menuItem("add-column", "Add column right", addColumn, { shortcut: "Ctrl+Alt+]", disabled: !tableInEditor }),
+          menuItem("duplicate-column", "Duplicate column", duplicateColumn, { disabled: !tableInEditor }),
+          menuItem("move-column-left", "Move column left", moveColumnLeft, { shortcut: "Ctrl+Alt+Left", disabled: !tableInEditor || Boolean(sourceTable && sourceTable.position.col <= 0) }),
+          menuItem("move-column-right", "Move column right", moveColumnRight, { shortcut: "Ctrl+Alt+Right", disabled: !tableInEditor || Boolean(sourceTable && sourceTable.position.col >= sourceTable.table.headers.length - 1) }),
+          menuLabel("table-alignment", "Alignment"),
+          menuItem("align-default", "Default alignment", () => alignActiveColumn("none"), { disabled: !tableInEditor }),
+          menuItem("align-left", "Align left", () => alignActiveColumn("left"), { disabled: !tableInEditor }),
+          menuItem("align-center", "Align center", () => alignActiveColumn("center"), { disabled: !tableInEditor }),
+          menuItem("align-right", "Align right", () => alignActiveColumn("right"), { disabled: !tableInEditor }),
+          menuItem("sort-asc", "Sort ascending", sortColumnAscending, { disabled: !tableInEditor }),
+          menuItem("sort-desc", "Sort descending", sortColumnDescending, { disabled: !tableInEditor }),
+          menuLabel("table-selection", "Selection"),
+          menuItem("select-cell", "Select cell", selectTableCell, { shortcut: "Ctrl+Alt+E", disabled: !tableInEditor }),
+          menuItem("select-row", "Select row", selectTableRow, { shortcut: "Ctrl+Alt+R", disabled: !tableInEditor }),
+          menuItem("select-column", "Select column", selectTableColumn, { shortcut: "Ctrl+Alt+C", disabled: !tableInEditor }),
+          menuItem("select-table", "Select table", selectActiveTable, { shortcut: "Ctrl+Alt+A", disabled: !tableInEditor }),
+          menuLabel("table-copy", "Copy"),
+          menuItem("copy-table", "Copy Table", copyCurrentTable, { disabled: !tableInEditor }),
+          menuItem("copy-table-md", "Copy Table as Markdown Table", copyCurrentTableAsMarkdownTable, { disabled: !tableInEditor }),
+          menuItem("copy-table-tsv", "Copy Table as TSV", copyCurrentTableAsTsv, { disabled: !tableInEditor }),
+          menuItem("copy-table-csv", "Copy Table as CSV", copyCurrentTableAsCsv, { disabled: !tableInEditor }),
+          menuSeparator("table-delete"),
+          menuItem("delete-row", "Delete row", removeRow, { danger: true, disabled: !tableInEditor || Boolean(sourceTable && sourceTable.position.row < 2) }),
+          menuItem("delete-column", "Delete column", removeColumn, { danger: true, disabled: !tableInEditor || Boolean(sourceTable && sourceTable.table.headers.length <= 1) }),
+          menuItem("delete-table", "Delete table", removeTable, { danger: true, disabled: !tableInEditor })
+        ];
+      case "view":
+        return [
+          menuItem("view-source", "Source", () => setViewMode("focus"), { shortcut: "Ctrl+1", checked: viewMode === "focus" }),
+          menuItem("view-split", "Split", () => setViewMode("split"), { shortcut: "Ctrl+2", checked: viewMode === "split" }),
+          menuItem("view-visual", "Visual", () => setViewMode("wysiwyg"), { shortcut: "Ctrl+4", checked: viewMode === "wysiwyg" }),
+          menuItem("view-preview", "Preview", () => setViewMode("preview"), { shortcut: "Ctrl+3", checked: viewMode === "preview" }),
+          menuSeparator("view-sidebar"),
+          menuItem("toggle-sidebar", "Sidebar", toggleSidebar, { shortcut: "Ctrl+Shift+\\", checked: sidebarVisible }),
+          menuItem("sidebar-outline", "Outline", () => showSidebarPage("outline"), { checked: sidebarVisible && sidebarPage === "outline" }),
+          menuItem("sidebar-files", "Files", () => showSidebarPage("files"), { checked: sidebarVisible && sidebarPage === "files" }),
+          menuItem("sidebar-history", "Version history", () => showSidebarPage("recovery"), { checked: sidebarVisible && sidebarPage === "recovery" }),
+          menuSeparator("view-appearance"),
+          menuItem("dark-theme", "Dark Theme", toggleTheme, { checked: theme === "dark" }),
+          menuItem("update-preview", "Update Preview", updateManualPreview, { disabled: autoPreviewEnabled }),
+          menuItem("reset-layout", "Reset Pane Layout", resetPaneLayout)
+        ];
+      case "help":
+        return [
+          menuItem("shortcuts", "Keyboard Shortcuts", () => setCommandPaletteOpen(true), { shortcut: "Ctrl+Shift+P" }),
+          menuItem("check-updates", "Check for Updates", () => checkApplicationUpdates(true), { disabled: !desktopRuntime }),
+          menuItem("about", "About NyaMarkdownor", () => openSettings("about"))
+        ];
+      default:
+        return [];
+    }
+  }
 
   return (
     <div
@@ -7284,7 +7335,6 @@ export function App() {
       data-sidebar={sidebarVisible ? "visible" : "hidden"}
       data-table={activeTable ? "active" : "inactive"}
       style={appStyle}
-      onMouseDown={closeToolbarMenusOnOutsideMouseDown}
       onDragEnter={handleShellDragEnter}
       onDragOver={handleShellDragOver}
       onDragLeave={handleShellDragLeave}
@@ -7299,211 +7349,29 @@ export function App() {
           </div>
         </div>
       )}
-      <header className="topbar">
-        <div className="topbar-tools" onMouseDown={preserveRichEditorSelectionOnToolbarMouseDown}>
-          <div className="brand-block">
-          <div className="brand-mark">N</div>
-          <div>
-            <div className="brand-name">NyaMarkdownor</div>
-            <div className="brand-subtitle">{runtimeSubtitle}</div>
-          </div>
-        </div>
-
-        <div className="toolbar file-toolbar">
-          <IconButton className="toolbar-primary" label={t(desktopLocalFilesAvailable ? "New File" : "New Draft")} icon={<FilePlus2 />} onClick={newPrimaryDocument} />
-          {desktopLocalFilesAvailable ? (
-            <IconButton className="toolbar-primary" label={t("Open")} icon={<FolderOpen />} onClick={openPrimaryDocument} />
-          ) : (
-            <IconButton className="toolbar-primary" label={t("Import Draft")} icon={<FileText />} onClick={importDraftDocument} />
-          )}
-          <IconButton className="toolbar-primary" label={t("Save")} icon={<Save />} onClick={saveDocument} />
-          <ToolbarActionMenu label={t("File")} icon={<FileText />}>
-            <MenuSectionLabel>{t("File")}</MenuSectionLabel>
-            <TableMenuItem label={t(desktopLocalFilesAvailable ? "New File" : "New Draft")} icon={<FilePlus2 />} onClick={newPrimaryDocument} />
-            {desktopLocalFilesAvailable ? (
-              <TableMenuItem label={t("Open")} icon={<FolderOpen />} onClick={openPrimaryDocument} />
-            ) : (
-              <TableMenuItem label={t("Import Draft")} icon={<FileText />} onClick={importDraftDocument} />
-            )}
-            <TableMenuItem label={t("Open Folder")} icon={<PanelLeft />} disabled={!desktopRuntime} onClick={openWorkspace} />
-            <MenuSectionLabel>{t("Save")}</MenuSectionLabel>
-            <TableMenuItem label={t("Save")} icon={<Save />} onClick={saveDocument} />
-            <TableMenuItem label={t("Save All")} icon={<SaveAll />} disabled={!hasDirtyTabs} onClick={saveAllDocuments} />
-            <TableMenuItem label={t("Save As")} icon={<FileDown />} onClick={saveAsDocument} />
-            <TableMenuItem label={t("Save Copy")} icon={<Copy />} onClick={saveCopyAsDocument} />
-            <TableMenuItem label={t("Export HTML")} icon={<FileCode2 />} onClick={exportHtmlDocument} />
-          </ToolbarActionMenu>
-        </div>
-
-        <div className="toolbar format-toolbar">
-          <IconButton className="toolbar-primary" label={t("Bold")} icon={<Bold />} onClick={() => runTextCommand("bold")} />
-          <IconButton className="toolbar-primary" label={t("Italic")} icon={<Italic />} onClick={() => runTextCommand("italic")} />
-          <IconButton className="toolbar-primary" label={t("Link")} icon={<Link2 />} onClick={() => runTextCommand("link")} />
-          <ToolbarActionMenu label={t("Format")} icon={<PenLine />}>
-            <MenuSectionLabel>{t("Edit")}</MenuSectionLabel>
-            <TableMenuItem label={t("Undo")} icon={<Undo2 />} onClick={() => runEditorHistoryAction("undo")} />
-            <TableMenuItem label={t("Redo")} icon={<Redo2 />} onClick={() => runEditorHistoryAction("redo")} />
-            <MenuSectionLabel>{t("Format")}</MenuSectionLabel>
-            <TableMenuItem label={t("Bold")} icon={<Bold />} onClick={() => runTextCommand("bold")} />
-            <TableMenuItem label={t("Italic")} icon={<Italic />} onClick={() => runTextCommand("italic")} />
-            <TableMenuItem label={t("Inline code")} icon={<Code2 />} onClick={() => runTextCommand("code")} />
-            <TableMenuItem label={t("Link")} icon={<Link2 />} onClick={() => runTextCommand("link")} />
-            <TableMenuItem label={t("Image")} icon={<ImagePlus />} onClick={insertLocalImageReferences} />
-            <MenuSectionLabel>{t("Editor")}</MenuSectionLabel>
-            <ToolbarMenuToggle label={t("Soft syntax")} icon={<Code2 />} checked={softSyntax} onToggle={() => setSoftSyntax(!softSyntax)} />
-          </ToolbarActionMenu>
-        </div>
-
-        <div className="toolbar block-toolbar">
-          <ToolbarActionMenu label={t("Blocks")} icon={<Heading2 />}>
-            <TableMenuItem label={t("Heading 1")} icon={<Heading1 />} onClick={() => runBlockCommand("heading-1")} />
-            <TableMenuItem label={t("Heading 2")} icon={<Heading2 />} onClick={() => runBlockCommand("heading-2")} />
-            <TableMenuItem label={t("Heading 3")} icon={<Heading3 />} onClick={() => runBlockCommand("heading-3")} />
-            <MenuSectionLabel>{t("Blocks")}</MenuSectionLabel>
-            <TableMenuItem label={t("Bullet list")} icon={<List />} onClick={() => runBlockCommand("bullet-list")} />
-            <TableMenuItem label={t("Ordered list")} icon={<ListOrdered />} onClick={() => runBlockCommand("ordered-list")} />
-            <TableMenuItem label={t("Task list")} icon={<ListChecks />} onClick={() => runBlockCommand("task-list")} />
-            <TableMenuItem label={t("Blockquote")} icon={<TextQuote />} onClick={() => runBlockCommand("blockquote")} />
-            <TableMenuItem label={t("Code block")} icon={<Code2 />} onClick={() => runBlockCommand("code-block")} />
-          </ToolbarActionMenu>
-        </div>
-
-        <div className="toolbar table-toolbar">
-          <ToolbarActionMenu label={t("Table")} icon={<Table2 />} align="right" wide>
-            <TableMenuItem label={t("Insert table")} icon={<Table2 />} onClick={openInsertTableDialog} />
-            {activeTable && viewMode !== "wysiwyg" && (
-              <TableMenuItem label={t("Align table")} icon={<AlignJustify />} onClick={normalizeTable} />
-            )}
-            {(viewMode === "wysiwyg" ? richTableActive : Boolean(activeTable)) && (
-              <>
-                <MenuSectionLabel>{t("Selection")}</MenuSectionLabel>
-                <TableMenuItem label={t("Select cell")} icon={<TextSelect />} onClick={selectTableCell} />
-                <TableMenuItem label={t("Select row")} icon={<Rows3 />} onClick={selectTableRow} disabled={viewMode !== "wysiwyg" && activeTable?.position.row === 1} />
-                <TableMenuItem label={t("Select column")} icon={<Columns3 />} onClick={selectTableColumn} />
-                {activeTable && viewMode !== "wysiwyg" && (
-                  <>
-                    <TableMenuItem label={t("Select header")} icon={<Heading2 />} onClick={selectTableHeader} />
-                    <TableMenuItem label={t("Select body")} icon={<Rows3 />} onClick={selectTableBody} disabled={activeTable.table.rows.length === 0} />
-                  </>
-                )}
-                <TableMenuItem label={t("Select table")} icon={<SquareMousePointer />} onClick={selectActiveTable} />
-                <TableMenuItem label={t("Copy cell content")} icon={<ClipboardCopy />} onClick={copyActiveTableCell} />
-
-                <MenuSectionLabel>{t("Rows")}</MenuSectionLabel>
-                <TableMenuItem label={t("Add row above")} icon={<ArrowUp />} onClick={addRowBefore} />
-                <TableMenuItem label={t("Add row below")} icon={<ArrowDown />} onClick={addRow} />
-                <TableMenuItem label={t("Duplicate row")} icon={<CopyPlus />} onClick={duplicateRow} disabled={viewMode !== "wysiwyg" && Boolean(activeTable && activeTable.position.row < 2)} />
-                <TableMenuItem label={t("Move row up")} icon={<ArrowUp />} onClick={moveRowUp} disabled={viewMode !== "wysiwyg" && Boolean(activeTable && activeTable.position.row <= 2)} />
-                <TableMenuItem label={t("Move row down")} icon={<ArrowDown />} onClick={moveRowDown} disabled={viewMode !== "wysiwyg" && Boolean(activeTable && (activeTable.position.row < 2 || activeTable.position.row >= activeTable.table.rows.length + 1))} />
-
-                <MenuSectionLabel>{t("Columns")}</MenuSectionLabel>
-                <TableMenuItem label={t("Add column left")} icon={<ArrowLeft />} onClick={addColumnBefore} />
-                <TableMenuItem label={t("Add column right")} icon={<ArrowRight />} onClick={addColumn} />
-                <TableMenuItem label={t("Duplicate column")} icon={<CopyPlus />} onClick={duplicateColumn} />
-                <TableMenuItem label={t("Move column left")} icon={<ArrowLeft />} onClick={moveColumnLeft} disabled={viewMode !== "wysiwyg" && Boolean(activeTable && activeTable.position.col <= 0)} />
-                <TableMenuItem label={t("Move column right")} icon={<ArrowRight />} onClick={moveColumnRight} disabled={viewMode !== "wysiwyg" && Boolean(activeTable && activeTable.position.col >= activeTable.table.headers.length - 1)} />
-
-                <MenuSectionLabel>{t("Alignment")}</MenuSectionLabel>
-                <TableMenuItem label={t("Default alignment")} icon={<AlignJustify />} onClick={() => alignActiveColumn("none")} />
-                <TableMenuItem label={t("Align left")} icon={<AlignLeft />} onClick={() => alignActiveColumn("left")} />
-                <TableMenuItem label={t("Align center")} icon={<AlignCenter />} onClick={() => alignActiveColumn("center")} />
-                <TableMenuItem label={t("Align right")} icon={<AlignRight />} onClick={() => alignActiveColumn("right")} />
-                <TableMenuItem label={t("Sort ascending")} icon={<ArrowDownAZ />} onClick={sortColumnAscending} disabled={viewMode !== "wysiwyg" && Boolean(activeTable && activeTable.table.rows.length < 2)} />
-                <TableMenuItem label={t("Sort descending")} icon={<ArrowDownZA />} onClick={sortColumnDescending} disabled={viewMode !== "wysiwyg" && Boolean(activeTable && activeTable.table.rows.length < 2)} />
-
-                <MenuSectionLabel>{t("Danger zone")}</MenuSectionLabel>
-                <TableMenuItem label={t("Delete row")} icon={<ScissorsLineDashed />} onClick={removeRow} disabled={viewMode !== "wysiwyg" && Boolean(activeTable && activeTable.position.row < 2)} danger />
-                <TableMenuItem label={t("Delete column")} icon={<Trash2 />} onClick={removeColumn} disabled={viewMode !== "wysiwyg" && Boolean(activeTable && activeTable.table.headers.length <= 1)} danger />
-                <TableMenuItem label={t("Delete table")} icon={<Trash2 />} onClick={removeTable} danger />
-              </>
-            )}
-          </ToolbarActionMenu>
-        </div>
-
-        <div className="toolbar clipboard-toolbar">
-          <ToolbarActionMenu label={t("Copy")} icon={<ClipboardCopy />} align="right">
-            <TableMenuItem label={t("Copy Compact Markdown")} icon={<Minimize2 />} onClick={copyCompactMarkdown} />
-            <TableMenuItem label={t("Copy Source Markdown")} icon={<Copy />} onClick={copyMarkdown} />
-            <TableMenuItem label={t("Copy Text")} icon={<TextCursorInput />} onClick={copyPlainText} />
-            <TableMenuItem label={t("Copy Rich Text")} icon={<ClipboardCopy />} onClick={() => void copyRichText()} />
-            {(selectedTableCells || (viewMode === "wysiwyg" && richTableActive)) && (
-              <>
-                <MenuSectionLabel>{t("Table")}</MenuSectionLabel>
-                <TableMenuItem label={t("Copy MD Table")} icon={<FileCode2 />} onClick={copySelectionAsMarkdownTable} />
-                <TableMenuItem label={t("Copy TSV")} icon={<FileText />} onClick={copySelectionAsTsv} />
-                <TableMenuItem label={t("Copy CSV")} icon={<Table2 />} onClick={copySelectionAsCsv} />
-              </>
-            )}
-            {(viewMode === "wysiwyg" ? richTableActive : Boolean(activeTable)) && (
-              <TableMenuItem label={t("Copy Table")} icon={<Table2 />} onClick={copyCurrentTable} />
-            )}
-            {activeTable && viewMode !== "wysiwyg" && (
-              <>
-                <TableMenuItem label={t("Copy Header")} icon={<Heading2 />} onClick={copyCurrentTableHeader} />
-                <TableMenuItem label={t("Copy Body")} icon={<Rows3 />} onClick={copyCurrentTableBody} disabled={activeTable.table.rows.length === 0} />
-                <TableMenuItem label={t("Copy Row")} icon={<ArrowRight />} onClick={copyActiveTableRow} disabled={activeTable.position.row === 1} />
-                <TableMenuItem label={t("Copy Column")} icon={<ArrowDown />} onClick={copyActiveTableColumn} />
-              </>
-            )}
-          </ToolbarActionMenu>
-        </div>
-        </div>
-
-        <div className="view-tabs">
-          <button
-            className="icon-only command-launcher"
-            type="button"
-            onClick={() => setCommandPaletteOpen(true)}
-            aria-label={t("Command palette")}
-            title={t("Command palette")}
-          >
-            <Command />
-          </button>
-          <div className="view-menu-wrap" ref={viewMenuRef}>
-            <button
-              ref={viewMenuTriggerRef}
-              className={viewMenuOpen ? "icon-only active view-mode-button" : "icon-only view-mode-button"}
-              type="button"
-              onClick={() => setViewMenuOpen((open) => !open)}
-              onKeyDown={handleViewMenuTriggerKeyDown}
-              aria-label={t("Choose view")}
-              aria-haspopup="menu"
-              aria-expanded={viewMenuOpen}
-              title={t("Choose view")}
-            >
-              <ViewModeIcon mode={viewMode} />
-              <ChevronDown size={14} />
-            </button>
-            {viewMenuOpen && (
-              <div className="view-menu" role="menu" aria-label={t("Choose view")} onKeyDown={handleViewMenuKeyDown}>
-                <ViewMenuItem mode="focus" activeMode={viewMode} t={t} onSelect={setViewMode} />
-                <ViewMenuItem mode="split" activeMode={viewMode} t={t} onSelect={setViewMode} />
-                <ViewMenuItem mode="preview" activeMode={viewMode} t={t} onSelect={setViewMode} />
-                <ViewMenuItem mode="wysiwyg" activeMode={viewMode} t={t} onSelect={setViewMode} />
-              </div>
-            )}
-          </div>
-          <button
-            className={sidebarVisible ? "icon-only active" : "icon-only"}
-            onClick={toggleSidebar}
-            aria-label={t(sidebarVisible ? "Hide sidebar" : "Show sidebar")}
-            aria-pressed={sidebarVisible}
-            title={t(sidebarVisible ? "Hide sidebar" : "Show sidebar")}
-          >
-            <PanelLeft />
-          </button>
-          <button className="icon-only" onClick={() => setSettingsOpen(true)} aria-label={t("Settings")} title={t("Settings")}>
-            <Settings2 />
-          </button>
-          <button
-            className="icon-only"
-            onClick={toggleTheme}
-            aria-label={t(theme === "light" ? "Use dark theme" : "Use light theme")}
-            title={t(theme === "light" ? "Use dark theme" : "Use light theme")}
-          >
-            {theme === "light" ? <Moon /> : <Sun />}
-          </button>
-        </div>
+      <header className="app-chrome">
+        <AppMenuBar
+          menus={appMenus}
+          getItems={appMenuItems}
+          ariaLabel={t("Application menu")}
+          trailing={desktopRuntime ? undefined : <span className="app-menubar-runtime">{runtimeSubtitle}</span>}
+        />
+        <FormatToolbar
+          t={t}
+          formatState={viewMode === "preview" ? EMPTY_FORMAT_STATE : formatState}
+          viewMode={viewMode}
+          sidebarVisible={sidebarVisible}
+          formattingAvailable={formattingAvailable}
+          onToggleSidebar={toggleSidebar}
+          onHistory={(action) => { runEditorHistoryAction(action); }}
+          onTextCommand={runTextCommand}
+          onBlockCommand={runBlockCommand}
+          onListIndentation={runListIndentation}
+          onInsertTable={openInsertTableDialog}
+          onInsertImage={() => void insertLocalImageReferences()}
+          onViewModeChange={setViewMode}
+          onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+        />
       </header>
 
       <nav className="tabstrip" aria-label={t("Open documents")}>
@@ -7603,6 +7471,19 @@ export function App() {
             >
               <FolderOpen size={16} />
               <span>{t("Reveal in Folder")}</span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              disabled={!tabContextMenuTab.document.filePath}
+              onClick={() => {
+                const filePath = tabContextMenuTab.document.filePath;
+                setTabContextMenu(null);
+                if (filePath) void copyText(filePath).then((copied) => showToast(copied ? "Copied file path" : "Clipboard write failed"));
+              }}
+            >
+              <ClipboardCopy size={16} />
+              <span>{t("Copy File Path")}</span>
             </button>
           </div>
         )}
@@ -8003,57 +7884,6 @@ export function App() {
         </aside>
 
         <section className="editor-pane" ref={editorPaneRef}>
-          <div className="pane-header">
-            <div>
-              <div className="file-title">{documentDisplayName}</div>
-              {documentState.filePath ? (
-                <div className="file-path-actions">
-                  <button
-                    className="file-path file-path-button"
-                    type="button"
-                    onClick={copyDocumentPath}
-                    title={t("Copy file path")}
-                    aria-label={t("Copy file path")}
-                  >
-                    <span>{documentState.filePath}</span>
-                    <ClipboardCopy size={12} />
-                  </button>
-                  <button
-                    className="file-path-icon-button"
-                    type="button"
-                    onClick={() => void revealDocumentInFolder()}
-                    title={t("Reveal in folder")}
-                    aria-label={t("Reveal in folder")}
-                  >
-                    <FolderOpen size={12} />
-                  </button>
-                </div>
-              ) : (
-                <div className="file-path">{t("Draft stored in memory")}</div>
-              )}
-            </div>
-            <div className="file-badges">
-              {externalChange && (
-                <button
-                  className="conflict-pill"
-                  type="button"
-                  title={t("The file changed on disk or could not be verified. Compare the disk version with the editor before deciding whether to reload or save.")}
-                  onClick={() => void compareDiskVersionWithEditor()}
-                >
-                  <AlertTriangle size={13} />
-                  {t("Review disk")}
-                </button>
-              )}
-              <div
-                className={headerSaveSafetyClassName}
-                title={headerSaveSafetyTitle}
-              >
-                <ShieldCheck size={13} />
-                {translateUiText(locale, headerSaveSafetyLabel)}
-              </div>
-              <div className={headerEditStatusClassName}>{translateUiText(locale, headerEditStatusLabel)}</div>
-            </div>
-          </div>
           {viewMode === "wysiwyg" ? (
             <Suspense fallback={<div className="editor-loading" role="status">{t("Loading visual editor")}</div>}>
               <RichMarkdownEditor
@@ -8075,6 +7905,7 @@ export function App() {
                 onOpenLink={handleRichLinkOpen}
                 onEditLink={openRichLinkEditor}
                 onTableContextMenu={(position) => openTableContextMenu("rich", position)}
+                onFormatStateChange={setFormatState}
                 onToast={showToast}
                 scrollProgress={richScrollProgressRef.current.get(activeTab.id) ?? activeTab.richScrollProgress ?? 0}
                 onScrollProgress={(progress) => rememberRichScrollProgress(activeTab.id, progress)}
@@ -8106,6 +7937,7 @@ export function App() {
               onInsertTableRequest={openInsertTableDialog}
               onTableContextMenu={(position) => openTableContextMenu("source", position)}
               onOpenLink={handleRichLinkOpen}
+              onFormatStateChange={setFormatState}
               onToast={showToast}
             />
           )}
@@ -8121,18 +7953,12 @@ export function App() {
           onKeyDown={(event) => handlePaneResizeKeyDown(event, "editor-preview")}
         />
 
-        <section className="preview-pane" ref={previewPaneRef}>
-          <div className="pane-header compact">
-            <div>{t("Preview")}</div>
-            <div className="pane-header-actions">
-              {!autoPreviewEnabled && (
-                <button className="icon-only" type="button" title={t("Update preview")} aria-label={t("Update preview")} onClick={updateManualPreview}>
-                  <RotateCcw />
-                </button>
-              )}
-              <span>{translateUiText(locale, previewStatus)}</span>
-            </div>
-          </div>
+        <section className="preview-pane" ref={previewPaneRef} aria-label={t("Preview")}>
+          {!autoPreviewEnabled && !previewPaused && (
+            <button className="preview-refresh" type="button" title={t("Update preview")} aria-label={t("Update preview")} onClick={updateManualPreview}>
+              <RotateCcw />
+            </button>
+          )}
           {previewPaused ? (
             <div className="preview paused-preview">
               <button className="tool-button" type="button" onClick={updateManualPreview}>
@@ -8336,14 +8162,36 @@ export function App() {
       </main>
 
       <footer className="statusbar">
-        <span>{translateUiText(locale, `${documentMetrics.lineCount} lines`)}</span>
-        <span>{translateUiText(locale, `${documentMetrics.charCount} chars`)}</span>
-        <span>{translateUiText(locale, cursorPosition ? `Ln ${cursorPosition.line}, Col ${cursorPosition.column}` : "Visual editor")}</span>
-        <span>{translateUiText(locale, selectionStatus)}</span>
-        <span>{translateUiText(locale, diskStatusLabel(documentState, externalChange))}</span>
-        <span>{translateUiText(locale, saveSafetyStatusLabel(documentState))}</span>
-        <span>{t(markdownRender.error ? "Preview error" : previewPaused ? "Preview paused" : manualPreviewStale ? "Preview stale" : previewPending ? "Preview updating" : "Preview ready")}</span>
-        <span>{translateUiText(locale, sessionEditStatusLabel)}</span>
+        <div className="statusbar-group">
+          <span className="statusbar-mode">{t(VIEW_MODE_STATUS_LABELS[viewMode])}</span>
+          {cursorPosition && <span>{translateUiText(locale, `Ln ${cursorPosition.line}, Col ${cursorPosition.column}`)}</span>}
+          {selectionStatus !== "No selection" && <span>{translateUiText(locale, selectionStatus)}</span>}
+          <span>{translateUiText(locale, `${documentMetrics.charCount} chars`)}</span>
+          <span>{translateUiText(locale, `${documentMetrics.lineCount} lines`)}</span>
+        </div>
+        <div className="statusbar-group end">
+          {externalChange && (
+            <button
+              className="statusbar-alert"
+              type="button"
+              title={t("The file changed on disk or could not be verified. Compare the disk version with the editor before deciding whether to reload or save.")}
+              onClick={() => void compareDiskVersionWithEditor()}
+            >
+              <AlertTriangle size={13} />
+              {t("Review disk")}
+            </button>
+          )}
+          {(viewMode === "split" || viewMode === "preview") && (
+            <span>{t(markdownRender.error ? "Preview error" : previewPaused ? "Preview paused" : manualPreviewStale ? "Preview stale" : previewPending ? "Preview updating" : "Preview ready")}</span>
+          )}
+          {!externalChange && (
+            <span className={headerSaveSafetyClassName} title={headerSaveSafetyTitle}>
+              {translateUiText(locale, documentState.filePath ? headerSaveSafetyLabel : diskStatusLabel(documentState, externalChange))}
+            </span>
+          )}
+          <span title={t("Line endings used when saving")}>{documentState.lineEnding === "crlf" ? "CRLF" : "LF"}</span>
+          <span className={dirty ? "statusbar-dirty" : "statusbar-saved"}>{translateUiText(locale, sessionEditStatusLabel)}</span>
+        </div>
       </footer>
 
       {externalDiskReview && externalDiskReview.tabId === activeTab.id && !confirmation && !backupComparison && (
@@ -8551,6 +8399,7 @@ export function App() {
         <Suspense fallback={null}>
           <SettingsDialog
             open
+            initialCategory={settingsCategory}
             viewMode={viewMode}
             theme={theme}
             language={language}
@@ -8614,6 +8463,8 @@ function textCommandLabel(command: MarkdownTextCommand): string {
       return "Bold";
     case "italic":
       return "Italic";
+    case "strike":
+      return "Strikethrough";
     case "code":
       return "Inline code";
     case "link":
@@ -8623,12 +8474,22 @@ function textCommandLabel(command: MarkdownTextCommand): string {
 
 function blockCommandLabel(command: MarkdownBlockCommand): string {
   switch (command) {
+    case "paragraph":
+      return "Paragraph";
     case "heading-1":
       return "Heading 1";
     case "heading-2":
       return "Heading 2";
     case "heading-3":
       return "Heading 3";
+    case "heading-4":
+      return "Heading 4";
+    case "heading-5":
+      return "Heading 5";
+    case "heading-6":
+      return "Heading 6";
+    case "horizontal-rule":
+      return "Horizontal rule";
     case "bullet-list":
       return "Bullet list";
     case "ordered-list":
@@ -8900,51 +8761,12 @@ function sameDocumentTabOrder(left: readonly DocumentTab[], right: readonly Docu
   return left.length === right.length && left.every((tab, index) => tab.id === right[index]?.id);
 }
 
-type ViewModeIconProps = {
-  mode: ViewMode;
+const VIEW_MODE_STATUS_LABELS: Record<ViewMode, string> = {
+  focus: "Source",
+  split: "Split",
+  wysiwyg: "Visual",
+  preview: "Preview"
 };
-
-function ViewModeIcon({ mode }: ViewModeIconProps) {
-  switch (mode) {
-    case "focus":
-      return <PanelTop />;
-    case "split":
-      return <Columns2 />;
-    case "preview":
-      return <Eye />;
-    case "wysiwyg":
-      return <PenLine />;
-  }
-}
-
-type ViewMenuItemProps = {
-  mode: ViewMode;
-  activeMode: ViewMode;
-  t: Translator;
-  onSelect: (mode: ViewMode) => void;
-};
-
-function ViewMenuItem({ mode, activeMode, t, onSelect }: ViewMenuItemProps) {
-  const labels: Record<ViewMode, string> = {
-    focus: "Focus",
-    split: "Split",
-    preview: "Preview",
-    wysiwyg: "Visual"
-  };
-  const active = mode === activeMode;
-
-  return (
-    <button
-      type="button"
-      role="menuitemradio"
-      aria-checked={active}
-      onClick={() => onSelect(mode)}
-    >
-      <ViewModeIcon mode={mode} />
-      <span>{t(labels[mode])}</span>
-    </button>
-  );
-}
 
 function tabDropPositionForClientX(element: HTMLElement, clientX: number): DocumentTabDropPosition {
   const rect = element.getBoundingClientRect();
@@ -9073,130 +8895,12 @@ type IconButtonProps = {
   onClick: () => void;
 };
 
-function IconButton({ label, icon, className, disabled, onClick }: IconButtonProps) {
-  return (
-    <button className={["tool-button", className].filter(Boolean).join(" ")} type="button" title={label} aria-label={label} disabled={disabled} onClick={onClick}>
-      {icon}
-      <span>{label}</span>
-    </button>
-  );
-}
-
-type ToolbarActionMenuProps = {
-  label: string;
-  icon: ReactNode;
-  children: ReactNode;
-  align?: "left" | "right";
-  wide?: boolean;
-};
-
-function ToolbarActionMenu({ label, icon, children, align = "left", wide = false }: ToolbarActionMenuProps) {
-  const className = [
-    "toolbar-action-menu-wrap",
-    align === "right" ? "align-right" : "",
-    wide ? "wide" : ""
-  ].filter(Boolean).join(" ");
-
-  return (
-    <details
-      className={className}
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute("open");
-      }}
-      onKeyDown={(event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        event.currentTarget.removeAttribute("open");
-        event.currentTarget.querySelector<HTMLElement>("summary")?.focus();
-      }}
-    >
-      <summary className="tool-button toolbar-menu-trigger" title={label} aria-label={label} aria-haspopup="menu">
-        {icon}
-        <span className="toolbar-menu-label">{label}</span>
-        <ChevronDown className="toolbar-menu-chevron" />
-      </summary>
-      <div className="toolbar-action-menu" role="menu" aria-label={label}>
-        {children}
-      </div>
-    </details>
-  );
-}
-
 function MenuSectionLabel({ children }: { children: ReactNode }) {
   return <div className="toolbar-menu-section-label" role="presentation">{children}</div>;
 }
 
-type ToolbarMenuToggleProps = Omit<IconButtonProps, "onClick"> & {
-  checked: boolean;
-  onToggle: () => void;
-};
-
-function ToolbarMenuToggle({ label, icon, checked, disabled, onToggle }: ToolbarMenuToggleProps) {
-  return (
-    <button
-      type="button"
-      role="menuitemcheckbox"
-      aria-checked={checked}
-      disabled={disabled}
-      onClick={(event) => {
-        event.currentTarget.closest("details")?.removeAttribute("open");
-        onToggle();
-      }}
-    >
-      {icon}
-      <span>{label}</span>
-      <Check className={checked ? "menu-check visible" : "menu-check"} />
-    </button>
-  );
-}
-
-type ToolbarMenuChoiceProps = Omit<IconButtonProps, "onClick"> & {
-  checked: boolean;
-  onSelect: () => void;
-};
-
-function ToolbarMenuChoice({ label, icon, checked, disabled, onSelect }: ToolbarMenuChoiceProps) {
-  return (
-    <button
-      type="button"
-      role="menuitemradio"
-      aria-checked={checked}
-      disabled={disabled}
-      onClick={(event) => {
-        event.currentTarget.closest("details")?.removeAttribute("open");
-        onSelect();
-      }}
-    >
-      {icon}
-      <span>{label}</span>
-      <Check className={checked ? "menu-check visible" : "menu-check"} />
-    </button>
-  );
-}
-
-type TableMenuItemProps = IconButtonProps & {
+type ContextTableMenuItemProps = Omit<IconButtonProps, "onClick"> & {
   danger?: boolean;
-};
-
-function TableMenuItem({ label, icon, disabled, onClick, danger = false }: TableMenuItemProps) {
-  return (
-    <button
-      className={danger ? "danger" : undefined}
-      type="button"
-      role="menuitem"
-      disabled={disabled}
-      onClick={(event) => {
-        event.currentTarget.closest("details")?.removeAttribute("open");
-        onClick();
-      }}
-    >
-      {icon}
-      <span>{label}</span>
-    </button>
-  );
-}
-
-type ContextTableMenuItemProps = Omit<TableMenuItemProps, "onClick"> & {
   onClick: () => void | Promise<void>;
 };
 

@@ -19,11 +19,3 @@ export function shouldFocusPendingMountedEditor(
     && mountedTabId === activeTabId
     && viewMode !== "preview";
 }
-
-export function shouldPreserveEditorSelectionOnToolbarMouseDown(
-  viewMode: ViewMode,
-  mouseButton: number,
-  targetIsControl: boolean
-): boolean {
-  return viewMode === "wysiwyg" && mouseButton === 0 && targetIsControl;
-}
