@@ -1,8 +1,8 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type MutableRefObject, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type MutableRefObject, type ReactNode } from "react";
 import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { type Editor, type JSONContent } from "@tiptap/core";
-import { BetweenHorizontalEnd, BetweenVerticalEnd, Bold, Code2, Columns3, ExternalLink, Italic, Link2, Link2Off, List, ListOrdered, Rows3, SquareMousePointer, TextQuote, Trash2 } from "lucide-react";
+import { BetweenHorizontalEnd, BetweenVerticalEnd, Bold, Code2, Columns3, ExternalLink, Italic, Link2, Link2Off, Rows3, SquareMousePointer, Strikethrough, Trash2 } from "lucide-react";
 import { type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { TextSelection, type SelectionBookmark } from "@tiptap/pm/state";
 import { CellSelection, TableMap } from "@tiptap/pm/tables";
@@ -23,16 +23,17 @@ import type { TableSortDirection } from "../lib/tables";
 import { centeredScrollTop, getScrollProgress, setScrollProgress } from "../lib/scrollSync";
 import { activeRichHeadingIndexAtPosition, richHeadingPositionAtIndex } from "../lib/richOutlineNavigation";
 import { uniqueRichTextSelectionForText } from "../lib/richSelectionText";
+import { richSelectionDocument } from "../lib/richClipboardSelection";
 import { markdownFrontMatterEditor, promoteMarkdownFrontMatter, splitMarkdownFrontMatter, updateMarkdownFrontMatterContent, withMarkdownFrontMatter } from "../lib/markdownFrontMatter";
 import { shouldHandleDefaultCopy } from "../lib/selectionCopy";
-import { richTableStructureTransaction, type RichTableStructureCommand } from "../lib/richTableStructure";
+import { richTableSelectionIncludesHeaderRow, richTableStructureTransaction, type RichTableStructureCommand } from "../lib/richTableStructure";
 import { createRichMarkdownExtensions } from "../lib/richMarkdownExtensions";
-import { normalizeRichOrderedLists, withoutGeneratedTrailingParagraph } from "../lib/richMarkdownDocument";
+import { normalizeRichAdjacentLists, withPreservedTrailingLineBreak, withoutGeneratedTrailingParagraph } from "../lib/richMarkdownDocument";
 import { richLinkClickSelectionRange, shouldOpenRichLinkOnClick } from "../lib/richLinks";
 import { activeRichAutolink, richLinkEditState, richLinkEditTransaction } from "../lib/richLinkEditing";
 import { browserTitleLinkFromClipboard } from "../lib/richLinkPaste";
 import { findRichTextMatches, richSearchHighlightExtension, setRichSearchHighlights } from "../lib/richSearch";
-import { richMarkdownPasteTransaction, richMarkdownSourceFromClipboard } from "../lib/richMarkdownPaste";
+import { richCodePasteTransaction, richMarkdownPasteTransaction, richMarkdownSourceFromClipboard, richPasteContext, richTableCellPasteTransaction } from "../lib/richMarkdownPaste";
 import type { Translator } from "../lib/i18n";
 import type { CopyMode } from "../types";
 import { markdownRangeToClipboardPayload } from "../lib/markdown";
@@ -127,6 +128,12 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   const copyModeRef = useRef(copyMode);
   const onScrollProgressRef = useRef(onScrollProgress);
   const scrollHostRef = useRef<HTMLDivElement | null>(null);
+  // The bubble menus reposition on scroll of this element, not the window.
+  const [bubbleScrollTarget, setBubbleScrollTarget] = useState<HTMLDivElement | null>(null);
+  const attachScrollHost = useCallback((element: HTMLDivElement | null) => {
+    scrollHostRef.current = element;
+    setBubbleScrollTarget(element);
+  }, []);
   const editorRef = useRef<Editor | null>(null);
   const tableActiveRef = useRef<boolean | null>(null);
   const tableSelectionRef = useRef<RichTableSelectionSummary | null | undefined>(undefined);
@@ -313,9 +320,20 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
             html: event.clipboardData?.getData("text/html") ?? "",
             markdown: event.clipboardData?.getData("text/markdown") ?? ""
           };
-          const table = clipboardRowsForTablePaste(clipboard);
+          const pasteContext = richPasteContext(currentEditor.state);
+          if (pasteContext === "code-block" || pasteContext === "inline-code") {
+            const codeTransaction = richCodePasteTransaction(currentEditor.state, clipboard.text, pasteContext);
+            if (!codeTransaction) return false;
+            currentEditor.view.dispatch(codeTransaction);
+            event.preventDefault();
+            return true;
+          }
 
-          if (table) {
+          const insideSingleCell = pasteContext === "table-cell" && !(currentEditor.state.selection instanceof CellSelection);
+          const table = clipboardRowsForTablePaste(clipboard);
+          const pastesTextIntoCell = insideSingleCell && table?.source === "lines";
+
+          if (table && !pastesTextIntoCell) {
             const capacity = richTablePasteCapacity(currentEditor.state, table.rows);
             if (capacity && (capacity.additionalRows > 0 || capacity.additionalColumns > 0)) {
               if (!expandRichTableForPaste(currentEditor, capacity)) return false;
@@ -335,6 +353,17 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
             clipboard,
             (source) => currentEditor.markdown?.parse(source) ?? null
           );
+          if (insideSingleCell && (markdownSource || pastesTextIntoCell)) {
+            const cellTransaction = richTableCellPasteTransaction(
+              currentEditor.state,
+              markdownSource ?? clipboard.text,
+              markdownSource ? currentEditor.markdown?.parse(markdownSource) ?? null : null
+            );
+            if (!cellTransaction) return false;
+            currentEditor.view.dispatch(cellTransaction);
+            event.preventDefault();
+            return true;
+          }
           if (markdownSource) {
             const parsed = currentEditor.markdown?.parse(markdownSource);
             if (parsed?.content?.length && insertParsedRichMarkdown(currentEditor, parsed)) {
@@ -414,12 +443,10 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
     editor,
     selector: ({ editor: currentEditor }) => ({
       bold: currentEditor.isActive("bold"),
-      blockquote: currentEditor.isActive("blockquote"),
-      bulletList: currentEditor.isActive("bulletList"),
       code: currentEditor.isActive("code"),
       italic: currentEditor.isActive("italic"),
       link: richLinkState(currentEditor)?.active ?? false,
-      orderedList: currentEditor.isActive("orderedList")
+      strike: currentEditor.isActive("strike")
     })
   });
 
@@ -581,7 +608,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   }
 
   return (
-    <div ref={scrollHostRef} className="wysiwyg-editor markdown-body">
+    <div ref={attachScrollHost} className="wysiwyg-editor markdown-body">
       {frontMatterEditor && (
         <section
           className="wysiwyg-front-matter"
@@ -612,26 +639,18 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
           />
         </section>
       )}
-      {editor && (
+      {editor && bubbleScrollTarget && (
         <>
           <BubbleMenu
             editor={editor}
             pluginKey="rich-text-context-menu"
             className="rich-context-toolbar"
             updateDelay={40}
-            options={{ strategy: "fixed", placement: "top", offset: 8, shift: { padding: 10 } }}
+            options={{ strategy: "fixed", placement: "top", offset: 8, shift: { padding: 10 }, scrollTarget: bubbleScrollTarget, hide: { boundary: bubbleScrollTarget ?? undefined } }}
             shouldShow={({ editor: currentEditor, state }) => (
               currentEditor.isEditable
               && !(state.selection instanceof CellSelection)
-              && (
-                !state.selection.empty
-                || Boolean(richLinkState(currentEditor)?.active)
-                || (!currentEditor.isActive("table") && (
-                  currentEditor.isActive("bulletList")
-                  || currentEditor.isActive("orderedList")
-                  || currentEditor.isActive("blockquote")
-                ))
-              )
+              && (!state.selection.empty || Boolean(richLinkState(currentEditor)?.active))
             )}
             onMouseDown={(event) => event.preventDefault()}
           >
@@ -646,6 +665,12 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
               icon={<Italic />}
               active={contextState?.italic}
               onClick={() => editor.chain().focus().toggleItalic().run()}
+            />
+            <RichContextButton
+              label={t("Strikethrough")}
+              icon={<Strikethrough />}
+              active={contextState?.strike}
+              onClick={() => editor.chain().focus().toggleStrike().run()}
             />
             <RichContextButton
               label={t("Inline code")}
@@ -676,25 +701,6 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
                 <RichContextButton label={t("Remove link")} icon={<Link2Off />} onClick={() => unsetRichLink(editor)} />
               </>
             )}
-            <span className="rich-context-divider" aria-hidden="true" />
-            <RichContextButton
-              label={t("Bullet list")}
-              icon={<List />}
-              active={contextState?.bulletList}
-              onClick={() => editor.chain().focus().toggleBulletList().run()}
-            />
-            <RichContextButton
-              label={t("Ordered list")}
-              icon={<ListOrdered />}
-              active={contextState?.orderedList}
-              onClick={() => editor.chain().focus().toggleOrderedList().run()}
-            />
-            <RichContextButton
-              label={t("Blockquote")}
-              icon={<TextQuote />}
-              active={contextState?.blockquote}
-              onClick={() => editor.chain().focus().toggleBlockquote().run()}
-            />
           </BubbleMenu>
 
           <BubbleMenu
@@ -702,12 +708,9 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
             pluginKey="rich-table-context-menu"
             className="rich-context-toolbar rich-table-context-toolbar"
             updateDelay={40}
-            options={{ strategy: "fixed", placement: "top", offset: 8, shift: { padding: 10 } }}
+            options={{ strategy: "fixed", placement: "top", offset: 8, shift: { padding: 10 }, scrollTarget: bubbleScrollTarget, hide: { boundary: bubbleScrollTarget ?? undefined } }}
             shouldShow={({ editor: currentEditor, state }) => (
-              currentEditor.isEditable
-              && (currentEditor.isActive("table") || state.selection instanceof CellSelection)
-              && !Boolean(richLinkState(currentEditor)?.active)
-              && (state.selection.empty || state.selection instanceof CellSelection)
+              currentEditor.isEditable && state.selection instanceof CellSelection
             )}
             onMouseDown={(event) => event.preventDefault()}
           >
@@ -834,8 +837,7 @@ function richSelectionClipboardContent(editor: Editor | null): RichMarkdownClipb
   }
 
   const { from, to, empty } = editor.state.selection;
-  const fragment = empty ? editor.state.doc.content : editor.state.doc.slice(from, to).content;
-  const markdownDocument = { type: "doc", content: fragment.toJSON() };
+  const markdownDocument = empty ? editor.state.doc.toJSON() : richSelectionDocument(editor.state.doc, from, to);
   const serializedMarkdown = editor.markdown?.serialize(markdownDocument) ?? editor.getMarkdown();
   const markdown = trimClipboardBoundaryLineBreaks(serializedMarkdown);
   const payload = markdownRangeToClipboardPayload(markdown, { from: 0, to: markdown.length });
@@ -965,9 +967,10 @@ function serializeRichMarkdown(editor: Editor, fallback: string): string {
   if (editor.isDestroyed) return fallback;
 
   try {
-    return editor.markdown?.serialize(
-      withoutGeneratedTrailingParagraph(normalizeRichOrderedLists(editor.getJSON()))
+    const serialized = editor.markdown?.serialize(
+      withoutGeneratedTrailingParagraph(normalizeRichAdjacentLists(editor.getJSON()))
     ) ?? editor.getMarkdown();
+    return withPreservedTrailingLineBreak(fallback, serialized);
   } catch {
     return fallback;
   }
@@ -1235,13 +1238,15 @@ function runRichTableCommand(editor: Editor | null, command: RichTableCommand): 
     case "add-row":
       return chain.addRowAfter().run();
     case "add-row-before":
-      return chain.addRowBefore().run();
+      return richTableSelectionIncludesHeaderRow(editor.state)
+        ? chain.addRowAfter().run()
+        : chain.addRowBefore().run();
     case "add-column":
       return chain.addColumnAfter().run();
     case "add-column-before":
       return chain.addColumnBefore().run();
     case "delete-row":
-      return chain.deleteRow().run();
+      return !richTableSelectionIncludesHeaderRow(editor.state) && chain.deleteRow().run();
     case "delete-column":
       return chain.deleteColumn().run();
     case "delete-table":

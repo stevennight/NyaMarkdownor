@@ -87,3 +87,23 @@ function swapRowCells(row: ProseMirrorNode, left: number, right: number): ProseM
   [cells[left], cells[right]] = [cells[right], cells[left]];
   return row.copy(Fragment.fromArray(cells));
 }
+
+/**
+ * Whether the table selection includes the header row. A Markdown table needs
+ * exactly one header row, so it cannot be deleted and nothing can go above it.
+ */
+export function richTableSelectionIncludesHeaderRow(state: EditorState): boolean {
+  const selection = state.selection;
+  if (selection instanceof CellSelection) {
+    const table = selection.$anchorCell.node(-1);
+    const tableStart = selection.$anchorCell.start(-1);
+    const map = TableMap.get(table);
+    const rect = map.rectBetween(selection.$anchorCell.pos - tableStart, selection.$headCell.pos - tableStart);
+    return rect.top === 0;
+  }
+
+  const $cell = cellAround(selection.$from);
+  if (!$cell) return false;
+  const map = TableMap.get($cell.node(-1));
+  return map.findCell($cell.pos - $cell.start(-1)).top === 0;
+}

@@ -3,7 +3,7 @@ import { MarkdownManager } from "@tiptap/markdown";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { describe, expect, it } from "vitest";
 import { createRichMarkdownExtensions } from "./richMarkdownExtensions";
-import { richMarkdownPasteTransaction, richMarkdownSourceFromClipboard } from "./richMarkdownPaste";
+import { richCodePasteTransaction, richMarkdownPasteTransaction, richMarkdownSourceFromClipboard, richPasteContext, richTableCellPasteTransaction } from "./richMarkdownPaste";
 
 const markdown = new MarkdownManager({ extensions: createRichMarkdownExtensions(null) });
 const parseMarkdown = (source: string) => markdown.parse(source);
@@ -136,5 +136,66 @@ describe("rich Markdown paste selection", () => {
     });
 
     expect(richMarkdownPasteTransaction(state, markdown.parse("# Heading"))).toBeNull();
+  });
+});
+
+describe("rich paste contexts", () => {
+  const extensions = createRichMarkdownExtensions(null);
+  const schema = getSchema(extensions);
+
+  function stateAt(source: string, text: string, offset = 0): EditorState {
+    const doc = schema.nodeFromJSON(markdown.parse(source));
+    let position: number | null = null;
+    doc.descendants((node, pos) => {
+      if (position === null && node.isText && node.text?.includes(text)) position = pos + node.text.indexOf(text) + offset;
+    });
+    if (position === null) throw new Error(`Text not found: ${text}`);
+    return EditorState.create({ doc, selection: TextSelection.create(doc, position) });
+  }
+
+  const serialize = (state: EditorState) => markdown.serialize(state.doc.toJSON());
+
+  it("detects code blocks, inline code and table cells", () => {
+    expect(richPasteContext(stateAt("```\ncode\n```", "code", 2))).toBe("code-block");
+    expect(richPasteContext(stateAt("Use `value` here", "value", 2))).toBe("inline-code");
+    expect(richPasteContext(stateAt("| A | B |\n| --- | --- |\n| one | two |", "one", 1))).toBe("table-cell");
+    expect(richPasteContext(stateAt("plain", "plain", 1))).toBe("text");
+  });
+
+  it("pastes Markdown-looking text into a code block as literal code", () => {
+    const state = stateAt("```\ncode\n```", "code", 4);
+    const next = state.apply(richCodePasteTransaction(state, "\n# comment\n- item\nfoo(a, b)", "code-block")!);
+
+    expect(serialize(next)).toBe("```\ncode\n# comment\n- item\nfoo(a, b)\n```");
+  });
+
+  it("keeps inline code on one line", () => {
+    const state = stateAt("Use `value` here", "value", 5);
+    const next = state.apply(richCodePasteTransaction(state, "a\nb", "inline-code")!);
+
+    expect(serialize(next)).toBe("Use `valuea b` here");
+  });
+
+  it("inserts multi-line text inside the current cell with cell line breaks", () => {
+    const source = "| A | B |\n| --- | --- |\n| one | two |";
+    const state = stateAt(source, "one", 3);
+    const next = state.apply(richTableCellPasteTransaction(state, "first\nsecond\n", null)!);
+
+    expect(serialize(next)).toContain("| onefirst<br>second | two |");
+    expect(serialize(next).split("\n")).toHaveLength(3);
+  });
+
+  it("keeps inline formatting of single-paragraph Markdown pasted into a cell", () => {
+    const state = stateAt("| A | B |\n| --- | --- |\n| one | two |", "one", 3);
+    const next = state.apply(richTableCellPasteTransaction(state, "**bold**", markdown.parse("**bold**"))!);
+
+    expect(serialize(next)).toContain("| one**bold** | two |");
+  });
+
+  it("flattens block Markdown pasted into a cell to text lines", () => {
+    const state = stateAt("| A | B |\n| --- | --- |\n| one | two |", "one", 3);
+    const next = state.apply(richTableCellPasteTransaction(state, "- x\n- y", markdown.parse("- x\n- y"))!);
+
+    expect(serialize(next)).toContain("| one- x<br>- y | two |");
   });
 });

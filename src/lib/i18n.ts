@@ -266,6 +266,7 @@ const zhCN: Record<string, string> = {
   "Bold": "粗体",
   "Italic": "斜体",
   "Inline code": "行内代码",
+  "Strikethrough": "删除线",
   "Inline Code": "行内代码",
   "Link": "链接",
   "Image": "图片",

@@ -77,9 +77,13 @@ export function clipboardTableRowsFromData(data: { text?: string | null; html?: 
     }
   }
 
+  // Comma and space-column detection are guesses. Rich text from a web page or
+  // a word processor is prose unless it carries a real table.
+  if (hasRichTextHtml(html)) return null;
+
   if (text.includes(",")) {
     const rows = parseCsvRows(text);
-    if (isLikelyCsvTableText(text, rows)) {
+    if (isLikelyCsvTableText(text, rows) && !looksLikeSentenceRows(rows)) {
       return {
         source: "csv",
         rows,
@@ -89,7 +93,7 @@ export function clipboardTableRowsFromData(data: { text?: string | null; html?: 
   }
 
   const spaceRows = clipboardSpaceAlignedRowsFromText(text);
-  if (spaceRows) {
+  if (spaceRows && !looksLikeSentenceRows(spaceRows)) {
     return {
       source: "space",
       rows: spaceRows,
@@ -113,6 +117,22 @@ function clipboardContainsEmbeddedTable(data: { text?: string | null; html?: str
   return /<table[\s>]/i.test(data.html ?? "")
     || Boolean(markdownTableTextToRows(data.markdown ?? ""))
     || Boolean(markdownTableTextToRows(data.text ?? ""));
+}
+
+function hasRichTextHtml(html: string): boolean {
+  if (!html.trim() || /<table[\s>]/i.test(html)) return false;
+  // Code editors put plain source on the clipboard as preformatted HTML.
+  return !/<pre[\s>]|white-space\s*:\s*pre/i.test(html);
+}
+
+const SENTENCE_END = /[.!?;:。！？；：…]$/;
+
+function looksLikeSentenceRows(rows: readonly (readonly string[])[]): boolean {
+  const sentenceRows = rows.filter((row) => {
+    const lastCell = [...row].reverse().find((cell) => cell.trim())?.trim() ?? "";
+    return SENTENCE_END.test(lastCell);
+  });
+  return sentenceRows.length * 2 >= rows.length;
 }
 
 function isRectangularGrid(rows: readonly (readonly string[])[]): boolean {

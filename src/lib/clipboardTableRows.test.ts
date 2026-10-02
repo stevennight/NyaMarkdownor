@@ -151,6 +151,23 @@ describe("clipboard table row detection", () => {
     expect(clipboardTableRowsFromData({ text: "Name,Score\nBeta" })).toBeNull();
   });
 
+  it("keeps comma prose with matching comma counts out of tables", () => {
+    expect(clipboardTableRowsFromData({ text: "Hello, world.\nBye, moon." })).toBeNull();
+    expect(clipboardTableRowsFromData({ text: "你好, 世界。\n再见, 月亮。" })).toBeNull();
+    expect(clipboardRowsForTablePaste({ text: "你好, 世界。\n再见, 月亮。" })?.source).toBe("lines");
+  });
+
+  it("does not guess comma or space columns from rich text without a table", () => {
+    const html = "<p>Name,Score</p><p>Beta,10</p>";
+    expect(clipboardTableRowsFromData({ text: "Name,Score\nBeta,10", html })).toBeNull();
+    expect(clipboardTableRowsFromData({ text: "Name    Score\nBeta    10", html })).toBeNull();
+  });
+
+  it("still detects CSV copied from a code editor as preformatted HTML", () => {
+    const html = '<div style="white-space: pre;"><div>Name,Score</div><div>Beta,10</div></div>';
+    expect(clipboardTableRowsFromData({ text: "Name,Score\nBeta,10", html })?.source).toBe("csv");
+  });
+
   it("detects conservative space-aligned text tables", () => {
     expect(clipboardSpaceAlignedRowsFromText([
       "Name    Score    Note",

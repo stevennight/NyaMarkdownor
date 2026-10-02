@@ -848,3 +848,29 @@ function visit(content: JSONContent, callback: (node: JSONContent) => void): voi
   callback(content);
   content.content?.forEach((child) => visit(child, callback));
 }
+
+describe("rich Markdown list round-trips", () => {
+  it.each([
+    ["nested bullet under an ordered item", "1. one\n2. two\n   - child\n3. three"],
+    ["continuation paragraph in an ordered item", "1. one\n\n   para\n\n2. two"],
+    ["wide ordered marker", "10. one\n    - child"],
+    ["deeply nested ordered lists", "1. a\n   1. b\n      - c"],
+    ["soft breaks in ordered items", "1. code\n   continued\n\n   para two\n   line"],
+    ["fenced code in an ordered item", "1. code\n\n   ```js\n   x\n\n   y\n   ```"],
+    ["fenced code in a wide ordered item", "10. code\n\n    ```\n    x\n    ```"],
+    ["indented code in an ordered item", "1. a\n\n       indented code"],
+    ["parenthesis delimiter", "3) x\n4) y"],
+    ["paragraph after nested task list", "- [ ] task\n  - [x] sub\n\n  para"],
+    ["paragraph before nested task list", "- [ ] a\n\n  para\n  - [ ] sub"],
+    ["nested task lists", "- [ ] a\n  - [ ] b\n    - [x] c\n- [x] d"]
+  ])("keeps %s unchanged", (_name, source) => {
+    expect(markdown.serialize(markdown.parse(source))).toBe(source);
+  });
+
+  it("does not keep the extra marker space in parsed ordered item content", () => {
+    const parsed = markdown.parse("1. code\n\n   ```\n   x\n   ```");
+    const codeBlock = parsed.content?.[0].content?.[0].content?.[1];
+    expect(codeBlock?.type).toBe("codeBlock");
+    expect(codeBlock?.content?.[0].text).toBe("x");
+  });
+});

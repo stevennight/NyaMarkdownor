@@ -95,3 +95,65 @@ function containsExplicitMarkdownStructure(node: JSONContent): boolean {
 
   return node.content?.some(containsExplicitMarkdownStructure) ?? false;
 }
+
+export type RichPasteContext = "code-block" | "inline-code" | "table-cell" | "text";
+
+const TABLE_CELL_LINE_BREAK = "<br>";
+
+export function richPasteContext(state: EditorState): RichPasteContext {
+  const { $from, $to } = state.selection;
+  if ($from.parent.type.spec.code) return "code-block";
+
+  const inCode = (marks: readonly { type: { name: string } }[]) => marks.some((mark) => mark.type.name === "code");
+  if (inCode($from.marks()) && inCode($to.marks())) return "inline-code";
+
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    const role = $from.node(depth).type.spec.tableRole;
+    if (role === "cell" || role === "header_cell") return "table-cell";
+  }
+  return "text";
+}
+
+/** Plain text into a code block or inline code keeps its exact characters. */
+export function richCodePasteTransaction(state: EditorState, text: string, context: "code-block" | "inline-code"): Transaction | null {
+  const normalized = normalizeMarkdownLineEndings(text);
+  const value = context === "inline-code" ? normalized.replace(/\n+/g, " ") : normalized;
+  if (!value) return null;
+  return state.tr.insertText(value).scrollIntoView();
+}
+
+/**
+ * Text pasted inside one table cell stays in that cell: each line break becomes
+ * a cell line break, which Markdown stores as `<br>`. Markdown that parses to a
+ * single paragraph keeps its inline formatting.
+ */
+export function richTableCellPasteTransaction(state: EditorState, text: string, parsed: JSONContent | null): Transaction | null {
+  const inline = singleParagraphInlineContent(parsed);
+  if (inline) {
+    try {
+      const nodes = inline.map((node) => state.schema.nodeFromJSON(node));
+      return state.tr.replaceSelection(new Slice(Fragment.fromArray(nodes), 0, 0)).scrollIntoView();
+    } catch {
+      // Fall back to plain text below.
+    }
+  }
+
+  const hardBreak = state.schema.nodes.hardBreak;
+  const lines = normalizeMarkdownLineEndings(text).replace(/\n+$/, "").split("\n");
+  if (!lines.some((line) => line.length)) return null;
+
+  const nodes = lines.flatMap((line, index) => {
+    const parts = [];
+    if (index > 0 && hardBreak) parts.push(hardBreak.create({ markdownMarker: TABLE_CELL_LINE_BREAK }));
+    else if (index > 0) parts.push(state.schema.text(" "));
+    if (line) parts.push(state.schema.text(line));
+    return parts;
+  });
+  return state.tr.replaceSelection(new Slice(Fragment.fromArray(nodes), 0, 0)).scrollIntoView();
+}
+
+function singleParagraphInlineContent(parsed: JSONContent | null): JSONContent[] | null {
+  const blocks = parsed?.content;
+  if (!blocks || blocks.length !== 1 || blocks[0].type !== "paragraph") return null;
+  return blocks[0].content?.length ? blocks[0].content : null;
+}

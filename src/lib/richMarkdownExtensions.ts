@@ -1,4 +1,4 @@
-import { Extension, findParentNode, mergeAttributes, Node, type AnyExtension, type JSONContent, type MarkdownToken } from "@tiptap/core";
+import { Extension, findParentNode, mergeAttributes, Node, wrappingInputRule, type AnyExtension, type JSONContent, type MarkdownToken } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import Bold from "@tiptap/extension-bold";
 import Code from "@tiptap/extension-code";
@@ -24,6 +24,10 @@ import { codeHighlightClasses } from "./codeHighlight";
 import { isMermaidLanguage } from "./mermaidLanguage";
 import { mermaidRenderSkipReason, renderMermaidPreview, type MermaidPreviewOptions } from "./mermaidPreview";
 import { localImageSourceForRender } from "./previewAssets";
+import { orderedListMarkdownTokenizer } from "./orderedListTokenizer";
+import { taskListMarkdownTokenizer } from "./taskListTokenizer";
+import { richListBackspace, richOrderedListExitEmptyItem } from "./richListCommands";
+import { canMergeRichLists } from "./richMarkdownDocument";
 import { normalizeRichLinkHref } from "./richLinks";
 import { createRichMarkdownLinkInputRule } from "./richMarkdownLinkInput";
 import { createRichMarkdownBreakInputRule } from "./richMarkdownBreakInput";
@@ -666,6 +670,15 @@ const RichBulletList = BulletList.extend({
     );
   },
 
+  addInputRules() {
+    return [wrappingInputRule({
+      find: /^\s*([-+*])\s$/,
+      type: this.type,
+      getAttributes: (match) => ({ markdownMarker: match[1] }),
+      joinPredicate: (match, node) => safeBulletListMarker(node.attrs.markdownMarker) === match[1]
+    })];
+  },
+
   renderHTML({ node, HTMLAttributes }) {
     return [
       "ul",
@@ -689,6 +702,19 @@ const RichOrderedList = OrderedList.extend({
       markdownDelimiter: delimiterAttribute("."),
       markdownLoose: booleanMarkdownAttribute(false)
     };
+  },
+
+  markdownTokenizer: orderedListMarkdownTokenizer,
+
+  addInputRules() {
+    return [wrappingInputRule({
+      find: /^(\d+)([.)])\s$/,
+      type: this.type,
+      getAttributes: (match) => ({ start: Number(match[1]), markdownDelimiter: match[2] }),
+      joinPredicate: (match, node) => (!node.attrs.type || node.attrs.type === "1")
+        && node.childCount + Number(node.attrs.start ?? 1) === Number(match[1])
+        && safeOrderedListDelimiter(node.attrs.markdownDelimiter) === match[2]
+    })];
   },
 
   parseMarkdown: (token, helpers) => {
@@ -735,13 +761,9 @@ const RichListItem = ListItem.extend({
       }
       return "- ";
     })(context);
-    // Tiptap retains one marker-relative space on parsed ordered-list soft breaks.
-    return renderListItemMarkdown(
-      node,
-      helpers,
-      prefix,
-      context.parentType === "orderedList" ? 1 : 0
-    );
+    return renderListItemMarkdown(node, helpers, prefix, {
+      loose: Boolean((context as any).meta?.parentAttrs?.markdownLoose)
+    });
   }
 });
 
@@ -749,20 +771,19 @@ function renderListItemMarkdown(
   node: JSONContent,
   helpers: MarkdownRenderHelpers,
   prefix: string,
-  parsedContinuationIndent = 0
+  { childIndentWidth = prefix.length, loose = false }: { childIndentWidth?: number; loose?: boolean } = {}
 ): string {
   if (!Array.isArray(node.content)) return "";
 
   const [content, ...children] = node.content;
   const mainContent = content ? helpers.renderChildren([content]) : "";
   const continuationIndent = " ".repeat(prefix.length);
+  // CommonMark only keeps a block inside the item when it reaches the item's
+  // content column, which is the marker width ("1. " is 3, "10. " is 4).
+  const childIndent = " ".repeat(childIndentWidth);
   const indentedMainContent = mainContent
     .split("\n")
-    .map((line, index) => {
-      if (index === 0) return line;
-      const removableIndent = Math.min(parsedContinuationIndent, line.search(/\S|$/));
-      return `${continuationIndent}${line.slice(removableIndent)}`;
-    })
+    .map((line, index) => (index === 0 ? line : `${continuationIndent}${line}`))
     .join("\n");
   let output = `${prefix}${indentedMainContent}`;
 
@@ -772,23 +793,29 @@ function renderListItemMarkdown(
 
     const indentedChild = childContent
       .split("\n")
-      .map((line) => helpers.indent(line))
+      .map((line) => (line ? `${childIndent}${line}` : line))
       .join("\n");
-    output += child.type === "paragraph" ? `\n\n${indentedChild}` : `\n${indentedChild}`;
+    output += loose || listItemChildNeedsBlankLine(child) ? `\n\n${indentedChild}` : `\n${indentedChild}`;
   });
 
   return output;
 }
 
-const RichOrderedListNormalization = Extension.create({
-  name: "richOrderedListNormalization",
+function listItemChildNeedsBlankLine(child: JSONContent): boolean {
+  if (child.type === "paragraph") return true;
+  // An indented code block cannot interrupt the paragraph above it.
+  return child.type === "codeBlock" && child.attrs?.markdownStyle === "indented" && !child.attrs?.language;
+}
+
+const RichListNormalization = Extension.create({
+  name: "richListNormalization",
 
   addProseMirrorPlugins() {
     return [new Plugin({
       appendTransaction: (transactions, _oldState, newState) => {
         if (!transactions.some((transaction) => transaction.docChanged)) return null;
 
-        const boundary = richAdjacentOrderedListBoundary(newState.doc);
+        const boundary = richAdjacentListBoundary(newState.doc);
         if (boundary === null) return null;
 
         try {
@@ -801,26 +828,22 @@ const RichOrderedListNormalization = Extension.create({
   }
 });
 
-function richAdjacentOrderedListBoundary(document: ProseMirrorNode): number | null {
+function richAdjacentListBoundary(document: ProseMirrorNode): number | null {
   let boundary: number | null = null;
   document.descendants((node, position, parent, index) => {
-    if (boundary !== null || !parent || index === 0 || node.type.name !== "orderedList") return;
+    if (boundary !== null || !parent || index === 0) return;
 
     const previous = parent.child(index - 1);
-    if (previous.type.name !== "orderedList") return;
-    if (richOrderedListAttrs(previous.attrs, node.attrs)) boundary = position;
+    if (canMergeRichLists({ type: previous.type.name, attrs: previous.attrs }, { type: node.type.name, attrs: node.attrs })) {
+      boundary = position;
+    }
   });
   return boundary;
 }
 
-function richOrderedListAttrs(left: Record<string, unknown>, right: Record<string, unknown>): boolean {
-  return (left.start ?? 1) === (right.start ?? 1)
-    && (left.markdownDelimiter ?? ".") === (right.markdownDelimiter ?? ".")
-    && (left.markdownLoose ?? false) === (right.markdownLoose ?? false)
-    && (left.type ?? null) === (right.type ?? null);
-}
-
 const RichTaskList = TaskList.extend({
+  markdownTokenizer: taskListMarkdownTokenizer,
+
   parseMarkdown: (token, helpers) => {
     const parsed = TaskList.config.parseMarkdown?.(token, helpers);
     if (!parsed || Array.isArray(parsed) || "mark" in parsed) return parsed ?? [];
@@ -859,7 +882,7 @@ const RichTaskItem = TaskItem.extend({
   renderMarkdown: (node, helpers) => {
     const marker = safeTaskListMarker(node.attrs?.markdownMarker);
     const checked = node.attrs?.checked ? safeTaskCheckedMarker(node.attrs?.markdownCheckedMarker) : " ";
-    return renderListItemMarkdown(node, helpers, `${marker} [${checked}] `);
+    return renderListItemMarkdown(node, helpers, `${marker} [${checked}] `, { childIndentWidth: marker.length + 1 });
   }
 });
 
@@ -1400,6 +1423,36 @@ const ProtectedMarkdownInline = Node.create({
   }
 });
 
+const RichListKeymap = Extension.create({
+  name: "richListKeymap",
+  // Ahead of Tiptap's list keymap, which lifts any item whose paragraph starts
+  // at the cursor and splits ordered lists.
+  priority: 200,
+
+  addKeyboardShortcuts() {
+    return {
+      Backspace: () => this.editor.commands.undoInputRule()
+        || richListBackspace(this.editor.state, this.editor.view.dispatch),
+      Enter: () => richOrderedListExitEmptyItem(this.editor.state, this.editor.view.dispatch)
+    };
+  }
+});
+
+const RichTabFallback = Extension.create({
+  name: "richTabFallback",
+  // Runs after list indentation, table cell navigation and code-block indent.
+  // When none of them applies, keep focus in the document instead of letting
+  // the browser move it to the next control.
+  priority: 10,
+
+  addKeyboardShortcuts() {
+    return {
+      Tab: () => true,
+      "Shift-Tab": () => true
+    };
+  }
+});
+
 export function createRichMarkdownExtensions(
   documentFilePath: string | null,
   options: RichMarkdownExtensionOptions = {}
@@ -1437,12 +1490,14 @@ export function createRichMarkdownExtensions(
       isAllowedUri: (href) => normalizeRichLinkHref(href ?? "") !== null
     }),
     createRichMermaidDiagram(options),
-    RichCodeBlock,
+    RichCodeBlock.configure({ enableTabIndentation: true, tabSize: 2 }),
     RichCodeHighlight,
     RichBulletList,
     RichOrderedList,
     RichListItem,
-    RichOrderedListNormalization,
+    RichListNormalization,
+    RichListKeymap,
+    RichTabFallback,
     RichTaskList,
     RichTaskItem.configure({ nested: true }),
     Image.extend({

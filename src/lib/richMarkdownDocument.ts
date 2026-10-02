@@ -1,18 +1,20 @@
 import type { JSONContent } from "@tiptap/core";
 
-export function normalizeRichOrderedLists(document: JSONContent): JSONContent {
-  return normalizeRichOrderedListNode(document);
+// Markdown cannot keep two adjacent lists of the same kind apart, so the
+// projection merges them the way a Markdown parser would read them back.
+export function normalizeRichAdjacentLists(document: JSONContent): JSONContent {
+  return normalizeRichAdjacentListNode(document);
 }
 
-function normalizeRichOrderedListNode(node: JSONContent): JSONContent {
+function normalizeRichAdjacentListNode(node: JSONContent): JSONContent {
   if (!Array.isArray(node.content)) return node;
 
-  const content = node.content.map(normalizeRichOrderedListNode);
+  const content = node.content.map(normalizeRichAdjacentListNode);
   const merged: JSONContent[] = [];
 
   for (const child of content) {
     const previous = merged.at(-1);
-    if (previous && canMergeRichOrderedLists(previous, child)) {
+    if (previous && canMergeRichLists(previous, child)) {
       merged[merged.length - 1] = {
         ...previous,
         content: [...(previous.content ?? []), ...(child.content ?? [])]
@@ -25,13 +27,30 @@ function normalizeRichOrderedListNode(node: JSONContent): JSONContent {
   return { ...node, content: merged };
 }
 
-function canMergeRichOrderedLists(left: JSONContent, right: JSONContent): boolean {
-  if (left.type !== "orderedList" || right.type !== "orderedList") return false;
+export function canMergeRichLists(left: Pick<JSONContent, "type" | "attrs">, right: Pick<JSONContent, "type" | "attrs">): boolean {
+  if (left.type !== right.type) return false;
 
-  return (left.attrs?.start ?? 1) === (right.attrs?.start ?? 1)
-    && (left.attrs?.markdownDelimiter ?? ".") === (right.attrs?.markdownDelimiter ?? ".")
-    && (left.attrs?.markdownLoose ?? false) === (right.attrs?.markdownLoose ?? false)
-    && (left.attrs?.type ?? null) === (right.attrs?.type ?? null);
+  switch (left.type) {
+    case "orderedList":
+      return (left.attrs?.start ?? 1) === (right.attrs?.start ?? 1)
+        && (left.attrs?.markdownDelimiter ?? ".") === (right.attrs?.markdownDelimiter ?? ".")
+        && (left.attrs?.markdownLoose ?? false) === (right.attrs?.markdownLoose ?? false)
+        && (left.attrs?.type ?? null) === (right.attrs?.type ?? null);
+    case "bulletList":
+      return (left.attrs?.markdownMarker ?? "-") === (right.attrs?.markdownMarker ?? "-")
+        && (left.attrs?.markdownLoose ?? false) === (right.attrs?.markdownLoose ?? false);
+    default:
+      return false;
+  }
+}
+
+/**
+ * Keeps a final line break that the source had: the Markdown serializer never
+ * emits one, and editing in the visual editor must not strip it from the file.
+ */
+export function withPreservedTrailingLineBreak(previous: string, next: string): string {
+  if (!next || next.endsWith("\n") || !previous.endsWith("\n")) return next;
+  return `${next}\n`;
 }
 
 export function withoutGeneratedTrailingParagraph(document: JSONContent): JSONContent {

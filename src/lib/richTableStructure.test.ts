@@ -1,7 +1,7 @@
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { CellSelection, TableMap } from "@tiptap/pm/tables";
 import { describe, expect, it } from "vitest";
-import { richTableStructureTransaction, type RichTableStructureCommand } from "./richTableStructure";
+import { richTableSelectionIncludesHeaderRow, richTableStructureTransaction, type RichTableStructureCommand } from "./richTableStructure";
 import { tableState } from "./richTableSelection.testHelpers";
 
 describe("rich table structure transactions", () => {
@@ -96,3 +96,11 @@ function selectedCell(state: EditorState): { row: number; column: number } | nul
   const rect = map.findCell(relativePosition);
   return { row: rect.top, column: rect.left };
 }
+
+describe("rich table header row guard", () => {
+  it("reports whether the cursor or cell selection touches the header row", () => {
+    expect(richTableSelectionIncludesHeaderRow(selectCell(tableState(), 0, 1))).toBe(true);
+    expect(richTableSelectionIncludesHeaderRow(selectCell(tableState(), 1, 0))).toBe(false);
+    expect(richTableSelectionIncludesHeaderRow(tableState())).toBe(true);
+  });
+});
