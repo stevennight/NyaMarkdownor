@@ -75,6 +75,8 @@ import { AppMenuBar, type AppMenu, type AppMenuItem } from "./AppMenuBar";
 import { FormatToolbar } from "./FormatToolbar";
 import type { SettingsCategoryId } from "./SettingsDialog";
 import { EMPTY_FORMAT_STATE, type FormatState } from "../lib/formatState";
+import type { RichTablePosition } from "../lib/richTableGrid";
+import { richTableCursor, sourceTableCursor, tableActionAvailability } from "../lib/tableActionAvailability";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
@@ -543,6 +545,7 @@ export function App() {
   const [tableSizeDraft, setTableSizeDraft] = useState<TableSizeDraft>({ columns: 3, bodyRows: 2 });
   const [richTableActive, setRichTableActive] = useState(false);
   const [formatState, setFormatState] = useState<FormatState>(EMPTY_FORMAT_STATE);
+  const [richTablePositionState, setRichTablePositionState] = useState<RichTablePosition | null>(null);
   const [richTableSelection, setRichTableSelection] = useState<RichTableSelectionSummary | null>(null);
   const [linkDialogState, setLinkDialogState] = useState<{ text: string; href: string; canUnlink: boolean } | null>(null);
   const [findOpen, setFindOpen] = useState(false);
@@ -784,6 +787,16 @@ export function App() {
     [documentState.markdown, selection.from, viewMode]
   );
   const activeTable = sourceActiveTable;
+  const tableCursor = viewMode === "wysiwyg"
+    ? richTablePositionState ? richTableCursor(richTablePositionState) : null
+    : activeTable ? sourceTableCursor(activeTable) : null;
+  const tableActions = useMemo(() => tableActionAvailability(tableCursor), [
+    tableCursor?.headerRow,
+    tableCursor?.bodyIndex,
+    tableCursor?.bodyCount,
+    tableCursor?.column,
+    tableCursor?.columnCount
+  ]);
   const currentDocumentSnapshotKey = useMemo(
     () => fileHistoryDocumentKey({ ...documentState, documentId: activeTab.id }),
     [activeTab.id, documentState.fileName, documentState.filePath]
@@ -7044,7 +7057,7 @@ export function App() {
     { id: "insert-table", title: "Insert Table", group: "Table", detail: `${tableSizeDraft.columns} columns, ${tableSizeDraft.bodyRows + 1} rows`, shortcut: "Ctrl+Alt+T", run: openInsertTableDialog },
     { id: "align-table", title: "Align Table", group: "Table", shortcut: "Ctrl+Alt+L", disabled: !activeTable, run: () => runTableCommand("normalize") },
     { id: "select-table-cell", title: "Select Table Cell", group: "Table", shortcut: "Ctrl+Alt+E", disabled: !tableInCurrentEditor, run: selectTableCell },
-    { id: "select-table-row", title: "Select Table Row", group: "Table", shortcut: "Ctrl+Alt+R", disabled: !tableInCurrentEditor || (viewMode !== "wysiwyg" && activeTable!.position.row === 1), run: selectTableRow },
+    { id: "select-table-row", title: "Select Table Row", group: "Table", shortcut: "Ctrl+Alt+R", disabled: !tableActions.selectRow, run: selectTableRow },
     { id: "select-table-column", title: "Select Table Column", group: "Table", shortcut: "Ctrl+Alt+C", disabled: !tableInCurrentEditor, run: selectTableColumn },
     { id: "select-table-column-body", title: "Select Table Column Body", group: "Table", shortcut: "Ctrl+Alt+Shift+C", disabled: !activeTable || activeTable.table.rows.length === 0, run: selectTableColumnBody },
     { id: "select-table-header", title: "Select Table Header", group: "Table", shortcut: "Ctrl+Alt+H", disabled: !activeTable, run: selectTableHeader },
@@ -7054,17 +7067,17 @@ export function App() {
     { id: "add-row-before", title: "Add Table Row Above", group: "Table", shortcut: "Ctrl+Alt+Shift+Enter", disabled: !tableInCurrentEditor, run: addRowBefore },
     { id: "add-column", title: "Add Table Column", group: "Table", shortcut: "Ctrl+Alt+]", disabled: !tableInCurrentEditor, run: () => runTableCommand("add-column") },
     { id: "add-column-before", title: "Add Table Column Left", group: "Table", shortcut: "Ctrl+Alt+[", disabled: !tableInCurrentEditor, run: addColumnBefore },
-    { id: "delete-row", title: "Delete Table Row", group: "Table", disabled: !tableInCurrentEditor || (viewMode !== "wysiwyg" && activeTable!.position.row < 2), run: removeRow },
-    { id: "delete-column", title: "Delete Table Column", group: "Table", disabled: !tableInCurrentEditor || (viewMode !== "wysiwyg" && activeTable!.table.headers.length <= 1), run: removeColumn },
+    { id: "delete-row", title: "Delete Table Row", group: "Table", disabled: !tableActions.deleteRow, run: removeRow },
+    { id: "delete-column", title: "Delete Table Column", group: "Table", disabled: !tableActions.deleteColumn, run: removeColumn },
     { id: "delete-table", title: "Delete Table", group: "Table", disabled: !tableInCurrentEditor, run: removeTable },
-    { id: "duplicate-row", title: "Duplicate Table Row", group: "Table", disabled: !tableInCurrentEditor || (viewMode !== "wysiwyg" && activeTable!.position.row < 2), run: duplicateRow },
+    { id: "duplicate-row", title: "Duplicate Table Row", group: "Table", disabled: !tableActions.duplicateRow, run: duplicateRow },
     { id: "duplicate-column", title: "Duplicate Table Column", group: "Table", disabled: !tableInCurrentEditor, run: duplicateColumn },
-    { id: "move-row-up", title: "Move Table Row Up", group: "Table", shortcut: "Ctrl+Alt+Up", disabled: !tableInCurrentEditor || (viewMode !== "wysiwyg" && activeTable!.position.row <= 2), run: moveRowUp },
-    { id: "move-row-down", title: "Move Table Row Down", group: "Table", shortcut: "Ctrl+Alt+Down", disabled: !tableInCurrentEditor || (viewMode !== "wysiwyg" && (activeTable!.position.row < 2 || activeTable!.position.row >= activeTable!.table.rows.length + 1)), run: moveRowDown },
-    { id: "move-column-left", title: "Move Table Column Left", group: "Table", shortcut: "Ctrl+Alt+Left", disabled: !tableInCurrentEditor || (viewMode !== "wysiwyg" && activeTable!.position.col <= 0), run: moveColumnLeft },
-    { id: "move-column-right", title: "Move Table Column Right", group: "Table", shortcut: "Ctrl+Alt+Right", disabled: !tableInCurrentEditor || (viewMode !== "wysiwyg" && activeTable!.position.col >= activeTable!.table.headers.length - 1), run: moveColumnRight },
-    { id: "sort-column-asc", title: "Sort Table Column Ascending", group: "Table", disabled: !tableInCurrentEditor || (viewMode !== "wysiwyg" && activeTable!.table.rows.length < 2), run: sortColumnAscending },
-    { id: "sort-column-desc", title: "Sort Table Column Descending", group: "Table", disabled: !tableInCurrentEditor || (viewMode !== "wysiwyg" && activeTable!.table.rows.length < 2), run: sortColumnDescending },
+    { id: "move-row-up", title: "Move Table Row Up", group: "Table", shortcut: "Ctrl+Alt+Up", disabled: !tableActions.moveRowUp, run: moveRowUp },
+    { id: "move-row-down", title: "Move Table Row Down", group: "Table", shortcut: "Ctrl+Alt+Down", disabled: !tableActions.moveRowDown, run: moveRowDown },
+    { id: "move-column-left", title: "Move Table Column Left", group: "Table", shortcut: "Ctrl+Alt+Left", disabled: !tableActions.moveColumnLeft, run: moveColumnLeft },
+    { id: "move-column-right", title: "Move Table Column Right", group: "Table", shortcut: "Ctrl+Alt+Right", disabled: !tableActions.moveColumnRight, run: moveColumnRight },
+    { id: "sort-column-asc", title: "Sort Table Column Ascending", group: "Table", disabled: !tableActions.sort, run: sortColumnAscending },
+    { id: "sort-column-desc", title: "Sort Table Column Descending", group: "Table", disabled: !tableActions.sort, run: sortColumnDescending },
     { id: "align-column-default", title: "Default Table Column Alignment", group: "Table", disabled: !tableInCurrentEditor, run: () => alignActiveColumn("none") },
     { id: "align-column-left", title: "Align Table Column Left", group: "Table", disabled: !tableInCurrentEditor, run: () => alignActiveColumn("left") },
     { id: "align-column-center", title: "Align Table Column Center", group: "Table", disabled: !tableInCurrentEditor, run: () => alignActiveColumn("center") },
@@ -7111,7 +7124,7 @@ export function App() {
       openWorkspaceFile
     ) : [])
   ];
-  }, [activeTab.id, activeTable, autoPreviewEnabled, backups, closedTabs, commandPaletteOpen, desktopRuntime, draftSnapshots, dirty, hasDirtyTabs, desktopLocalFilesAvailable, recentFiles, richTableActive, sidebarVisible, softSyntax, tabs, theme, viewMode, workspace, workspaceSortMode, documentState.markdown, documentState.filePath, documentState.fileName, documentState.fileStats, selectedTableCells, selection, tableSizeDraft]);
+  }, [activeTab.id, activeTable, autoPreviewEnabled, backups, closedTabs, commandPaletteOpen, desktopRuntime, draftSnapshots, dirty, hasDirtyTabs, desktopLocalFilesAvailable, recentFiles, richTableActive, sidebarVisible, softSyntax, tableActions, tabs, theme, viewMode, workspace, workspaceSortMode, documentState.markdown, documentState.filePath, documentState.fileName, documentState.fileStats, selectedTableCells, selection, tableSizeDraft]);
 
   const deferredMetricsMarkdown = useDeferredValue(documentState.markdown);
   const metricsMarkdown = documentState.markdown.length > DEFERRED_METRICS_THRESHOLD
@@ -7266,22 +7279,22 @@ export function App() {
           menuLabel("table-rows", "Rows"),
           menuItem("add-row-before", "Add row above", addRowBefore, { shortcut: "Ctrl+Alt+Shift+Enter", disabled: !tableInEditor }),
           menuItem("add-row", "Add row below", addRow, { shortcut: "Ctrl+Alt+Enter", disabled: !tableInEditor }),
-          menuItem("duplicate-row", "Duplicate row", duplicateRow, { disabled: !tableInEditor || Boolean(sourceTable && sourceTable.position.row < 2) }),
-          menuItem("move-row-up", "Move row up", moveRowUp, { shortcut: "Ctrl+Alt+Up", disabled: !tableInEditor || Boolean(sourceTable && sourceTable.position.row <= 2) }),
-          menuItem("move-row-down", "Move row down", moveRowDown, { shortcut: "Ctrl+Alt+Down", disabled: !tableInEditor || Boolean(sourceTable && (sourceTable.position.row < 2 || sourceTable.position.row >= sourceTable.table.rows.length + 1)) }),
+          menuItem("duplicate-row", "Duplicate row", duplicateRow, { disabled: !tableActions.duplicateRow }),
+          menuItem("move-row-up", "Move row up", moveRowUp, { shortcut: "Ctrl+Alt+Up", disabled: !tableActions.moveRowUp }),
+          menuItem("move-row-down", "Move row down", moveRowDown, { shortcut: "Ctrl+Alt+Down", disabled: !tableActions.moveRowDown }),
           menuLabel("table-columns", "Columns"),
           menuItem("add-column-before", "Add column left", addColumnBefore, { shortcut: "Ctrl+Alt+[", disabled: !tableInEditor }),
           menuItem("add-column", "Add column right", addColumn, { shortcut: "Ctrl+Alt+]", disabled: !tableInEditor }),
           menuItem("duplicate-column", "Duplicate column", duplicateColumn, { disabled: !tableInEditor }),
-          menuItem("move-column-left", "Move column left", moveColumnLeft, { shortcut: "Ctrl+Alt+Left", disabled: !tableInEditor || Boolean(sourceTable && sourceTable.position.col <= 0) }),
-          menuItem("move-column-right", "Move column right", moveColumnRight, { shortcut: "Ctrl+Alt+Right", disabled: !tableInEditor || Boolean(sourceTable && sourceTable.position.col >= sourceTable.table.headers.length - 1) }),
+          menuItem("move-column-left", "Move column left", moveColumnLeft, { shortcut: "Ctrl+Alt+Left", disabled: !tableActions.moveColumnLeft }),
+          menuItem("move-column-right", "Move column right", moveColumnRight, { shortcut: "Ctrl+Alt+Right", disabled: !tableActions.moveColumnRight }),
           menuLabel("table-alignment", "Alignment"),
           menuItem("align-default", "Default alignment", () => alignActiveColumn("none"), { disabled: !tableInEditor }),
           menuItem("align-left", "Align left", () => alignActiveColumn("left"), { disabled: !tableInEditor }),
           menuItem("align-center", "Align center", () => alignActiveColumn("center"), { disabled: !tableInEditor }),
           menuItem("align-right", "Align right", () => alignActiveColumn("right"), { disabled: !tableInEditor }),
-          menuItem("sort-asc", "Sort ascending", sortColumnAscending, { disabled: !tableInEditor }),
-          menuItem("sort-desc", "Sort descending", sortColumnDescending, { disabled: !tableInEditor }),
+          menuItem("sort-asc", "Sort ascending", sortColumnAscending, { disabled: !tableActions.sort }),
+          menuItem("sort-desc", "Sort descending", sortColumnDescending, { disabled: !tableActions.sort }),
           menuLabel("table-selection", "Selection"),
           menuItem("select-cell", "Select cell", selectTableCell, { shortcut: "Ctrl+Alt+E", disabled: !tableInEditor }),
           menuItem("select-row", "Select row", selectTableRow, { shortcut: "Ctrl+Alt+R", disabled: !tableInEditor }),
@@ -7293,8 +7306,8 @@ export function App() {
           menuItem("copy-table-tsv", "Copy Table as TSV", copyCurrentTableAsTsv, { disabled: !tableInEditor }),
           menuItem("copy-table-csv", "Copy Table as CSV", copyCurrentTableAsCsv, { disabled: !tableInEditor }),
           menuSeparator("table-delete"),
-          menuItem("delete-row", "Delete row", removeRow, { danger: true, disabled: !tableInEditor || Boolean(sourceTable && sourceTable.position.row < 2) }),
-          menuItem("delete-column", "Delete column", removeColumn, { danger: true, disabled: !tableInEditor || Boolean(sourceTable && sourceTable.table.headers.length <= 1) }),
+          menuItem("delete-row", "Delete row", removeRow, { danger: true, disabled: !tableActions.deleteRow }),
+          menuItem("delete-column", "Delete column", removeColumn, { danger: true, disabled: !tableActions.deleteColumn }),
           menuItem("delete-table", "Delete table", removeTable, { danger: true, disabled: !tableInEditor })
         ];
       case "view":
@@ -7578,7 +7591,7 @@ export function App() {
           </div>
           <MenuSectionLabel>{t("Selection")}</MenuSectionLabel>
           <ContextTableMenuItem label={t("Select cell")} icon={<TextSelect />} onClick={() => selectTableCell()} />
-          <ContextTableMenuItem label={t("Select row")} icon={<Rows3 />} disabled={tableContextMenu.surface === "source" && activeTable?.position.row === 1} onClick={() => selectTableRow()} />
+          <ContextTableMenuItem label={t("Select row")} icon={<Rows3 />} disabled={!tableActions.selectRow} onClick={() => selectTableRow()} />
           <ContextTableMenuItem label={t("Select column")} icon={<Columns3 />} onClick={() => selectTableColumn()} />
           <ContextTableMenuItem label={t("Select table")} icon={<SquareMousePointer />} onClick={() => selectActiveTable()} />
           <ContextTableMenuItem label={t("Copy cell content")} icon={<ClipboardCopy />} onClick={() => copyActiveTableCell()} />
@@ -7587,16 +7600,16 @@ export function App() {
           <MenuSectionLabel>{t("Rows")}</MenuSectionLabel>
           <ContextTableMenuItem label={t("Add row above")} icon={<ArrowUp />} onClick={() => addRowBefore()} />
           <ContextTableMenuItem label={t("Add row below")} icon={<ArrowDown />} onClick={() => addRow()} />
-          <ContextTableMenuItem label={t("Duplicate row")} icon={<CopyPlus />} disabled={tableContextMenu.surface === "source" && (activeTable?.position.row ?? 1) < 2} onClick={() => duplicateRow()} />
-          <ContextTableMenuItem label={t("Move row up")} icon={<ArrowUp />} disabled={tableContextMenu.surface === "source" && (activeTable?.position.row ?? 2) <= 2} onClick={() => moveRowUp()} />
-          <ContextTableMenuItem label={t("Move row down")} icon={<ArrowDown />} disabled={tableContextMenu.surface === "source" && Boolean(activeTable && (activeTable.position.row < 2 || activeTable.position.row >= activeTable.table.rows.length + 1))} onClick={() => moveRowDown()} />
+          <ContextTableMenuItem label={t("Duplicate row")} icon={<CopyPlus />} disabled={!tableActions.duplicateRow} onClick={() => duplicateRow()} />
+          <ContextTableMenuItem label={t("Move row up")} icon={<ArrowUp />} disabled={!tableActions.moveRowUp} onClick={() => moveRowUp()} />
+          <ContextTableMenuItem label={t("Move row down")} icon={<ArrowDown />} disabled={!tableActions.moveRowDown} onClick={() => moveRowDown()} />
 
           <MenuSectionLabel>{t("Columns")}</MenuSectionLabel>
           <ContextTableMenuItem label={t("Add column left")} icon={<ArrowLeft />} onClick={() => addColumnBefore()} />
           <ContextTableMenuItem label={t("Add column right")} icon={<ArrowRight />} onClick={() => addColumn()} />
           <ContextTableMenuItem label={t("Duplicate column")} icon={<CopyPlus />} onClick={() => duplicateColumn()} />
-          <ContextTableMenuItem label={t("Move column left")} icon={<ArrowLeft />} disabled={tableContextMenu.surface === "source" && (activeTable?.position.col ?? 0) <= 0} onClick={() => moveColumnLeft()} />
-          <ContextTableMenuItem label={t("Move column right")} icon={<ArrowRight />} disabled={tableContextMenu.surface === "source" && Boolean(activeTable && activeTable.position.col >= activeTable.table.headers.length - 1)} onClick={() => moveColumnRight()} />
+          <ContextTableMenuItem label={t("Move column left")} icon={<ArrowLeft />} disabled={!tableActions.moveColumnLeft} onClick={() => moveColumnLeft()} />
+          <ContextTableMenuItem label={t("Move column right")} icon={<ArrowRight />} disabled={!tableActions.moveColumnRight} onClick={() => moveColumnRight()} />
 
           <MenuSectionLabel>{t("Alignment")}</MenuSectionLabel>
           {tableContextMenu.surface === "source" && <ContextTableMenuItem label={t("Align table")} icon={<AlignJustify />} onClick={() => normalizeTable()} />}
@@ -7604,12 +7617,12 @@ export function App() {
           <ContextTableMenuItem label={t("Align left")} icon={<AlignLeft />} onClick={() => alignActiveColumn("left")} />
           <ContextTableMenuItem label={t("Align center")} icon={<AlignCenter />} onClick={() => alignActiveColumn("center")} />
           <ContextTableMenuItem label={t("Align right")} icon={<AlignRight />} onClick={() => alignActiveColumn("right")} />
-          <ContextTableMenuItem label={t("Sort ascending")} icon={<ArrowDownAZ />} disabled={tableContextMenu.surface === "source" && Boolean(activeTable && activeTable.table.rows.length < 2)} onClick={() => sortColumnAscending()} />
-          <ContextTableMenuItem label={t("Sort descending")} icon={<ArrowDownZA />} disabled={tableContextMenu.surface === "source" && Boolean(activeTable && activeTable.table.rows.length < 2)} onClick={() => sortColumnDescending()} />
+          <ContextTableMenuItem label={t("Sort ascending")} icon={<ArrowDownAZ />} disabled={!tableActions.sort} onClick={() => sortColumnAscending()} />
+          <ContextTableMenuItem label={t("Sort descending")} icon={<ArrowDownZA />} disabled={!tableActions.sort} onClick={() => sortColumnDescending()} />
 
           <MenuSectionLabel>{t("Danger zone")}</MenuSectionLabel>
-          <ContextTableMenuItem label={t("Delete row")} icon={<ScissorsLineDashed />} disabled={tableContextMenu.surface === "source" && (activeTable?.position.row ?? 1) < 2} onClick={() => removeRow()} danger />
-          <ContextTableMenuItem label={t("Delete column")} icon={<Trash2 />} disabled={tableContextMenu.surface === "source" && Boolean(activeTable && activeTable.table.headers.length <= 1)} onClick={() => removeColumn()} danger />
+          <ContextTableMenuItem label={t("Delete row")} icon={<ScissorsLineDashed />} disabled={!tableActions.deleteRow} onClick={() => removeRow()} danger />
+          <ContextTableMenuItem label={t("Delete column")} icon={<Trash2 />} disabled={!tableActions.deleteColumn} onClick={() => removeColumn()} danger />
           <ContextTableMenuItem label={t("Delete table")} icon={<Trash2 />} onClick={() => removeTable()} danger />
         </div>
       )}
@@ -7906,6 +7919,7 @@ export function App() {
                 onEditLink={openRichLinkEditor}
                 onTableContextMenu={(position) => openTableContextMenu("rich", position)}
                 onFormatStateChange={setFormatState}
+                onTablePositionChange={setRichTablePositionState}
                 onToast={showToast}
                 scrollProgress={richScrollProgressRef.current.get(activeTab.id) ?? activeTab.richScrollProgress ?? 0}
                 onScrollProgress={(progress) => rememberRichScrollProgress(activeTab.id, progress)}

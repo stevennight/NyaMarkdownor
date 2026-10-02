@@ -349,6 +349,8 @@ function createEditorExtensions({
       { key: "Tab", run: indentMarkdownList },
       { key: "Shift-Tab", run: outdentMarkdownList },
       { key: "Enter", run: addTableRowFromEnter },
+      // Ctrl+Enter adds a row below in tables, as in the visual editor.
+      { key: "Mod-Enter", run: addTableRowFromEnter },
       { key: "Enter", run: continueMarkdownLine },
       indentWithTab,
       ...defaultKeymap,

@@ -2,7 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import { type Editor, type JSONContent } from "@tiptap/core";
-import { BetweenHorizontalEnd, BetweenVerticalEnd, Bold, Code2, Columns3, ExternalLink, Italic, Link2, Link2Off, Rows3, SquareMousePointer, Strikethrough, Trash2 } from "lucide-react";
+import { AlignCenter, AlignLeft, AlignRight, ArrowDown, ArrowDownAZ, ArrowDownZA, ArrowLeft, ArrowRight, ArrowUp, BetweenHorizontalEnd, BetweenHorizontalStart, BetweenVerticalEnd, BetweenVerticalStart, Bold, Code2, Columns3, CopyPlus, ExternalLink, Italic, Link2, Link2Off, Rows3, SquareMousePointer, Strikethrough, Trash2 } from "lucide-react";
 import { type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { TextSelection, type SelectionBookmark } from "@tiptap/pm/state";
 import { CellSelection, TableMap } from "@tiptap/pm/tables";
@@ -39,6 +39,9 @@ import { markdownRangeToClipboardPayload } from "../lib/markdown";
 import { beginEditorInput, commitEditorInput, markStartupMilestone } from "../lib/performanceDiagnostics";
 import { isPlainPasteShortcut } from "../lib/appShortcuts";
 import { sameFormatState, type BlockStyle, type FormatState } from "../lib/formatState";
+import { moveCursorToRichTableCell, richTableCellCursor, richTableLineSelection, richTablePosition, type RichTablePosition } from "../lib/richTableGrid";
+import { richTableCursor, tableActionAvailability } from "../lib/tableActionAvailability";
+import { RichTableHandles } from "./RichTableHandles";
 import { convertWordListParagraphs, richPasteSliceKeepingBlockType } from "../lib/richPastedHtml";
 
 const EMPTY_SEARCH_MATCHES: readonly TextRange[] = [];
@@ -102,6 +105,7 @@ type RichMarkdownEditorProps = {
   onEditLink: (href: string, canUnlink: boolean) => void;
   onTableContextMenu?: (position: { left: number; top: number }) => void;
   onFormatStateChange?: (state: FormatState) => void;
+  onTablePositionChange?: (position: RichTablePosition | null) => void;
   onToast: (message: string) => void;
   scrollProgress?: number;
   onScrollProgress?: (progress: number) => void;
@@ -112,7 +116,7 @@ type RichMarkdownEditorProps = {
 };
 
 export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, RichMarkdownEditorProps>(function RichMarkdownEditor(
-  { documentFilePath, markdown, t, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onReady, onActiveHeadingIndexChange, onOpenLink, onEditLink, onTableContextMenu, onFormatStateChange, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
+  { documentFilePath, markdown, t, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onReady, onActiveHeadingIndexChange, onOpenLink, onEditLink, onTableContextMenu, onFormatStateChange, onTablePositionChange, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
   forwardedRef
 ) {
   const tRef = useRef(t);
@@ -129,6 +133,9 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   const onToastRef = useRef(onToast);
   const onFormatStateChangeRef = useRef(onFormatStateChange);
   const formatStateRef = useRef<FormatState | null>(null);
+  const onTablePositionChangeRef = useRef(onTablePositionChange);
+  const [tablePosition, setTablePosition] = useState<RichTablePosition | null>(null);
+  const tablePositionRef = useRef<RichTablePosition | null | undefined>(undefined);
   const onScrollProgressRef = useRef(onScrollProgress);
   // Set by Ctrl+Shift+V so the following paste is inserted as plain text.
   const plainPasteRequestedRef = useRef(false);
@@ -162,6 +169,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   onTableContextMenuRef.current = onTableContextMenu;
   onToastRef.current = onToast;
   onFormatStateChangeRef.current = onFormatStateChange;
+  onTablePositionChangeRef.current = onTablePositionChange;
   onScrollProgressRef.current = onScrollProgress;
   if (!markdownSyncRef.current) {
     markdownSyncRef.current = createRichMarkdownSyncScheduler((nextMarkdown, source) => {
@@ -221,6 +229,12 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
       transformPasted: (slice, view) => richPasteSliceKeepingBlockType(slice, view.state),
       handleKeyDown: (_view, event) => {
         plainPasteRequestedRef.current = isPlainPasteShortcut(event);
+        if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key === "Enter") {
+          const currentEditor = editorRef.current;
+          if (!currentEditor || !insertRichTableRowBelow(currentEditor)) return false;
+          event.preventDefault();
+          return true;
+        }
         if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "a") {
           const currentEditor = editorRef.current;
           const nextSelection = currentEditor ? nextRichTableSelectAllSelection(currentEditor.state) : null;
@@ -433,6 +447,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
       headingPositionsRef.current = richHeadingPositions(currentEditor);
       reportActiveRichHeading(currentEditor, headingPositionsRef, activeHeadingIndexRef, onActiveHeadingIndexChangeRef);
       reportFormatState(currentEditor, formatStateRef, onFormatStateChangeRef);
+      reportTablePosition(currentEditor);
     },
     onCreate: ({ editor: currentEditor }) => {
       editorRef.current = currentEditor;
@@ -444,6 +459,7 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
       headingPositionsRef.current = richHeadingPositions(currentEditor);
       reportActiveRichHeading(currentEditor, headingPositionsRef, activeHeadingIndexRef, onActiveHeadingIndexChangeRef);
       reportFormatState(currentEditor, formatStateRef, onFormatStateChangeRef);
+      reportTablePosition(currentEditor);
     },
     onSelectionUpdate: ({ editor: currentEditor }) => {
       reportTableContext(currentEditor, tableActiveRef, onTableContextChangeRef);
@@ -451,8 +467,18 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
       reportSelection(currentEditor, onSelectionChangeRef);
       reportActiveRichHeading(currentEditor, headingPositionsRef, activeHeadingIndexRef, onActiveHeadingIndexChangeRef);
       reportFormatState(currentEditor, formatStateRef, onFormatStateChangeRef);
+      reportTablePosition(currentEditor);
     }
   });
+
+  function reportTablePosition(currentEditor: Editor) {
+    const next = richTablePosition(currentEditor.state);
+    const previous = tablePositionRef.current;
+    if (previous !== undefined && sameRichTablePosition(previous, next)) return;
+    tablePositionRef.current = next;
+    setTablePosition(next);
+    onTablePositionChangeRef.current?.(next);
+  }
 
   // Keep the instance available even during the short window before Tiptap's
   // onCreate callback runs. Input can arrive as soon as the editor is painted.
@@ -727,19 +753,30 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
             pluginKey="rich-table-context-menu"
             className="rich-context-toolbar rich-table-context-toolbar"
             updateDelay={40}
-            options={{ strategy: "fixed", placement: "top", offset: 8, shift: { padding: 10 }, scrollTarget: bubbleScrollTarget, hide: { boundary: bubbleScrollTarget ?? undefined } }}
+            getReferencedVirtualElement={() => richCellSelectionReference(editor)}
+            options={{ strategy: "fixed", placement: "top", offset: 18, shift: { padding: 10 }, scrollTarget: bubbleScrollTarget, hide: { boundary: bubbleScrollTarget ?? undefined } }}
             shouldShow={({ editor: currentEditor, state }) => (
               currentEditor.isEditable && state.selection instanceof CellSelection
             )}
             onMouseDown={(event) => event.preventDefault()}
           >
-            <RichContextButton label={t("Add row below")} icon={<BetweenHorizontalEnd />} onClick={() => editor.chain().focus().addRowAfter().run()} />
-            <RichContextButton label={t("Add column right")} icon={<BetweenVerticalEnd />} onClick={() => editor.chain().focus().addColumnAfter().run()} />
-            <span className="rich-context-divider" aria-hidden="true" />
-            <RichContextButton label={t("Select row")} icon={<Rows3 />} onClick={() => runRichTableSelectionCommand(editor, "select-row")} />
-            <RichContextButton label={t("Select column")} icon={<Columns3 />} onClick={() => runRichTableSelectionCommand(editor, "select-column")} />
-            <RichContextButton label={t("Select table")} icon={<SquareMousePointer />} onClick={() => runRichTableSelectionCommand(editor, "select-table")} />
+            <RichTableBar editor={editor} t={t} />
           </BubbleMenu>
+          {tablePosition && editor.isEditable && (
+            <RichTableHandles
+              editor={editor}
+              host={bubbleScrollTarget}
+              position={tablePosition}
+              t={t}
+              onSelectLine={(kind, index) => {
+                const selection = richTableLineSelection(editor.state, tablePosition.tablePos, kind, index);
+                if (!selection) return;
+                editor.view.dispatch(editor.state.tr.setSelection(selection));
+                editor.commands.focus();
+              }}
+              onAppendLine={(kind) => appendRichTableLine(editor, tablePosition, kind)}
+            />
+          )}
         </>
       )}
       <EditorContent editor={editor} />
@@ -747,24 +784,107 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   );
 });
 
+/** Floating actions for a cell selection, matched to what is selected. */
+function RichTableBar({ editor, t }: { editor: Editor; t: Translator }) {
+  const context = useEditorState({
+    editor,
+    selector: ({ editor: currentEditor }) => {
+      const summary = richTableSelectionSummary(currentEditor.state);
+      const position = richTablePosition(currentEditor.state);
+      return {
+        kind: summary?.kind ?? null,
+        includesHeader: richTableSelectionIncludesHeaderRow(currentEditor.state),
+        actions: tableActionAvailability(position ? richTableCursor(position) : null)
+      };
+    },
+    equalityFn: (left, right) => Boolean(left && right
+      && left.kind === right.kind
+      && left.includesHeader === right.includesHeader
+      && JSON.stringify(left.actions) === JSON.stringify(right.actions))
+  });
+  if (!context?.kind) return null;
+
+  const { kind, includesHeader, actions } = context;
+  const run = (command: RichTableCommand) => () => { runRichTableCommand(editor, command); };
+
+  if (kind === "row") {
+    return (
+      <>
+        <RichContextButton label={t("Add row above")} icon={<BetweenHorizontalStart />} onClick={run("add-row-before")} />
+        <RichContextButton label={t("Add row below")} icon={<BetweenHorizontalEnd />} onClick={run("add-row")} />
+        <span className="rich-context-divider" aria-hidden="true" />
+        <RichContextButton label={t("Move row up")} icon={<ArrowUp />} disabled={includesHeader || !actions.moveRowUp} onClick={run("move-row-up")} />
+        <RichContextButton label={t("Move row down")} icon={<ArrowDown />} disabled={includesHeader || !actions.moveRowDown} onClick={run("move-row-down")} />
+        <RichContextButton label={t("Duplicate row")} icon={<CopyPlus />} disabled={includesHeader} onClick={run("duplicate-row")} />
+        <span className="rich-context-divider" aria-hidden="true" />
+        <RichContextButton label={t("Delete row")} icon={<Trash2 />} danger disabled={includesHeader} onClick={run("delete-row")} />
+      </>
+    );
+  }
+
+  if (kind === "column") {
+    return (
+      <>
+        <RichContextButton label={t("Add column left")} icon={<BetweenVerticalStart />} onClick={run("add-column-before")} />
+        <RichContextButton label={t("Add column right")} icon={<BetweenVerticalEnd />} onClick={run("add-column")} />
+        <span className="rich-context-divider" aria-hidden="true" />
+        <RichContextButton label={t("Move column left")} icon={<ArrowLeft />} disabled={!actions.moveColumnLeft} onClick={run("move-column-left")} />
+        <RichContextButton label={t("Move column right")} icon={<ArrowRight />} disabled={!actions.moveColumnRight} onClick={run("move-column-right")} />
+        <span className="rich-context-divider" aria-hidden="true" />
+        <RichContextButton label={t("Align left")} icon={<AlignLeft />} onClick={() => { alignRichTableColumn(editor, "left"); }} />
+        <RichContextButton label={t("Align center")} icon={<AlignCenter />} onClick={() => { alignRichTableColumn(editor, "center"); }} />
+        <RichContextButton label={t("Align right")} icon={<AlignRight />} onClick={() => { alignRichTableColumn(editor, "right"); }} />
+        <RichContextButton label={t("Sort ascending")} icon={<ArrowDownAZ />} disabled={!actions.sort} onClick={() => { sortRichTableColumn(editor, "ascending"); }} />
+        <RichContextButton label={t("Sort descending")} icon={<ArrowDownZA />} disabled={!actions.sort} onClick={() => { sortRichTableColumn(editor, "descending"); }} />
+        <span className="rich-context-divider" aria-hidden="true" />
+        <RichContextButton label={t("Delete column")} icon={<Trash2 />} danger disabled={!actions.deleteColumn} onClick={run("delete-column")} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <RichContextButton label={t("Add row below")} icon={<BetweenHorizontalEnd />} onClick={run("add-row")} />
+      <RichContextButton label={t("Add column right")} icon={<BetweenVerticalEnd />} onClick={run("add-column")} />
+      <span className="rich-context-divider" aria-hidden="true" />
+      <RichContextButton label={t("Select row")} icon={<Rows3 />} onClick={() => { runRichTableSelectionCommand(editor, "select-row"); }} />
+      <RichContextButton label={t("Select column")} icon={<Columns3 />} onClick={() => { runRichTableSelectionCommand(editor, "select-column"); }} />
+      {kind !== "table" && (
+        <RichContextButton label={t("Select table")} icon={<SquareMousePointer />} onClick={() => { runRichTableSelectionCommand(editor, "select-table"); }} />
+      )}
+      {kind === "table" && (
+        <>
+          <span className="rich-context-divider" aria-hidden="true" />
+          <RichContextButton label={t("Delete table")} icon={<Trash2 />} danger onClick={run("delete-table")} />
+        </>
+      )}
+    </>
+  );
+}
+
 function RichContextButton({
   active = false,
+  danger = false,
+  disabled = false,
   icon,
   label,
   onClick
 }: {
   active?: boolean;
+  danger?: boolean;
+  disabled?: boolean;
   icon: ReactNode;
   label: string;
   onClick: () => void;
 }) {
   return (
     <button
-      className={active ? "active" : undefined}
+      className={[active ? "active" : "", danger ? "danger" : ""].filter(Boolean).join(" ") || undefined}
       type="button"
       title={label}
       aria-label={label}
       aria-pressed={active || undefined}
+      disabled={disabled}
       onClick={onClick}
     >
       {icon}
@@ -1347,13 +1467,93 @@ function runRichTableCommand(editor: Editor | null, command: RichTableCommand): 
     case "move-row-down":
     case "move-column-left":
     case "move-column-right": {
+      const selectedLine = richSelectedTableLine(editor);
       const transaction = richTableStructureTransaction(editor.state, command);
       if (!transaction) return false;
       editor.view.dispatch(transaction);
+
+      // Keep what the user worked with: a selected row or column stays selected
+      // at its new place, a cursor stays a cursor in the moved cell.
+      const position = richTablePosition(editor.state);
+      if (position) {
+        const nextSelection = selectedLine
+          ? richTableLineSelection(editor.state, position.tablePos, selectedLine, selectedLine === "row" ? position.row : position.column)
+          : richTableCellCursor(editor.state, position.tablePos, position.row, position.column);
+        if (nextSelection) editor.view.dispatch(editor.state.tr.setSelection(nextSelection));
+      }
       editor.commands.focus();
       return true;
     }
   }
+}
+
+function richSelectedTableLine(editor: Editor): "row" | "column" | null {
+  const selection = editor.state.selection;
+  if (!(selection instanceof CellSelection)) return null;
+  if (selection.isRowSelection() && !selection.isColSelection()) return "row";
+  if (selection.isColSelection() && !selection.isRowSelection()) return "column";
+  return null;
+}
+
+/**
+ * Positions the table bar against the selected cells themselves; the default
+ * reference for a cell selection is not the cells' area.
+ */
+function richCellSelectionReference(editor: Editor): { getBoundingClientRect: () => DOMRect; getClientRects: () => DOMRect[] } | null {
+  const selection = editor.state.selection;
+  if (editor.isDestroyed || !(selection instanceof CellSelection)) return null;
+
+  let top = Infinity;
+  let left = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  selection.forEachCell((_cell, position) => {
+    const dom = editor.view.nodeDOM(position);
+    if (!(dom instanceof HTMLElement)) return;
+    const rect = dom.getBoundingClientRect();
+    top = Math.min(top, rect.top);
+    left = Math.min(left, rect.left);
+    right = Math.max(right, rect.right);
+    bottom = Math.max(bottom, rect.bottom);
+  });
+  if (!Number.isFinite(top)) return null;
+
+  const rect = new DOMRect(left, top, right - left, bottom - top);
+  return { getBoundingClientRect: () => rect, getClientRects: () => [rect] };
+}
+
+function sameRichTablePosition(left: RichTablePosition | null, right: RichTablePosition | null): boolean {
+  return left === right || Boolean(left && right
+    && left.tablePos === right.tablePos
+    && left.row === right.row
+    && left.column === right.column
+    && left.rowCount === right.rowCount
+    && left.columnCount === right.columnCount);
+}
+
+/** Ctrl+Enter in a table: a new row below the cursor, with the cursor in it. */
+function insertRichTableRowBelow(editor: Editor): boolean {
+  const position = richTablePosition(editor.state);
+  if (!position || !editor.commands.addRowAfter()) return false;
+  editor.view.dispatch(moveCursorToRichTableCell(editor.state.tr, position.tablePos, position.row + 1, position.column).scrollIntoView());
+  return true;
+}
+
+function appendRichTableLine(editor: Editor, position: RichTablePosition, kind: "row" | "column"): boolean {
+  const row = kind === "row" ? position.rowCount - 1 : position.row;
+  const column = kind === "column" ? position.columnCount - 1 : position.column;
+  const cursor = richTableCellCursor(editor.state, position.tablePos, row, column);
+  if (!cursor) return false;
+
+  editor.view.dispatch(editor.state.tr.setSelection(cursor));
+  const added = kind === "row" ? editor.commands.addRowAfter() : editor.commands.addColumnAfter();
+  if (!added) return false;
+
+  const nextRow = kind === "row" ? row + 1 : row;
+  const nextColumn = kind === "column" ? column + 1 : column;
+  editor.view.dispatch(moveCursorToRichTableCell(editor.state.tr, position.tablePos, nextRow, nextColumn).scrollIntoView());
+  editor.commands.focus();
+  return true;
 }
 
 function runRichTableSelectionCommand(editor: Editor | null, command: RichTableSelectionCommand): boolean {
