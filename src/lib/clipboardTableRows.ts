@@ -8,6 +8,7 @@ import {
   rowsToMarkdownTable,
   markdownTextContainsOnlyTable
 } from "./tables";
+import { isRichTextClipboardHtml } from "./clipboard";
 import { protectTableCellLineBreaks, restoreTableCellLineBreaks, stripInlineMarkdown } from "./text";
 
 export type ClipboardTableSource = "html" | "markdown" | "tsv" | "csv" | "space" | "lines";
@@ -79,7 +80,7 @@ export function clipboardTableRowsFromData(data: { text?: string | null; html?: 
 
   // Comma and space-column detection are guesses. Rich text from a web page or
   // a word processor is prose unless it carries a real table.
-  if (hasRichTextHtml(html)) return null;
+  if (isRichTextClipboardHtml(html) && !/<table[\s>]/i.test(html)) return null;
 
   if (text.includes(",")) {
     const rows = parseCsvRows(text);
@@ -117,12 +118,6 @@ function clipboardContainsEmbeddedTable(data: { text?: string | null; html?: str
   return /<table[\s>]/i.test(data.html ?? "")
     || Boolean(markdownTableTextToRows(data.markdown ?? ""))
     || Boolean(markdownTableTextToRows(data.text ?? ""));
-}
-
-function hasRichTextHtml(html: string): boolean {
-  if (!html.trim() || /<table[\s>]/i.test(html)) return false;
-  // Code editors put plain source on the clipboard as preformatted HTML.
-  return !/<pre[\s>]|white-space\s*:\s*pre/i.test(html);
 }
 
 const SENTENCE_END = /[.!?;:。！？；：…]$/;

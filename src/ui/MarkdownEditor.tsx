@@ -27,7 +27,6 @@ import { deleteSelectionRanges } from "../lib/selectionDelete";
 import { shouldHandleDefaultCopy } from "../lib/selectionCopy";
 import { getScrollProgress, setScrollProgress } from "../lib/scrollSync";
 import type { TextRange } from "../lib/editorCommands";
-import type { CopyMode } from "../types";
 import { createEditorStateFromSnapshot, createEditorStateSnapshot, createExternalDocumentSyncTransaction, type EditorStateSnapshot } from "../lib/editorStateSnapshots";
 import type { DocumentCursorPosition } from "../lib/documentMetrics";
 import { uniqueSourceSelectionForText } from "../lib/sourceSelectionText";
@@ -40,6 +39,10 @@ import {
   type SourceEditorSyncScheduler
 } from "../lib/sourceEditorSync";
 import { beginEditorInput, commitEditorInput, markStartupMilestone } from "../lib/performanceDiagnostics";
+import { isPlainPasteShortcut } from "../lib/appShortcuts";
+
+// The source editor copies Markdown as written; other formats are explicit commands.
+const SOURCE_COPY_MODE = "source" as const;
 
 type EditorSelectionPayload = TextRange & {
   ranges: TextRange[];
@@ -51,7 +54,6 @@ type MarkdownEditorProps = {
   editorStateSnapshot?: EditorStateSnapshot;
   markdown: string;
   placeholderText: string;
-  copyMode: CopyMode;
   onChange: (markdown: string) => void;
   onSelectionChange: (selection: EditorSelectionPayload) => void;
   onEditorViewChange?: (sessionKey: string, view: EditorView | null) => void;
@@ -74,7 +76,6 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
     editorStateSnapshot,
     markdown: value,
     placeholderText,
-    copyMode,
     onChange,
     onSelectionChange,
     onEditorViewChange,
@@ -97,7 +98,6 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
   const editorSessionKeyRef = useRef(editorSessionKey);
   const valueRef = useRef(value);
   const synchronizedMarkdownRef = useRef(value);
-  const copyModeRef = useRef(copyMode);
   const onChangeRef = useRef(onChange);
   const onSelectionChangeRef = useRef(onSelectionChange);
   const onEditorViewChangeRef = useRef(onEditorViewChange);
@@ -113,7 +113,6 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
 
   editorSessionKeyRef.current = editorSessionKey;
   valueRef.current = value;
-  copyModeRef.current = copyMode;
   onChangeRef.current = onChange;
   onSelectionChangeRef.current = onSelectionChange;
   onEditorViewChangeRef.current = onEditorViewChange;
@@ -144,7 +143,6 @@ export const MarkdownEditor = forwardRef<EditorView | null, MarkdownEditorProps>
       onTableContextMenuRef,
       onOpenLinkRef,
       onToastRef,
-      copyModeRef,
       placeholderCompartment: placeholderCompartmentRef.current,
       placeholderText,
       sourceEditorSync: sourceEditorSyncRef.current!
@@ -250,7 +248,6 @@ function changedLines(doc: Text, from: number, to: number): Array<{ from: number
 }
 
 type EditorExtensionRefs = {
-  copyModeRef: MutableRefObject<CopyMode>;
   onInsertTableRequestRef: MutableRefObject<(() => void) | undefined>;
   onTableContextMenuRef: MutableRefObject<((position: { left: number; top: number }) => void) | undefined>;
   onOpenLinkRef: MutableRefObject<((href: string) => void) | undefined>;
@@ -261,7 +258,6 @@ type EditorExtensionRefs = {
 };
 
 function createEditorExtensions({
-  copyModeRef,
   onInsertTableRequestRef,
   onTableContextMenuRef,
   onOpenLinkRef,
@@ -270,6 +266,8 @@ function createEditorExtensions({
   placeholderText,
   sourceEditorSync
 }: EditorExtensionRefs): Extension {
+  // Set by Ctrl+Shift+V so the following paste skips table and Markdown handling.
+  let plainPasteRequested = false;
   return [
     lineNumbers(),
     EditorState.allowMultipleSelections.of(true),
@@ -382,6 +380,7 @@ function createEditorExtensions({
         return true;
       },
       keydown(event, view) {
+        plainPasteRequested = isPlainPasteShortcut(event);
         if ((event.key === "Backspace" || event.key === "Delete") && !event.ctrlKey && !event.metaKey && !event.altKey) {
           const edit = applySelectedTableCellsClear(view.state.doc.toString(), view.state.selection.ranges);
           if (edit) {
@@ -440,19 +439,12 @@ function createEditorExtensions({
           event,
           clipboardPayloadForCopyMode(
             markdownRangesToClipboardPayload(view.state.doc.toString(), selections),
-            copyModeRef.current
+            SOURCE_COPY_MODE
           )
         );
         if (!copied) return false;
 
         event.preventDefault();
-        onToastRef.current(copyModeRef.current === "compact"
-          ? "Copied compact Markdown selection"
-          : copyModeRef.current === "source"
-            ? "Copied Markdown selection"
-          : copyModeRef.current === "smart"
-            ? "Copied clean text, HTML, and Markdown"
-            : "Copied clean text selection");
         return true;
       },
       cut(event, view) {
@@ -464,7 +456,7 @@ function createEditorExtensions({
         if (edit) {
           const copied = writeClipboardEventData(
             event,
-            clipboardPayloadForCopyMode(markdownRangesToClipboardPayload(source, selections), copyModeRef.current)
+            clipboardPayloadForCopyMode(markdownRangesToClipboardPayload(source, selections), SOURCE_COPY_MODE)
           );
           if (!copied) return false;
 
@@ -479,7 +471,7 @@ function createEditorExtensions({
 
         const copied = writeClipboardEventData(
           event,
-          clipboardPayloadForCopyMode(markdownRangesToClipboardPayload(source, selections), copyModeRef.current)
+          clipboardPayloadForCopyMode(markdownRangesToClipboardPayload(source, selections), SOURCE_COPY_MODE)
         );
         if (!copied) return false;
 
@@ -489,16 +481,13 @@ function createEditorExtensions({
           scrollIntoView: true
         });
         event.preventDefault();
-        onToastRef.current(copyModeRef.current === "compact"
-          ? "Cut compact Markdown"
-          : copyModeRef.current === "source"
-            ? "Cut Markdown"
-          : copyModeRef.current === "smart"
-            ? "Cut clean text, HTML, and Markdown"
-            : "Cut clean text");
         return true;
       },
       paste(event, view) {
+        if (plainPasteRequested) {
+          plainPasteRequested = false;
+          return false;
+        }
         const text = event.clipboardData?.getData("text/plain") ?? "";
         const html = event.clipboardData?.getData("text/html") ?? "";
         const markdown = event.clipboardData?.getData("text/markdown") ?? "";

@@ -3535,6 +3535,13 @@ kbd {
   border-bottom: 0;
 }
 
+.settings-row .settings-row-note {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 .settings-row > span {
   color: var(--text);
   font-weight: 690;

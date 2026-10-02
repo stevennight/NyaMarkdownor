@@ -60,3 +60,13 @@ export function getTableSelectionShortcut(event: KeyboardShortcutEvent): TableSe
   if (key === "r") return "row";
   return null;
 }
+
+/** Ctrl+Shift+V (Cmd+Shift+V): paste the clipboard as plain text. */
+export function isPlainPasteShortcut(event: KeyboardShortcutEvent): boolean {
+  return (event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "v";
+}
+
+/** Ctrl+Shift+C (Cmd+Shift+C): copy the selection, or the document, as Markdown. */
+export function isCopyMarkdownShortcut(event: KeyboardShortcutEvent): boolean {
+  return (event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "c";
+}

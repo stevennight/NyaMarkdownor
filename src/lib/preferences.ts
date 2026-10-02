@@ -1,4 +1,4 @@
-import type { AppPreferences, BackupPreferences, CopyMode, EditorDensity, LanguagePreference, SidebarPage, TableHeightMode, ThemeMode, ViewMode } from "../types";
+import type { AppPreferences, BackupPreferences, EditorDensity, LanguagePreference, SidebarPage, TableHeightMode, ThemeMode, ViewMode } from "../types";
 import { queueDesktopStoreTextWrite, readDesktopStoreText } from "./desktopStore";
 import { defaultPaneLayout, normalizePaneLayout } from "./paneLayout";
 
@@ -7,7 +7,6 @@ const PREFERENCES_KEY = "nya-markdownor-preferences-v1";
 type PreferencesInput = Omit<Partial<AppPreferences>, "backup"> & {
   backup?: Partial<BackupPreferences> | null;
   editorLineWidth?: number;
-  smartCopy?: boolean;
 };
 
 export type PreferencesRecord = {
@@ -39,7 +38,6 @@ export const defaultPreferences: AppPreferences = {
   sidebarVisible: true,
   sidebarPage: "outline",
   autoSave: true,
-  copyMode: "compact",
   softSyntax: true,
   editorFontSize: 15,
   editorContentWidth: 85,
@@ -113,7 +111,6 @@ export function normalizePreferences(value: PreferencesInput): AppPreferences {
     sidebarVisible: typeof value.sidebarVisible === "boolean" ? value.sidebarVisible : defaultPreferences.sidebarVisible,
     sidebarPage: isSidebarPage(value.sidebarPage) ? value.sidebarPage : defaultPreferences.sidebarPage,
     autoSave: typeof value.autoSave === "boolean" ? value.autoSave : defaultPreferences.autoSave,
-    copyMode: normalizeCopyMode(value.copyMode, value.smartCopy),
     softSyntax: typeof value.softSyntax === "boolean" ? value.softSyntax : defaultPreferences.softSyntax,
     editorFontSize: clampNumber(value.editorFontSize, 13, 20, defaultPreferences.editorFontSize),
     editorContentWidth: normalizeEditorContentWidth(value.editorContentWidth, value.editorLineWidth),
@@ -123,13 +120,6 @@ export function normalizePreferences(value: PreferencesInput): AppPreferences {
     paneLayout: normalizePaneLayout(value.paneLayout),
     backup: normalizeBackupPreferences(value.backup)
   };
-}
-
-function normalizeCopyMode(value: unknown, legacySmartCopy: unknown): CopyMode {
-  if (value === "markdown") return "compact";
-  if (isCopyMode(value)) return value;
-  if (typeof legacySmartCopy === "boolean") return legacySmartCopy ? "smart" : "compact";
-  return defaultPreferences.copyMode;
 }
 
 function normalizeEditorContentWidth(value: unknown, legacyLineWidth: unknown): number {
@@ -201,10 +191,6 @@ function isSidebarPage(value: unknown): value is SidebarPage {
 
 function isEditorDensity(value: unknown): value is EditorDensity {
   return value === "compact" || value === "comfortable" || value === "spacious";
-}
-
-function isCopyMode(value: unknown): value is CopyMode {
-  return value === "source" || value === "compact" || value === "smart" || value === "plain";
 }
 
 function isTableHeightMode(value: unknown): value is TableHeightMode {

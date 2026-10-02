@@ -136,6 +136,27 @@ export function clipboardPayloadForCopyMode(payload: ClipboardPayload, copyMode:
   };
 }
 
+/**
+ * Whether clipboard HTML is formatted document content (a web page, a word
+ * processor) rather than plain source that a code editor wrapped in
+ * preformatted HTML.
+ */
+export function isRichTextClipboardHtml(html: string | null | undefined): boolean {
+  if (!html?.trim()) return false;
+  return !/<pre[\s>]|white-space\s*:\s*pre/i.test(html);
+}
+
+/** The language VS Code reports for copied editor text, if any. */
+export function vscodeClipboardLanguage(data: string | null | undefined): string | null {
+  if (!data) return null;
+  try {
+    const mode = (JSON.parse(data) as { mode?: unknown }).mode;
+    return typeof mode === "string" && /^[\w#+.-]{1,40}$/.test(mode) ? mode : null;
+  } catch {
+    return null;
+  }
+}
+
 export function explicitMarkdownFromClipboard(data: { markdown?: string | null }): string | null {
   return typeof data.markdown === "string" && data.markdown.length > 0
     ? normalizeMarkdownLineEndings(data.markdown)

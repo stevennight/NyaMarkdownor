@@ -44,7 +44,6 @@ export type AppPreferences = {
   sidebarVisible: boolean;
   sidebarPage: SidebarPage;
   autoSave: boolean;
-  copyMode: CopyMode;
   softSyntax: boolean;
   editorFontSize: number;
   editorContentWidth: number;

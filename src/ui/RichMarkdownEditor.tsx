@@ -35,9 +35,10 @@ import { browserTitleLinkFromClipboard } from "../lib/richLinkPaste";
 import { findRichTextMatches, richSearchHighlightExtension, setRichSearchHighlights } from "../lib/richSearch";
 import { richCodePasteTransaction, richMarkdownPasteTransaction, richMarkdownSourceFromClipboard, richPasteContext, richTableCellPasteTransaction } from "../lib/richMarkdownPaste";
 import type { Translator } from "../lib/i18n";
-import type { CopyMode } from "../types";
 import { markdownRangeToClipboardPayload } from "../lib/markdown";
 import { beginEditorInput, commitEditorInput, markStartupMilestone } from "../lib/performanceDiagnostics";
+import { isPlainPasteShortcut } from "../lib/appShortcuts";
+import { convertWordListParagraphs, richPasteSliceKeepingBlockType } from "../lib/richPastedHtml";
 
 const EMPTY_SEARCH_MATCHES: readonly TextRange[] = [];
 
@@ -89,7 +90,6 @@ type RichMarkdownEditorProps = {
   documentFilePath: string | null;
   markdown: string;
   t: Translator;
-  copyMode: CopyMode;
   onChange: (markdown: string, source: RichMarkdownSyncSource) => void;
   onHistoryAction: (action: RichDocumentHistoryAction) => boolean;
   onTableContextChange: (active: boolean) => void;
@@ -110,7 +110,7 @@ type RichMarkdownEditorProps = {
 };
 
 export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, RichMarkdownEditorProps>(function RichMarkdownEditor(
-  { documentFilePath, markdown, t, copyMode, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onReady, onActiveHeadingIndexChange, onOpenLink, onEditLink, onTableContextMenu, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
+  { documentFilePath, markdown, t, onChange, onHistoryAction, onTableContextChange, onTableSelectionChange, onSelectionChange, onReady, onActiveHeadingIndexChange, onOpenLink, onEditLink, onTableContextMenu, onToast, scrollProgress = 0, onScrollProgress, selection, selectionText, searchMatches = EMPTY_SEARCH_MATCHES, activeSearchRange = null },
   forwardedRef
 ) {
   const tRef = useRef(t);
@@ -125,8 +125,9 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   const onEditLinkRef = useRef(onEditLink);
   const onTableContextMenuRef = useRef(onTableContextMenu);
   const onToastRef = useRef(onToast);
-  const copyModeRef = useRef(copyMode);
   const onScrollProgressRef = useRef(onScrollProgress);
+  // Set by Ctrl+Shift+V so the following paste is inserted as plain text.
+  const plainPasteRequestedRef = useRef(false);
   const scrollHostRef = useRef<HTMLDivElement | null>(null);
   // The bubble menus reposition on scroll of this element, not the window.
   const [bubbleScrollTarget, setBubbleScrollTarget] = useState<HTMLDivElement | null>(null);
@@ -156,7 +157,6 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
   onEditLinkRef.current = onEditLink;
   onTableContextMenuRef.current = onTableContextMenu;
   onToastRef.current = onToast;
-  copyModeRef.current = copyMode;
   onScrollProgressRef.current = onScrollProgress;
   if (!markdownSyncRef.current) {
     markdownSyncRef.current = createRichMarkdownSyncScheduler((nextMarkdown, source) => {
@@ -212,7 +212,10 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
         class: "tiptap-markdown-editor",
         spellcheck: "true"
       },
+      transformPastedHTML: (html) => convertWordListParagraphs(html),
+      transformPasted: (slice, view) => richPasteSliceKeepingBlockType(slice, view.state),
       handleKeyDown: (_view, event) => {
+        plainPasteRequestedRef.current = isPlainPasteShortcut(event);
         if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "a") {
           const currentEditor = editorRef.current;
           const nextSelection = currentEditor ? nextRichTableSelectAllSelection(currentEditor.state) : null;
@@ -291,34 +294,33 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
           onTableContextMenuRef.current?.({ left: event.clientX, top: event.clientY });
           return true;
         },
-        copy: (_view, event) => {
-          const currentEditor = editorRef.current;
+        copy: (view, event) => {
+          const currentEditor = richEditorForView(view, editorRef.current);
           if (!currentEditor || currentEditor.isDestroyed || !shouldHandleDefaultCopy(!currentEditor.state.selection.empty)) return false;
 
-          const payload = richSelectionClipboardContent(currentEditor);
-          const copied = payload
-            ? writeClipboardEventData(event, clipboardPayloadForCopyMode(payload, copyModeRef.current))
-            : null;
-          if (!copied) return false;
+          if (!writeRichSelectionToClipboard(currentEditor, event)) return false;
 
           event.preventDefault();
-          onToastRef.current(copyModeRef.current === "compact"
-            ? "Copied compact Markdown selection"
-            : copyModeRef.current === "source"
-              ? "Copied Markdown selection"
-            : copyModeRef.current === "smart"
-              ? "Copied clean text, HTML, and Markdown"
-              : "Copied clean text selection");
           return true;
         },
-        paste: (_view, event) => {
-          const currentEditor = editorRef.current;
+        cut: (view, event) => {
+          const currentEditor = richEditorForView(view, editorRef.current);
+          if (!currentEditor || currentEditor.isDestroyed || currentEditor.state.selection.empty) return false;
+          if (!writeRichSelectionToClipboard(currentEditor, event)) return false;
+
+          event.preventDefault();
+          view.dispatch(view.state.tr.deleteSelection().scrollIntoView().setMeta("uiEvent", "cut"));
+          return true;
+        },
+        paste: (view, event) => {
+          const currentEditor = richEditorForView(view, editorRef.current);
           if (!currentEditor || currentEditor.isDestroyed) return false;
 
           const clipboard = {
             text: event.clipboardData?.getData("text/plain") ?? "",
             html: event.clipboardData?.getData("text/html") ?? "",
-            markdown: event.clipboardData?.getData("text/markdown") ?? ""
+            markdown: event.clipboardData?.getData("text/markdown") ?? "",
+            vscodeEditorData: event.clipboardData?.getData("vscode-editor-data") ?? ""
           };
           const pasteContext = richPasteContext(currentEditor.state);
           if (pasteContext === "code-block" || pasteContext === "inline-code") {
@@ -330,6 +332,15 @@ export const RichMarkdownEditor = forwardRef<RichMarkdownEditorHandle | null, Ri
           }
 
           const insideSingleCell = pasteContext === "table-cell" && !(currentEditor.state.selection instanceof CellSelection);
+          if (plainPasteRequestedRef.current) {
+            plainPasteRequestedRef.current = false;
+            if (!insideSingleCell) return false;
+            const plainCellTransaction = richTableCellPasteTransaction(currentEditor.state, clipboard.text, null);
+            if (!plainCellTransaction) return false;
+            currentEditor.view.dispatch(plainCellTransaction);
+            event.preventDefault();
+            return true;
+          }
           const table = clipboardRowsForTablePaste(clipboard);
           const pastesTextIntoCell = insideSingleCell && table?.source === "lines";
 
@@ -846,6 +857,23 @@ function richSelectionClipboardContent(editor: Editor | null): RichMarkdownClipb
     ...payload,
     selected: !empty
   };
+}
+
+/**
+ * The visual editor copies rich text for word processors and chat apps, clean
+ * text without Markdown markers for plain-text targets, and the Markdown source
+ * for Markdown-aware targets, including this editor.
+ */
+// Tiptap links the view's DOM to its editor. In development React mounts
+// twice, so the ref can briefly hold the discarded instance.
+function richEditorForView(view: Editor["view"], fallback: Editor | null): Editor | null {
+  const owner = (view.dom as HTMLElement & { editor?: Editor }).editor;
+  return owner && !owner.isDestroyed ? owner : fallback;
+}
+
+function writeRichSelectionToClipboard(editor: Editor, event: ClipboardEvent): boolean {
+  const payload = richSelectionClipboardContent(editor);
+  return Boolean(payload && writeClipboardEventData(event, clipboardPayloadForCopyMode(payload, "smart")));
 }
 
 function richTableClipboardContent(editor: Editor | null): RichTableClipboardContent | null {

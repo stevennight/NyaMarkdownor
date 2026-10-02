@@ -17,7 +17,12 @@ export function richSelectionDocument(doc: ProseMirrorNode, from: number, to: nu
   let content = doc.slice(from, to).content;
   const shared = $from.node(depth);
 
-  if (depth > 0 && LIST_TYPES.has(shared.type.name)) {
+  if (shared.isTextblock) {
+    // Inline content needs a block: code stays code, anything else becomes a
+    // paragraph so a partial heading does not gain "#".
+    const block = shared.type.spec.code ? shared.type : doc.type.schema.nodes.paragraph;
+    content = Fragment.from(block.create(shared.type.spec.code ? shared.attrs : null, content));
+  } else if (depth > 0 && LIST_TYPES.has(shared.type.name)) {
     const attrs = shared.type.name === "orderedList"
       ? { ...shared.attrs, start: Number(shared.attrs.start ?? 1) + $from.index(depth) }
       : shared.attrs;

@@ -49,6 +49,7 @@ const zhCN: Record<string, string> = {
   "Maximum table height (window)": "最大表格高度（窗口）",
   "Smart copy": "智能复制",
   "Default copy": "默认复制",
+  "Ctrl+C copies rich text, clean text and Markdown in the visual editor, and Markdown as written in the source editor. Ctrl+Shift+C copies Markdown; Ctrl+Shift+V pastes plain text.": "所见即所得模式下 Ctrl+C 同时复制富文本、纯文本和 Markdown；源码模式下复制原样 Markdown。Ctrl+Shift+C 复制为 Markdown，Ctrl+Shift+V 粘贴为纯文本。",
   "Markdown": "Markdown",
   "Compact MD": "紧凑 MD",
   "Source MD": "源码 MD",

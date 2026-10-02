@@ -33,4 +33,12 @@ describe("rich selection clipboard document", () => {
   it("copies text inside one block without block syntax", () => {
     expect(copied("## Heading words", "Head", "ing")).toBe("Heading");
   });
+
+  it("keeps mixed inline formatting of a partial paragraph in one paragraph", () => {
+    expect(copied("这是**粗体**文字", "是", "文")).toBe("是**粗体**文");
+  });
+
+  it("copies part of a code block as code", () => {
+    expect(copied("```js\nconst a = 1;\n```", "a", "1")).toBe("```js\na = 1\n```");
+  });
 });

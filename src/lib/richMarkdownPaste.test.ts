@@ -199,3 +199,39 @@ describe("rich paste contexts", () => {
     expect(serialize(next)).toContain("| one- x<br>- y | two |");
   });
 });
+
+describe("plain-text Markdown detection", () => {
+  it("uses rich HTML instead of a plain-text copy that only looks like Markdown", () => {
+    expect(richMarkdownSourceFromClipboard({
+      text: "1. Introduction\n2. Scope",
+      html: "<h2>1. Introduction</h2><h2>2. Scope</h2>"
+    }, parseMarkdown)).toBeNull();
+  });
+
+  it("still parses Markdown text from code editors that wrap it in preformatted HTML", () => {
+    expect(richMarkdownSourceFromClipboard({
+      text: "# Title\n\n- item",
+      html: '<div style="white-space: pre;"><div># Title</div></div>',
+      vscodeEditorData: JSON.stringify({ mode: "markdown" })
+    }, parseMarkdown)).toBe("# Title\n\n- item");
+  });
+
+  it("pastes code copied from VS Code as a fenced block in its language", () => {
+    expect(richMarkdownSourceFromClipboard({
+      text: "# comment\nprint(1)\n",
+      vscodeEditorData: JSON.stringify({ mode: "python" })
+    }, parseMarkdown)).toBe("```python\n# comment\nprint(1)\n```");
+
+    expect(richMarkdownSourceFromClipboard({
+      text: "const fence = \"```\";\nx();",
+      vscodeEditorData: JSON.stringify({ mode: "typescript" })
+    }, parseMarkdown)).toBe("````typescript\nconst fence = \"```\";\nx();\n````");
+  });
+
+  it("leaves single-line VS Code code to the normal inline paste", () => {
+    expect(richMarkdownSourceFromClipboard({
+      text: "- not a list",
+      vscodeEditorData: JSON.stringify({ mode: "javascript" })
+    }, parseMarkdown)).toBeNull();
+  });
+});

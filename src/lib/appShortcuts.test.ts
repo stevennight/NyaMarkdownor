@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { areAppShortcutsBlocked, getTabNavigationShortcut, getTableSelectionShortcut } from "./appShortcuts";
+import { areAppShortcutsBlocked, getTabNavigationShortcut, getTableSelectionShortcut, isCopyMarkdownShortcut, isPlainPasteShortcut } from "./appShortcuts";
 
 type ShortcutEvent = Parameters<typeof getTableSelectionShortcut>[0];
 
@@ -72,5 +72,24 @@ describe("areAppShortcutsBlocked", () => {
 
   it.each(Object.keys(clear) as Array<keyof typeof clear>)("blocks shortcuts for %s", (key) => {
     expect(areAppShortcutsBlocked({ ...clear, [key]: true })).toBe(true);
+  });
+});
+
+describe("clipboard shortcuts", () => {
+  const key = (value: string, modifiers: Partial<Record<"ctrlKey" | "metaKey" | "shiftKey" | "altKey", boolean>> = {}) => ({
+    key: value,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    altKey: false,
+    ...modifiers
+  });
+
+  it("recognises Ctrl+Shift+V and Ctrl+Shift+C", () => {
+    expect(isPlainPasteShortcut(key("V", { ctrlKey: true, shiftKey: true }))).toBe(true);
+    expect(isPlainPasteShortcut(key("v", { metaKey: true, shiftKey: true }))).toBe(true);
+    expect(isPlainPasteShortcut(key("v", { ctrlKey: true }))).toBe(false);
+    expect(isCopyMarkdownShortcut(key("C", { ctrlKey: true, shiftKey: true }))).toBe(true);
+    expect(isCopyMarkdownShortcut(key("c", { ctrlKey: true, shiftKey: true, altKey: true }))).toBe(false);
   });
 });

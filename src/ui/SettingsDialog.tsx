@@ -13,7 +13,7 @@ import {
   X,
   type LucideIcon
 } from "lucide-react";
-import type { BackupPreferences, CopyMode, EditorDensity, LanguagePreference, TableHeightMode, ThemeMode, ViewMode } from "../types";
+import type { BackupPreferences, EditorDensity, LanguagePreference, TableHeightMode, ThemeMode, ViewMode } from "../types";
 import type { BuildInfo } from "../lib/buildInfo";
 import type { ApplicationUpdateState } from "../lib/appUpdates";
 import type { FileAssociationScope } from "../lib/fileIo";
@@ -28,7 +28,6 @@ type SettingsDialogProps = {
   autoSave: boolean;
   autoSaveAvailable: boolean;
   fileAssociationsAvailable: boolean;
-  copyMode: CopyMode;
   softSyntax: boolean;
   editorFontSize: number;
   editorContentWidth: number;
@@ -47,7 +46,6 @@ type SettingsDialogProps = {
   onSidebarVisibleChange: (value: boolean) => void;
   onAutoSaveChange: (value: boolean) => void;
   onManageFileAssociation: (scope: FileAssociationScope) => void;
-  onCopyModeChange: (value: CopyMode) => void;
   onSoftSyntaxChange: (value: boolean) => void;
   onEditorFontSizeChange: (value: number) => void;
   onEditorContentWidthChange: (value: number) => void;
@@ -79,7 +77,6 @@ export function SettingsDialog({
   autoSave,
   autoSaveAvailable,
   fileAssociationsAvailable,
-  copyMode,
   softSyntax,
   editorFontSize,
   editorContentWidth,
@@ -98,7 +95,6 @@ export function SettingsDialog({
   onSidebarVisibleChange,
   onAutoSaveChange,
   onManageFileAssociation,
-  onCopyModeChange,
   onSoftSyntaxChange,
   onEditorFontSizeChange,
   onEditorContentWidthChange,
@@ -295,17 +291,10 @@ export function SettingsDialog({
                 <section className="settings-section">
                   <div className="settings-section-title">{t("Editing")}</div>
                   <div className="settings-row">
-                    <span>{t("Default copy")}</span>
-                    <SegmentedControl
-                      value={copyMode}
-                      options={[
-                        ["compact", t("Compact MD")],
-                        ["source", t("Source MD")],
-                        ["smart", t("Multi-format")],
-                        ["plain", t("Plain text")]
-                      ]}
-                      onChange={(value) => onCopyModeChange(value as CopyMode)}
-                    />
+                    <span>{t("Copy")}</span>
+                    <span className="settings-row-note">
+                      {t("Ctrl+C copies rich text, clean text and Markdown in the visual editor, and Markdown as written in the source editor. Ctrl+Shift+C copies Markdown; Ctrl+Shift+V pastes plain text.")}
+                    </span>
                   </div>
                   <ToggleRow label={t("Soft syntax")} checked={softSyntax} onChange={onSoftSyntaxChange} />
                 </section>

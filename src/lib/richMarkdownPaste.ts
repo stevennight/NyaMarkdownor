@@ -1,7 +1,7 @@
 import type { JSONContent } from "@tiptap/core";
 import { Fragment, Slice } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
-import { explicitMarkdownFromClipboard } from "./clipboard";
+import { explicitMarkdownFromClipboard, isRichTextClipboardHtml, vscodeClipboardLanguage } from "./clipboard";
 import { normalizeMarkdownLineEndings } from "./lineEndings";
 
 const MAX_PLAIN_MARKDOWN_PASTE_LENGTH = 1024 * 1024;
@@ -19,7 +19,12 @@ const EXPLICIT_MARKDOWN_BLOCK_TYPES = new Set([
 export type RichMarkdownClipboardData = {
   markdown?: string | null;
   text?: string | null;
+  html?: string | null;
+  /** The `vscode-editor-data` clipboard entry VS Code writes. */
+  vscodeEditorData?: string | null;
 };
+
+const PLAIN_TEXT_LANGUAGES = new Set(["markdown", "plaintext", "text", "mdx"]);
 
 export function richMarkdownSourceFromClipboard(
   data: RichMarkdownClipboardData,
@@ -30,6 +35,17 @@ export function richMarkdownSourceFromClipboard(
 
   const text = data.text ?? "";
   if (!text.trim() || text.length > MAX_PLAIN_MARKDOWN_PASTE_LENGTH) return null;
+
+  // Code copied from VS Code arrives as a code block in its language, so lines
+  // such as "# comment" or "- item" stay code.
+  const language = vscodeClipboardLanguage(data.vscodeEditorData);
+  if (language && !PLAIN_TEXT_LANGUAGES.has(language.toLowerCase())) {
+    return normalizeMarkdownLineEndings(text).includes("\n") ? fencedCodeBlock(text, language) : null;
+  }
+
+  // Formatted HTML (a web page, a word processor) is the better source; its
+  // plain-text copy only looks like Markdown by accident.
+  if (isRichTextClipboardHtml(data.html)) return null;
 
   const parsed = parseMarkdownSafely(normalizeMarkdownLineEndings(text), parseMarkdown);
   return parsed && containsExplicitMarkdownStructure(parsed)
@@ -57,6 +73,13 @@ export function richMarkdownPasteTransaction(state: EditorState, document: JSONC
   const paragraphStart = selection.$from.before(1);
   const paragraphEnd = paragraphStart + selection.$from.parent.nodeSize;
   return state.tr.replace(paragraphStart, paragraphEnd, new Slice(content, 0, 0)).scrollIntoView();
+}
+
+function fencedCodeBlock(text: string, language: string): string {
+  const code = normalizeMarkdownLineEndings(text).replace(/\n+$/, "");
+  const longestFence = Math.max(2, ...(code.match(/`{3,}/g) ?? []).map((fence) => fence.length));
+  const fence = "`".repeat(longestFence + 1);
+  return `${fence}${language}\n${code}\n${fence}`;
 }
 
 function trimRichMarkdownPasteBoundaries(source: string): string {

@@ -33,26 +33,24 @@ describe("preferences", () => {
       theme: "dark"
     });
     expect(defaultPreferences).toMatchObject({
-      copyMode: "compact",
       editorContentWidth: 85
     });
   });
 
-  it("migrates legacy copy and pixel-width preferences", () => {
+  it("migrates legacy pixel-width preferences", () => {
     expect(normalizePreferences({
-      smartCopy: true,
       editorLineWidth: 920
     } as never)).toMatchObject({
-      copyMode: "smart",
       editorContentWidth: 85
     });
-    expect(normalizePreferences({ smartCopy: false } as never).copyMode).toBe("compact");
   });
 
-  it("keeps compact Markdown as a valid persisted copy mode", () => {
-    expect(normalizePreferences({ copyMode: "compact" }).copyMode).toBe("compact");
-    expect(normalizePreferences({ copyMode: "source" }).copyMode).toBe("source");
-    expect(normalizePreferences({ copyMode: "markdown" } as never).copyMode).toBe("compact");
+  it("drops the retired default copy mode preferences", () => {
+    // Copy now follows the editing surface: the visual editor writes rich text,
+    // clean text and Markdown; the source editor copies Markdown as written.
+    const migrated = normalizePreferences({ copyMode: "compact", smartCopy: true } as never);
+    expect(migrated).not.toHaveProperty("copyMode");
+    expect(migrated).not.toHaveProperty("smartCopy");
   });
 
   it("migrates old preference records with default backup settings", () => {
